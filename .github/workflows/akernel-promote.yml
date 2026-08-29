@@ -57,15 +57,15 @@ jobs:
         candidate_dir="${RUNNER_TEMP}/gvisor-candidate"
         manifest="${candidate_dir}/manifest.json"
         test -f "${manifest}"
-        test -f "${candidate_dir}/runsc.x86_64"
-        test -f "${candidate_dir}/runsc.x86_64.sha512"
+        test -f "${candidate_dir}/gvisor.tar.bz2"
+        test -f "${candidate_dir}/gvisor.tar.bz2.sha512"
 
         repository="$(jq -er '.repository' "${manifest}")"
         commit="$(jq -er '.commit' "${manifest}")"
         upstream_tag="$(jq -er '.upstream_tag' "${manifest}")"
         release_tag="$(jq -er '.release_tag' "${manifest}")"
         manifest_run_id="$(jq -er '.workflow_run_id' "${manifest}")"
-        manifest_sha512="$(jq -er '.runsc_sha512' "${manifest}")"
+        manifest_sha512="$(jq -er '.tarball_sha512' "${manifest}")"
 
         test "${repository}" = "${GITHUB_REPOSITORY}"
         test "${manifest_run_id}" = "${CANDIDATE_RUN_ID}"
@@ -82,11 +82,15 @@ jobs:
         test "$(jq -r '.head_sha' <<<"${run_json}")" = "${commit}"
 
         cd "${candidate_dir}"
-        sha512sum --check runsc.x86_64.sha512
-        actual_sha512="$(sha512sum runsc.x86_64 | cut -d ' ' -f 1)"
+        sha512sum --check gvisor.tar.bz2.sha512
+        actual_sha512="$(sha512sum gvisor.tar.bz2 | cut -d ' ' -f 1)"
         test "${actual_sha512}" = "${manifest_sha512}"
-        chmod 0755 runsc.x86_64
-        ./runsc.x86_64 --version
+
+        verify_dir="${RUNNER_TEMP}/gvisor-verify"
+        mkdir -p "${verify_dir}"
+        tar -xjf gvisor.tar.bz2 -C "${verify_dir}"
+        "${verify_dir}/runsc" --version
+        rm -rf "${verify_dir}"
 
         git -C "${GITHUB_WORKSPACE}" fetch origin develop
         git -C "${GITHUB_WORKSPACE}" cat-file -e "${commit}^{commit}"
@@ -152,8 +156,8 @@ jobs:
 
         candidate_dir="${RUNNER_TEMP}/gvisor-candidate"
         gh release create "${RELEASE_TAG}" \
-          "${candidate_dir}/runsc.x86_64" \
-          "${candidate_dir}/runsc.x86_64.sha512" \
+          "${candidate_dir}/gvisor.tar.bz2" \
+          "${candidate_dir}/gvisor.tar.bz2.sha512" \
           "${candidate_dir}/manifest.json" \
           --repo "${GITHUB_REPOSITORY}" \
           --verify-tag \

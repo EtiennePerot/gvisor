@@ -59,19 +59,23 @@ jobs:
         set -euo pipefail
         export DEBIAN_FRONTEND=noninteractive
         sudo -E apt-get update
-        sudo -E apt-get install -y make
+        sudo -E apt-get install -y bzip2 make
 
-    - name: Build runsc
+    - name: Build release tarball
       shell: bash
       run: |
         set -euo pipefail
 
         candidate_dir="${RUNNER_TEMP}/gvisor-candidate"
-        mkdir -p "${candidate_dir}/build"
-        make copy TARGETS=runsc DESTINATION="${candidate_dir}/build"
-        install -m 0755 "${candidate_dir}/build/runsc" \
-          "${candidate_dir}/runsc.x86_64"
-        "${candidate_dir}/runsc.x86_64" --version
+        mkdir -p "${candidate_dir}"
+        make release-tarball DESTINATION="${candidate_dir}"
+        test -f "${candidate_dir}/gvisor.tar.bz2"
+
+        verify_dir="${RUNNER_TEMP}/gvisor-verify"
+        mkdir -p "${verify_dir}"
+        tar -xjf "${candidate_dir}/gvisor.tar.bz2" -C "${verify_dir}"
+        "${verify_dir}/runsc" --version
+        rm -rf "${verify_dir}"
 
     - name: Create candidate manifest
       shell: bash
@@ -82,10 +86,13 @@ jobs:
 
         candidate_dir="${RUNNER_TEMP}/gvisor-candidate"
         cd "${candidate_dir}"
-        sha512sum runsc.x86_64 >runsc.x86_64.sha512
-        runsc_sha512="$(cut -d ' ' -f 1 runsc.x86_64.sha512)"
+        sha512sum gvisor.tar.bz2 >gvisor.tar.bz2.sha512
+        tarball_sha512="$(cut -d ' ' -f 1 gvisor.tar.bz2.sha512)"
         changes="$(git -C "${GITHUB_WORKSPACE}" log \
           --format='%H %s' "${UPSTREAM_TAG}..${GITHUB_SHA}")"
+
+        contents="$(tar -tjf gvisor.tar.bz2 \
+          | sed 's#^\./##' | grep -v '/$' | sort)"
 
         jq -n \
           --arg repository "${GITHUB_REPOSITORY}" \
@@ -93,16 +100,18 @@ jobs:
           --arg upstream_tag "${UPSTREAM_TAG}" \
           --arg release_tag "${RELEASE_TAG}" \
           --arg workflow_run_id "${GITHUB_RUN_ID}" \
-          --arg runsc_sha512 "${runsc_sha512}" \
+          --arg tarball_sha512 "${tarball_sha512}" \
+          --arg contents "${contents}" \
           --arg changes "${changes}" \
           '{
-            schema: 1,
+            schema: 2,
             repository: $repository,
             commit: $commit,
             upstream_tag: $upstream_tag,
             release_tag: $release_tag,
             workflow_run_id: $workflow_run_id,
-            runsc_sha512: $runsc_sha512,
+            tarball_sha512: $tarball_sha512,
+            contents: $contents,
             changes: $changes
           }' >manifest.json
 
@@ -112,8 +121,8 @@ jobs:
       with:
         name: gvisor-candidate-${{ github.run_id }}
         path: |
-          ${{ runner.temp }}/gvisor-candidate/runsc.x86_64
-          ${{ runner.temp }}/gvisor-candidate/runsc.x86_64.sha512
+          ${{ runner.temp }}/gvisor-candidate/gvisor.tar.bz2
+          ${{ runner.temp }}/gvisor-candidate/gvisor.tar.bz2.sha512
           ${{ runner.temp }}/gvisor-candidate/manifest.json
         if-no-files-found: error
         compression-level: 0
