@@ -65,7 +65,6 @@ go_library(
         "//pkg/prometheus",
         "//pkg/sentry/checkpoint",
         "//pkg/sentry/control/controlapi",
-        "//pkg/sentry/kernel",
         "//pkg/sentry/kernel/auth",
         "//pkg/sentry/platform",
         "//pkg/state/pretty",
