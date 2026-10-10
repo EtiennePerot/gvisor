@@ -30,6 +30,7 @@ go_library(
         "metric_server.go",
         "mitigate.go",
         "mitigate_extras.go",
+        "nvproxy.go",
         "path.go",
         "pause.go",
         "pidfile.go",
