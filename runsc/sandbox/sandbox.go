@@ -1156,7 +1156,7 @@ func (s *Sandbox) createSandboxProcess(conf *config.Config, args *Args, startSyn
 		return err
 	}
 
-	gPlatform, err := platform.Lookup(conf.Platform)
+	gPlatform, err := platform.LookupHostSetup(conf.Platform)
 	if err != nil {
 		return fmt.Errorf("cannot look up platform: %w", err)
 	}
@@ -2589,7 +2589,7 @@ func (s *Sandbox) configureStdios(conf *config.Config, stdios []*os.File) error 
 // platform does not need a device file, then nil is returned.
 // devicePath may be empty to use a sane platform-specific default.
 func deviceFileForPlatform(name, devicePath string) (*fd.FD, error) {
-	p, err := platform.Lookup(name)
+	p, err := platform.LookupHostSetup(name)
 	if err != nil {
 		return nil, err
 	}
