@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package boot
+package bootapi
 
 import (
 	"slices"
@@ -20,7 +20,6 @@ import (
 	"testing"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
-	"gvisor.dev/gvisor/pkg/sentry/fsimpl/erofs"
 	"gvisor.dev/gvisor/runsc/config"
 )
 
@@ -264,73 +263,13 @@ func TestIgnoreInvalidMountOptions(t *testing.T) {
 	}
 }
 
-func TestHintsCheckCompatible(t *testing.T) {
-	for _, tc := range []struct {
-		name        string
-		masterOpts  []string
-		replicaOpts []string
-		err         string
-	}{
-		{
-			name: "empty",
-		},
-		{
-			name:        "same",
-			masterOpts:  []string{"ro", "noatime", "noexec"},
-			replicaOpts: []string{"ro", "noatime", "noexec"},
-		},
-		{
-			name:        "compatible",
-			masterOpts:  []string{"rw", "atime", "exec"},
-			replicaOpts: []string{"ro", "noatime", "noexec"},
-		},
-		{
-			name:        "unsupported",
-			masterOpts:  []string{"nofoo", "nodev"},
-			replicaOpts: []string{"foo", "dev"},
-		},
-		{
-			name:        "incompatible-ro",
-			masterOpts:  []string{"ro"},
-			replicaOpts: []string{"rw"},
-			err:         "read-write",
-		},
-		{
-			name:        "incompatible-atime",
-			masterOpts:  []string{"noatime"},
-			replicaOpts: []string{"atime"},
-			err:         "noatime",
-		},
-		{
-			name:        "incompatible-exec",
-			masterOpts:  []string{"noexec"},
-			replicaOpts: []string{"exec"},
-			err:         "noexec",
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			master := MountHint{Mount: specs.Mount{Options: tc.masterOpts}}
-			replica := specs.Mount{Options: tc.replicaOpts}
-			if err := master.checkCompatible(&replica); err != nil {
-				if !strings.Contains(err.Error(), tc.err) {
-					t.Fatalf("wrong error, want: %q, got: %q", tc.err, err)
-				}
-			} else {
-				if len(tc.err) > 0 {
-					t.Fatalf("error %q expected", tc.err)
-				}
-			}
-		})
-	}
-}
-
 // TestRootfsHintHappy tests that valid rootfs annotations can be parsed correctly.
 func TestRootfsHintHappy(t *testing.T) {
 	const imagePath = "/tmp/rootfs.img"
 	spec := &specs.Spec{
 		Annotations: map[string]string{
 			RootfsPrefix + "source":  imagePath,
-			RootfsPrefix + "type":    erofs.Name,
+			RootfsPrefix + "type":    "erofs",
 			RootfsPrefix + "overlay": config.MemoryOverlay.String(),
 			RootfsPrefix + "options": "size=100m",
 		},
@@ -344,8 +283,8 @@ func TestRootfsHintHappy(t *testing.T) {
 	if hint.Mount.Source != imagePath {
 		t.Errorf("rootfs source, want: %q, got: %q", imagePath, hint.Mount.Source)
 	}
-	if hint.Mount.Type != erofs.Name {
-		t.Errorf("rootfs type, want: %q, got: %q", erofs.Name, hint.Mount.Type)
+	if hint.Mount.Type != "erofs" {
+		t.Errorf("rootfs type, want: %q, got: %q", "erofs", hint.Mount.Type)
 	}
 	if hint.Overlay != config.MemoryOverlay {
 		t.Errorf("rootfs overlay, want: %q, got: %q", config.MemoryOverlay, hint.Overlay)
@@ -368,7 +307,7 @@ func TestRootfsHintDirectFS(t *testing.T) {
 			spec := &specs.Spec{
 				Annotations: map[string]string{
 					RootfsPrefix + "source":   "/tmp/rootfs.img",
-					RootfsPrefix + "type":     erofs.Name,
+					RootfsPrefix + "type":     "erofs",
 					RootfsPrefix + "directfs": tc.value,
 				},
 			}
@@ -396,7 +335,7 @@ func TestRootfsHintErrors(t *testing.T) {
 			name: "invalid source",
 			annotations: map[string]string{
 				RootfsPrefix + "source": "invalid",
-				RootfsPrefix + "type":   erofs.Name,
+				RootfsPrefix + "type":   "erofs",
 			},
 			error: "invalid rootfs annotation",
 		},
@@ -412,7 +351,7 @@ func TestRootfsHintErrors(t *testing.T) {
 			name: "invalid overlay",
 			annotations: map[string]string{
 				RootfsPrefix + "source":  imagePath,
-				RootfsPrefix + "type":    erofs.Name,
+				RootfsPrefix + "type":    "erofs",
 				RootfsPrefix + "overlay": "invalid",
 			},
 			error: "invalid rootfs annotation",
@@ -422,7 +361,7 @@ func TestRootfsHintErrors(t *testing.T) {
 			annotations: map[string]string{
 				RootfsPrefix + "invalid": "invalid",
 				RootfsPrefix + "source":  imagePath,
-				RootfsPrefix + "type":    erofs.Name,
+				RootfsPrefix + "type":    "erofs",
 				RootfsPrefix + "overlay": config.MemoryOverlay.String(),
 			},
 			error: "invalid rootfs annotation",
@@ -430,7 +369,7 @@ func TestRootfsHintErrors(t *testing.T) {
 		{
 			name: "missing source",
 			annotations: map[string]string{
-				RootfsPrefix + "type":    erofs.Name,
+				RootfsPrefix + "type":    "erofs",
 				RootfsPrefix + "overlay": config.MemoryOverlay.String(),
 			},
 			error: "rootfs annotations missing required field",
@@ -447,7 +386,7 @@ func TestRootfsHintErrors(t *testing.T) {
 			name: "invalid directfs",
 			annotations: map[string]string{
 				RootfsPrefix + "source":   imagePath,
-				RootfsPrefix + "type":     erofs.Name,
+				RootfsPrefix + "type":     "erofs",
 				RootfsPrefix + "directfs": "maybe",
 			},
 			error: "invalid directfs value",

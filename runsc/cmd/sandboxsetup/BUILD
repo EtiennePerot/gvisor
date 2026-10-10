@@ -27,7 +27,7 @@ go_library(
         "//pkg/marshal/primitive",
         "//pkg/timing",
         "//pkg/unet",
-        "//runsc/boot",
+        "//runsc/boot/bootapi",
         "//runsc/cmd/util",
         "//runsc/config",
         "//runsc/flag",

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package boot
+package bootapi
 
 import (
 	"fmt"
@@ -21,8 +21,6 @@ import (
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"gvisor.dev/gvisor/pkg/log"
-	"gvisor.dev/gvisor/pkg/sentry/fsimpl/erofs"
-	"gvisor.dev/gvisor/pkg/sentry/fsimpl/tmpfs"
 	"gvisor.dev/gvisor/runsc/config"
 	"gvisor.dev/gvisor/runsc/specutils"
 )
@@ -161,7 +159,7 @@ func (m *MountHint) setField(key, val string) error {
 
 func (m *MountHint) setType(val string) error {
 	switch val {
-	case tmpfs.Name, Bind:
+	case "tmpfs", Bind:
 		m.Mount.Type = val
 	default:
 		return fmt.Errorf("invalid type %q", val)
@@ -200,7 +198,7 @@ func (m *MountHint) setDirectFS(val string) error {
 func (m *MountHint) ShouldShareMount() bool {
 	// Only support tmpfs for now. Bind mounts require a common gofer to mount
 	// all shared volumes.
-	return m.Mount.Type == tmpfs.Name &&
+	return m.Mount.Type == "tmpfs" &&
 		// A shared mount should be configured for share=container too so:
 		// 1. Restarting the container does not lose the tmpfs data.
 		// 2. Repeated mounts in the container reuse the same tmpfs instance.
@@ -213,29 +211,8 @@ func (m *MountHint) IsSandboxLocal() bool {
 	return m.Share == container || m.Share == pod
 }
 
-// checkCompatible verifies that shared mount is compatible with master.
-// Master options must be the same or less restrictive than the container mount,
-// e.g. master can be 'rw' while container mounts as 'ro'.
-func (m *MountHint) checkCompatible(replica *specs.Mount) error {
-	masterOpts := ParseMountOptions(m.Mount.Options)
-	replicaOpts := ParseMountOptions(replica.Options)
-
-	if masterOpts.ReadOnly && !replicaOpts.ReadOnly {
-		return fmt.Errorf("cannot mount read-write shared mount because master is read-only, mount: %+v", replica)
-	}
-	if masterOpts.Flags.NoExec && !replicaOpts.Flags.NoExec {
-		return fmt.Errorf("cannot mount exec enabled shared mount because master is noexec, mount: %+v", replica)
-	}
-	if masterOpts.Flags.NoATime && !replicaOpts.Flags.NoATime {
-		return fmt.Errorf("cannot mount atime enabled shared mount because master is noatime, mount: %+v", replica)
-	}
-	if masterOpts.Flags.NoSUID && !replicaOpts.Flags.NoSUID {
-		return fmt.Errorf("cannot mount suid enabled shared mount because master is nosuid, mount: %+v", replica)
-	}
-	return nil
-}
-
-func (m *MountHint) fileAccessType() config.FileAccessType {
+// FileAccessType returns the file access type to use for the hinted mount.
+func (m *MountHint) FileAccessType() config.FileAccessType {
 	if m.Share == shared {
 		return config.FileAccessShared
 	}
@@ -280,7 +257,7 @@ func (r *RootfsHint) setSource(val string) error {
 
 func (r *RootfsHint) setType(val string) error {
 	switch val {
-	case erofs.Name, Bind:
+	case "erofs", Bind:
 		r.Mount.Type = val
 	default:
 		return fmt.Errorf("invalid type %q", val)

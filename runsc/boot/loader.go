@@ -86,6 +86,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 	"gvisor.dev/gvisor/pkg/timing"
+	"gvisor.dev/gvisor/runsc/boot/bootapi"
 	"gvisor.dev/gvisor/runsc/boot/filter"
 	pf "gvisor.dev/gvisor/runsc/boot/portforward"
 	"gvisor.dev/gvisor/runsc/boot/pprof"
@@ -104,21 +105,6 @@ import (
 	_ "gvisor.dev/gvisor/pkg/sentry/socket/netlink/route"
 	_ "gvisor.dev/gvisor/pkg/sentry/socket/netlink/uevent"
 	_ "gvisor.dev/gvisor/pkg/sentry/socket/unix"
-)
-
-// ContainerRuntimeState is the runtime state of a container.
-type ContainerRuntimeState int
-
-const (
-	// RuntimeStateInvalid used just in case of error.
-	RuntimeStateInvalid ContainerRuntimeState = iota
-	// RuntimeStateCreating indicates that the container is being
-	// created, but has not started running yet.
-	RuntimeStateCreating
-	// RuntimeStateRunning indicates that the container is running.
-	RuntimeStateRunning
-	// RuntimeStateStopped indicates that the container has stopped.
-	RuntimeStateStopped
 )
 
 type containerInfo struct {
@@ -451,14 +437,6 @@ func (ep *execProcess) releasePIDNamespace(ctx context.Context) {
 type fdMapping struct {
 	guest int
 	host  *fd.FD
-}
-
-// FDMapping is a helper type to represent a mapping from guest to host file
-// descriptors. In contrast to the unexported fdMapping type, it does not imply
-// file ownership.
-type FDMapping struct {
-	Guest int
-	Host  int
 }
 
 // Args are the arguments for New().
@@ -981,7 +959,7 @@ func New(args Args) (*Loader, error) {
 	}
 	args.StartupTimer.Reached("compat logs initialized")
 
-	l.mountHints, err = NewPodMountHints(args.Spec)
+	l.mountHints, err = bootapi.NewPodMountHints(args.Spec)
 	if err != nil {
 		return nil, fmt.Errorf("creating pod mount hints: %w", err)
 	}

@@ -22,7 +22,7 @@ import (
 	"testing"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
-	"gvisor.dev/gvisor/runsc/boot"
+	"gvisor.dev/gvisor/runsc/boot/bootapi"
 	"gvisor.dev/gvisor/runsc/cmd/sandboxsetup"
 	"gvisor.dev/gvisor/runsc/specutils"
 )
@@ -215,11 +215,11 @@ func TestLisafsNeededForDirectFSSuppression(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			mountHints, err := boot.NewPodMountHints(tc.spec)
+			mountHints, err := bootapi.NewPodMountHints(tc.spec)
 			if err != nil {
 				t.Fatalf("NewPodMountHints failed: %v", err)
 			}
-			rootfsHint, err := boot.NewRootfsHint(tc.spec)
+			rootfsHint, err := bootapi.NewRootfsHint(tc.spec)
 			if err != nil {
 				t.Fatalf("NewRootfsHint failed: %v", err)
 			}
@@ -233,10 +233,10 @@ func TestLisafsNeededForDirectFSSuppression(t *testing.T) {
 func suppressedMountSpec(hintSource, directfs string) *specs.Spec {
 	return &specs.Spec{
 		Annotations: map[string]string{
-			boot.MountPrefix + "mount1.source":   hintSource,
-			boot.MountPrefix + "mount1.type":     "bind",
-			boot.MountPrefix + "mount1.share":    "container",
-			boot.MountPrefix + "mount1.directfs": directfs,
+			bootapi.MountPrefix + "mount1.source":   hintSource,
+			bootapi.MountPrefix + "mount1.type":     "bind",
+			bootapi.MountPrefix + "mount1.share":    "container",
+			bootapi.MountPrefix + "mount1.directfs": directfs,
 		},
 		Mounts: []specs.Mount{
 			{
@@ -251,9 +251,9 @@ func suppressedMountSpec(hintSource, directfs string) *specs.Spec {
 func suppressedRootfsSpec(rootfsType, directfs string) *specs.Spec {
 	return &specs.Spec{
 		Annotations: map[string]string{
-			boot.RootfsPrefix + "source":   "/tmp/rootfs",
-			boot.RootfsPrefix + "type":     rootfsType,
-			boot.RootfsPrefix + "directfs": directfs,
+			bootapi.RootfsPrefix + "source":   "/tmp/rootfs",
+			bootapi.RootfsPrefix + "type":     rootfsType,
+			bootapi.RootfsPrefix + "directfs": directfs,
 		},
 	}
 }

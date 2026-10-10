@@ -45,6 +45,7 @@ import (
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/timing"
 	"gvisor.dev/gvisor/pkg/urpc"
+	"gvisor.dev/gvisor/runsc/boot/bootapi"
 	"gvisor.dev/gvisor/runsc/boot/pprof"
 	"gvisor.dev/gvisor/runsc/config"
 	"gvisor.dev/gvisor/runsc/specutils"
@@ -62,12 +63,12 @@ const (
 	// metadata during save/restore.
 	ContainerSpecsKey = "container_specs"
 
-	annotationCheckpointPrefix = "dev.gvisor.internal.checkpoint."
+	annotationCheckpointPrefix = bootapi.AnnotationCheckpointPrefix
 
 	// annotationCheckpointPath is the path to the directory where the checkpoint files will be
 	// created. When present, it allows for the workload running inside to trigger a checkpoint
 	// without having to use the runsc CLI.
-	annotationCheckpointPath = annotationCheckpointPrefix + "path"
+	annotationCheckpointPath = bootapi.AnnotationCheckpointPath
 
 	// annotationCheckpointResume indicates whether the sandbox should continue running after the
 	// checkpoint. Optional, defaults to false.
@@ -75,11 +76,11 @@ const (
 
 	// annotationCheckpointCompression is the compression to use for the checkpoint file. Optional,
 	// defaults to best speed compression.
-	annotationCheckpointCompression = annotationCheckpointPrefix + "compression"
+	annotationCheckpointCompression = bootapi.AnnotationCheckpointCompression
 
 	// annotationCheckpointDirect indicates whether the checkpoint IOs should use O_DIRECT. Optional,
 	// defaults to false.
-	annotationCheckpointDirect = annotationCheckpointPrefix + "direct"
+	annotationCheckpointDirect = bootapi.AnnotationCheckpointDirect
 
 	// annotationCheckpointExcludeCommittedZeroPages indicates whether the checkpoint should exclude
 	// committed zero pages. Optional, defaults to false.
@@ -107,29 +108,6 @@ const (
 
 	networkKey = "network"
 )
-
-// GetAnnotationCheckpointPath returns the checkpoint path specified in the
-// container annotation. Return empty string if no annotation is specified.
-func GetAnnotationCheckpointPath(conf *config.Config, spec *specs.Spec) (string, error) {
-	path := spec.Annotations[annotationCheckpointPath]
-	if len(path) != 0 {
-		if len(conf.TestOnlyAutosaveImagePath) != 0 {
-			return "", fmt.Errorf("autosave is not supported with %q annotation", annotationCheckpointPath)
-		}
-	}
-	return path, nil
-}
-
-// GetAnnotationCheckpointCompression returns the checkpoint compression level
-// specified in the container annotation.
-func GetAnnotationCheckpointCompression(spec *specs.Spec) (statefile.CompressionLevel, error) {
-	return statefile.CompressionLevelFromString(spec.Annotations[annotationCheckpointCompression])
-}
-
-// GetAnnotationCheckpointDirect returns true if the checkpoint is direct.
-func GetAnnotationCheckpointDirect(spec *specs.Spec) bool {
-	return specutils.AnnotationToBool(spec, annotationCheckpointDirect)
-}
 
 // SaveAsync starts a goroutine to save the kernel. Implements kernel.Saver.
 func (l *Loader) SaveAsync() (err error) {
@@ -181,7 +159,7 @@ func saveOptsFromSpec(spec *specs.Spec, fds []*fd.FD, useCheckpointGofer bool) (
 		}
 	}
 
-	comp, err := GetAnnotationCheckpointCompression(spec)
+	comp, err := bootapi.GetAnnotationCheckpointCompression(spec)
 	if err != nil {
 		return nil, err
 	}

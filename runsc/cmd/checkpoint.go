@@ -25,7 +25,7 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/checkpoint"
 	"gvisor.dev/gvisor/pkg/sentry/control/controlapi"
 	"gvisor.dev/gvisor/pkg/state/statefile"
-	"gvisor.dev/gvisor/runsc/boot"
+	"gvisor.dev/gvisor/runsc/boot/bootapi"
 	"gvisor.dev/gvisor/runsc/cmd/util"
 	"gvisor.dev/gvisor/runsc/config"
 	"gvisor.dev/gvisor/runsc/container"
@@ -121,7 +121,7 @@ func (c *Checkpoint) Execute(_ context.Context, f *flag.FlagSet, args ...any) su
 	var paths []checkpoint.ResourceID
 	if c.splitFSCheckpointPaths != "" {
 		var err error
-		paths, err = boot.ParseFSCheckpointPaths(c.splitFSCheckpointPaths)
+		paths, err = bootapi.ParseFSCheckpointPaths(c.splitFSCheckpointPaths)
 		if err != nil {
 			util.Fatalf("parsing fs-checkpoint-paths: %v", err)
 		}

@@ -23,7 +23,7 @@ import (
 	"github.com/google/subcommands"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"gvisor.dev/gvisor/pkg/sentry/checkpoint"
-	"gvisor.dev/gvisor/runsc/boot"
+	"gvisor.dev/gvisor/runsc/boot/bootapi"
 	"gvisor.dev/gvisor/runsc/cmd/util"
 	"gvisor.dev/gvisor/runsc/config"
 	"gvisor.dev/gvisor/runsc/container"
@@ -58,7 +58,7 @@ func (p *pathVar) String() string {
 }
 
 func (p *pathVar) Set(value string) error {
-	paths, err := boot.ParseFSCheckpointPaths(value)
+	paths, err := bootapi.ParseFSCheckpointPaths(value)
 	if err != nil {
 		return err
 	}

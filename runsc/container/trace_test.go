@@ -30,7 +30,7 @@ import (
 	pb "gvisor.dev/gvisor/pkg/sentry/seccheck/points/points_go_proto"
 	"gvisor.dev/gvisor/pkg/sentry/seccheck/sinks/remote/test"
 	"gvisor.dev/gvisor/pkg/test/testutil"
-	"gvisor.dev/gvisor/runsc/boot"
+	"gvisor.dev/gvisor/runsc/boot/bootapi"
 	"gvisor.dev/gvisor/runsc/boot/procfs"
 )
 
@@ -62,7 +62,7 @@ func TestTraceStartup(t *testing.T) {
 			}
 			defer podInitConfig.Close()
 
-			initConfig := boot.InitConfig{
+			initConfig := bootapi.InitConfig{
 				TraceSession: seccheck.SessionConfig{
 					Name: seccheck.DefaultSessionName,
 					Points: []seccheck.PointConfig{

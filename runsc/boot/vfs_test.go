@@ -16,10 +16,12 @@ package boot
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"gvisor.dev/gvisor/pkg/sentry/checkpoint"
+	"gvisor.dev/gvisor/runsc/boot/bootapi"
 	"gvisor.dev/gvisor/runsc/config"
 )
 
@@ -87,7 +89,7 @@ func TestGetMountAccessType(t *testing.T) {
 	} {
 		t.Run(tst.name, func(t *testing.T) {
 			spec := &specs.Spec{Annotations: tst.annotations}
-			podHints, err := NewPodMountHints(spec)
+			podHints, err := bootapi.NewPodMountHints(spec)
 			if err != nil {
 				t.Fatalf("newPodMountHints failed: %v", err)
 			}
@@ -256,12 +258,12 @@ func TestParseFSCheckpointPaths(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			paths, err := ParseFSCheckpointPaths(tc.in)
+			paths, err := bootapi.ParseFSCheckpointPaths(tc.in)
 			if (err != nil) != tc.wantErr {
-				t.Errorf("ParseFSCheckpointPaths(%q) error = %v, wantErr %v", tc.in, err, tc.wantErr)
+				t.Errorf("bootapi.ParseFSCheckpointPaths(%q) error = %v, wantErr %v", tc.in, err, tc.wantErr)
 			}
 			if err == nil && len(paths) != tc.wantLen {
-				t.Errorf("ParseFSCheckpointPaths(%q) len = %d, want %d", tc.in, len(paths), tc.wantLen)
+				t.Errorf("bootapi.ParseFSCheckpointPaths(%q) len = %d, want %d", tc.in, len(paths), tc.wantLen)
 			}
 		})
 	}
@@ -307,5 +309,65 @@ func TestFindByResourceID(t *testing.T) {
 	}
 	if got, ok, err := findByResourceID(ambiguousMap, checkpoint.ResourceID{ContainerName: "", Path: "/multi"}, getID, "Test"); err == nil || ok {
 		t.Errorf("findByResourceID ambiguous match got (%v, %v, %v), want zero, false, error", got, ok, err)
+	}
+}
+
+func TestHintsCheckCompatible(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		masterOpts  []string
+		replicaOpts []string
+		err         string
+	}{
+		{
+			name: "empty",
+		},
+		{
+			name:        "same",
+			masterOpts:  []string{"ro", "noatime", "noexec"},
+			replicaOpts: []string{"ro", "noatime", "noexec"},
+		},
+		{
+			name:        "compatible",
+			masterOpts:  []string{"rw", "atime", "exec"},
+			replicaOpts: []string{"ro", "noatime", "noexec"},
+		},
+		{
+			name:        "unsupported",
+			masterOpts:  []string{"nofoo", "nodev"},
+			replicaOpts: []string{"foo", "dev"},
+		},
+		{
+			name:        "incompatible-ro",
+			masterOpts:  []string{"ro"},
+			replicaOpts: []string{"rw"},
+			err:         "read-write",
+		},
+		{
+			name:        "incompatible-atime",
+			masterOpts:  []string{"noatime"},
+			replicaOpts: []string{"atime"},
+			err:         "noatime",
+		},
+		{
+			name:        "incompatible-exec",
+			masterOpts:  []string{"noexec"},
+			replicaOpts: []string{"exec"},
+			err:         "noexec",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			master := MountHint{Mount: specs.Mount{Options: tc.masterOpts}}
+			replica := specs.Mount{Options: tc.replicaOpts}
+			if err := checkMountHintCompatible(&master, &replica); err != nil {
+				if !strings.Contains(err.Error(), tc.err) {
+					t.Fatalf("wrong error, want: %q, got: %q", tc.err, err)
+				}
+			} else {
+				if len(tc.err) > 0 {
+					t.Fatalf("error %q expected", tc.err)
+				}
+			}
+		})
 	}
 }

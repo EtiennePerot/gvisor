@@ -18,11 +18,8 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"path"
-	"strings"
 	"time"
 
-	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"golang.org/x/sys/unix"
 	"google.golang.org/protobuf/proto"
 	"gvisor.dev/gvisor/pkg/cleanup"
@@ -42,51 +39,10 @@ import (
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/unet"
 	"gvisor.dev/gvisor/pkg/urpc"
+	"gvisor.dev/gvisor/runsc/boot/bootapi"
 	"gvisor.dev/gvisor/runsc/specutils"
 	"gvisor.dev/gvisor/runsc/version"
 )
-
-const (
-	annotationFSCheckpointPrefix = "dev.gvisor.internal.fscheckpoint."
-
-	// annotationFSCheckpointEnable indicates whether files under /proc/gvisor
-	// should be present in the container to allow the workload to trigger a
-	// filesystem checkpoint.
-	annotationFSCheckpointEnable = annotationFSCheckpointPrefix + "enable"
-
-	// annotationFSCheckpointPath is the path to the directory where the
-	// filesystem checkpoint files will be created. When present, it allows for
-	// the workload running inside to trigger a filesystem checkpoint without
-	// having to use the runsc CLI.
-	annotationFSCheckpointPath = annotationFSCheckpointPrefix + "path"
-
-	// annotationFSCheckpointResume indicates whether the sandbox should
-	// continue running after filesystem checkpoint saving triggered via
-	// /proc/gvisor. Optional, defaults to false.
-	annotationFSCheckpointResume = annotationFSCheckpointPrefix + "resume"
-
-	// annotationFSCheckpointDirect indicates whether filesystem checkpoint
-	// I/Os triggered via /proc/gvisor should use O_DIRECT. Optional, defaults
-	// to false.
-	annotationFSCheckpointDirect = annotationFSCheckpointPrefix + "direct"
-
-	// annotationFSCheckpointPaths is a comma-separated list of paths inside the
-	// containers to save. Optional.
-	annotationFSCheckpointPaths = annotationFSCheckpointPrefix + "paths"
-)
-
-// GetAnnotationFSCheckpointPath returns the filesystem checkpoint path
-// specified in the container annotation. Return empty string if no annotation
-// is specified.
-func GetAnnotationFSCheckpointPath(spec *specs.Spec) string {
-	return spec.Annotations[annotationFSCheckpointPath]
-}
-
-// GetAnnotationFSCheckpointDirect returns true if filesystem checkpoint I/O
-// controlled by the containing annotation should use O_DIRECT.
-func GetAnnotationFSCheckpointDirect(spec *specs.Spec) bool {
-	return specutils.AnnotationToBool(spec, annotationFSCheckpointDirect)
-}
 
 // FSSave implements kernel.Saver.FSSave.
 //
@@ -101,7 +57,7 @@ func (l *Loader) FSSave() error {
 	if len(fsSaveFDs) == 0 {
 		return linuxerr.ENXIO
 	}
-	paths, err := ParseFSCheckpointPaths(l.root.spec.Annotations[annotationFSCheckpointPaths])
+	paths, err := bootapi.ParseFSCheckpointPaths(l.root.spec.Annotations[annotationFSCheckpointPaths])
 	if err != nil {
 		return err
 	}
@@ -119,38 +75,6 @@ func (l *Loader) FSSave() error {
 		return err
 	}
 	return l.k.FSSave(context.Background(), &opts)
-}
-
-// ParseFSCheckpointPaths parses a comma-separated list of container:path
-// checkpoint targets.
-func ParseFSCheckpointPaths(val string) ([]checkpoint.ResourceID, error) {
-	val = strings.TrimSpace(val)
-	if val == "" {
-		return nil, nil
-	}
-	var paths []checkpoint.ResourceID
-	for _, part := range strings.Split(val, ",") {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		var c, p string
-		subparts := strings.SplitN(part, ":", 2)
-		if len(subparts) == 1 {
-			p = strings.TrimSpace(subparts[0])
-		} else {
-			c = strings.TrimSpace(subparts[0])
-			p = strings.TrimSpace(subparts[1])
-		}
-		if p == "" {
-			return nil, fmt.Errorf("empty path in fscheckpoint paths: %q", val)
-		}
-		if p != fscheckpoint.AllTmpfsPath && (!path.IsAbs(p) || path.Clean(p) != p) {
-			return nil, fmt.Errorf("checkpoint path must be an absolute, clean path or %q, got: %q", fscheckpoint.AllTmpfsPath, p)
-		}
-		paths = append(paths, checkpoint.ResourceID{ContainerName: c, Path: p})
-	}
-	return paths, nil
 }
 
 func convertToKernelFSSaveOpts(args *FSSaveArgs) (kernel.FSSaveOpts, error) {

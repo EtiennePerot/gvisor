@@ -34,7 +34,6 @@ import (
 	"gvisor.dev/gvisor/pkg/errors/linuxerr"
 	"gvisor.dev/gvisor/pkg/fd"
 	"gvisor.dev/gvisor/pkg/fspath"
-	"gvisor.dev/gvisor/pkg/fsutil"
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/rdma"
 	"gvisor.dev/gvisor/pkg/sentry/checkpoint"
@@ -67,34 +66,10 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/usage"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
 	"gvisor.dev/gvisor/pkg/timing"
+	"gvisor.dev/gvisor/runsc/boot/bootapi"
 	"gvisor.dev/gvisor/runsc/config"
 	"gvisor.dev/gvisor/runsc/specutils"
 )
-
-// Supported filesystems that map to different internal filesystems.
-const (
-	Bind   = "bind"
-	Nonefs = "none"
-)
-
-// SelfFilestorePath returns the path at which the self filestore file is
-// stored for a given mount.
-func SelfFilestorePath(mountSrc, sandboxID string) string {
-	// We will place the filestore file in a gVisor specific hidden file inside
-	// the mount being overlaid itself. The same volume can be overlaid by
-	// multiple sandboxes. So make the filestore file unique to a sandbox by
-	// suffixing the sandbox ID.
-	return path.Join(mountSrc, selfFilestoreName(sandboxID))
-}
-
-// SelfFilestoreName returns the name of the self filestore file for a given sandbox.
-func SelfFilestoreName(sandboxID string) string {
-	return selfFilestoreName(sandboxID)
-}
-
-func selfFilestoreName(sandboxID string) string {
-	return fsutil.SelfFilestorePrefix + sandboxID
-}
 
 // tmpfs has some extra supported options that we must pass through.
 var tmpfsAllowedData = []string{"mode", "size", "uid", "gid"}
@@ -558,7 +533,7 @@ func (c *containerMounter) checkDispenser() error {
 
 func getMountAccessType(conf *config.Config, hint *MountHint) config.FileAccessType {
 	if hint != nil {
-		return hint.fileAccessType()
+		return hint.FileAccessType()
 	}
 	return conf.FileAccessMounts
 }
@@ -602,7 +577,7 @@ func (c *containerMounter) createMountNamespace(ctx context.Context, spec *specs
 	ioFD := c.goferFDs.remove()
 	rootfsConf := c.goferMountConfs[0]
 
-	rootfsHint, err := NewRootfsHint(spec)
+	rootfsHint, err := bootapi.NewRootfsHint(spec)
 	if err != nil {
 		return nil, fmt.Errorf("parsing rootfs hint: %w", err)
 	}
@@ -832,7 +807,7 @@ func (c *containerMounter) configureOverlay(ctx context.Context, conf *config.Co
 		if err := overlay.CreateWhiteout(ctx, c.l.k.VFS(), creds, &vfs.PathOperation{
 			Root:  upperRootVD,
 			Start: upperRootVD,
-			Path:  fspath.Parse(selfFilestoreName(c.l.sandboxID)),
+			Path:  fspath.Parse(bootapi.SelfFilestoreName(c.l.sandboxID)),
 		}); err != nil {
 			return nil, nil, fmt.Errorf("failed to create whiteout to hide self overlay filestore: %w", err)
 		}
@@ -1191,7 +1166,7 @@ func ParseMountOptions(opts []string) *vfs.MountOptions {
 			InternalMount: true,
 		},
 	}
-	// Note: update mountHint.CheckCompatible when more options are added.
+	// Note: update checkMountHintCompatible when more options are added.
 	for _, o := range opts {
 		switch o {
 		case "ro":
@@ -1211,6 +1186,28 @@ func ParseMountOptions(opts []string) *vfs.MountOptions {
 		}
 	}
 	return mountOpts
+}
+
+// checkMountHintCompatible verifies that shared mount is compatible with master.
+// Master options must be the same or less restrictive than the container mount,
+// e.g. master can be 'rw' while container mounts as 'ro'.
+func checkMountHintCompatible(m *MountHint, replica *specs.Mount) error {
+	masterOpts := ParseMountOptions(m.Mount.Options)
+	replicaOpts := ParseMountOptions(replica.Options)
+
+	if masterOpts.ReadOnly && !replicaOpts.ReadOnly {
+		return fmt.Errorf("cannot mount read-write shared mount because master is read-only, mount: %+v", replica)
+	}
+	if masterOpts.Flags.NoExec && !replicaOpts.Flags.NoExec {
+		return fmt.Errorf("cannot mount exec enabled shared mount because master is noexec, mount: %+v", replica)
+	}
+	if masterOpts.Flags.NoATime && !replicaOpts.Flags.NoATime {
+		return fmt.Errorf("cannot mount atime enabled shared mount because master is noatime, mount: %+v", replica)
+	}
+	if masterOpts.Flags.NoSUID && !replicaOpts.Flags.NoSUID {
+		return fmt.Errorf("cannot mount suid enabled shared mount because master is nosuid, mount: %+v", replica)
+	}
+	return nil
 }
 
 func parseKeyValue(s string) (string, string, bool) {
@@ -1674,7 +1671,7 @@ func (c *containerMounter) mountSharedMaster(ctx context.Context, spec *specs.Sp
 // mountSharedSubmount binds mount to a previously mounted volume that is shared
 // among containers in the same pod.
 func (c *containerMounter) mountSharedSubmount(ctx context.Context, conf *config.Config, mns *vfs.MountNamespace, creds *auth.Credentials, mntInfo *mountInfo, sharedMount *vfs.Mount) (*vfs.Mount, error) {
-	if err := mntInfo.hint.checkCompatible(mntInfo.mount); err != nil {
+	if err := checkMountHintCompatible(mntInfo.hint, mntInfo.mount); err != nil {
 		return nil, err
 	}
 
