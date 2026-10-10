@@ -474,7 +474,12 @@ func (b *Boot) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcomma
 			// /proc is umounted from a forked process, because the
 			// current one is going to drop capabilities and won't be
 			// able to umount it.
-			cmd, w := sandboxsetup.ExecProcUmounter()
+			exe, err := os.OpenFile(specutils.ExePath, unix.O_PATH, 0)
+			if err != nil {
+				util.Fatalf("cannot open %q: %v", specutils.ExePath, err)
+			}
+			cmd, w := sandboxsetup.ExecProcUmounter(exe)
+			exe.Close()
 			if b.willReexec() {
 				defer cmd.Wait()
 				defer w.Close()

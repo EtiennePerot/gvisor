@@ -38,6 +38,7 @@ import (
 	"gvisor.dev/gvisor/runsc/fsgofer"
 	"gvisor.dev/gvisor/runsc/fsgofer/extension"
 	"gvisor.dev/gvisor/runsc/fsgofer/filter"
+	"gvisor.dev/gvisor/runsc/gvisorbinaries"
 	"gvisor.dev/gvisor/runsc/profile"
 	"gvisor.dev/gvisor/runsc/specutils"
 )
@@ -212,11 +213,19 @@ func (g *Gofer) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcomm
 	defer goferToHostRPC.Close()
 
 	if g.setUpRoot {
+		// The /proc unmounter runs from the Sentry binary, which must be opened
+		// before SetupRootFS pivots away from the host filesystem.
+		var sentryExe *os.File
+		spawnUnmounter := willReexec && !conf.TestOnlyAllowRunAsCurrentUserWithoutChroot
+		if spawnUnmounter {
+			sentryExe = openSentryExe()
+		}
 		if err := sandboxsetup.SetupRootFS(spec, conf, g.mountConfs, g.devIoFD, makeRPCMountOpener(goferToHostRPC), containerID, g.bundleDir); err != nil {
 			util.Fatalf("Error setting up root FS: %v", err)
 		}
-		if willReexec && !conf.TestOnlyAllowRunAsCurrentUserWithoutChroot {
-			cleanupUnmounter := g.syncFDs.spawnProcUnmounter()
+		if spawnUnmounter {
+			cleanupUnmounter := g.syncFDs.spawnProcUnmounter(sentryExe)
+			sentryExe.Close()
 			defer cleanupUnmounter()
 		}
 	}
@@ -563,15 +572,31 @@ func (g *goferSyncFDs) flags() map[string]string {
 	}
 }
 
-// spawnProcUnmounter executes the /proc unmounter process, for gofers that
-// will re-exec and would lose the capability to umount /proc on their own.
+// openSentryExe opens the Sentry sidecar binary with O_PATH, which is
+// sufficient to exec it.
+func openSentryExe() *os.File {
+	sentry := &gvisorbinaries.GvisorSentry
+	p, err := sentry.Path()
+	if err != nil {
+		util.Fatalf("sidecar %q not usable: %v", sentry.Name, err)
+	}
+	f, err := os.OpenFile(p, unix.O_PATH, 0)
+	if err != nil {
+		util.Fatalf("cannot open Sentry binary %q: %v", p, err)
+	}
+	return f
+}
+
+// spawnProcUnmounter executes the /proc unmounter process from the Sentry
+// binary `sentryExe`, for gofers that will re-exec and would lose the
+// capability to umount /proc on their own.
 // It returns a function to clean up the unmounter process, which
 // should be called (via defer) in case of errors.
-func (g *goferSyncFDs) spawnProcUnmounter() func() {
+func (g *goferSyncFDs) spawnProcUnmounter(sentryExe *os.File) func() {
 	if g.procMountFD != -1 {
 		util.Fatalf("procMountFD is set")
 	}
-	cmd, w := sandboxsetup.ExecProcUmounter()
+	cmd, w := sandboxsetup.ExecProcUmounter(sentryExe)
 	// Clear FD_CLOEXEC so procMountFD survives re-exec.
 	if _, _, errno := unix.RawSyscall(unix.SYS_FCNTL, w.Fd(), unix.F_SETFD, 0); errno != 0 {
 		util.Fatalf("error clearing CLOEXEC: %v", errno)
