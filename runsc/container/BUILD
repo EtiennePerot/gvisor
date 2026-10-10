@@ -98,6 +98,7 @@ go_test(
         "//pkg/test/testutil",
         "//pkg/unet",
         "//runsc/boot",
+        "//runsc/boot/procfs",
         "//runsc/cgroup",
         "//runsc/config",
         "//runsc/flag",
