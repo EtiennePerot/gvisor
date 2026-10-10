@@ -86,7 +86,7 @@ func (i *Install) Execute(_ context.Context, f *flag.FlagSet, args ...any) subco
 	conf := args[0].(*config.Config)
 
 	// Check the platform.
-	p, err := platform.Lookup(conf.Platform)
+	p, err := platform.LookupHostSetup(conf.Platform)
 	if err != nil {
 		log.Fatalf("invalid platform: %v", err)
 	}
