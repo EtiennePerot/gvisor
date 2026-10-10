@@ -27,6 +27,7 @@ import (
 	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/control/api"
 	"gvisor.dev/gvisor/pkg/fspath"
+	"gvisor.dev/gvisor/pkg/sentry/control/controlapi"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
@@ -40,13 +41,7 @@ type Fs struct {
 }
 
 // TarRootfsUpperLayerOpts contains options for the TarRootfsUpperLayer RPC.
-type TarRootfsUpperLayerOpts struct {
-	// ContainerID identifies which container's rootfs upper layer should be
-	// serialized.
-	ContainerID string
-	// FilePayload contains the destination for output.
-	urpc.FilePayload
-}
+type TarRootfsUpperLayerOpts = controlapi.TarRootfsUpperLayerOpts
 
 // Returns a referenced mount namespace for the given container ID,
 // or the root container if no ID is provided. Caller must DecRef the

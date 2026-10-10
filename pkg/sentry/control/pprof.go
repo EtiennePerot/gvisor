@@ -21,9 +21,9 @@ import (
 	"time"
 
 	"gvisor.dev/gvisor/pkg/fd"
+	"gvisor.dev/gvisor/pkg/sentry/control/controlapi"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
 	"gvisor.dev/gvisor/pkg/sync"
-	"gvisor.dev/gvisor/pkg/urpc"
 )
 
 const (
@@ -35,12 +35,12 @@ const (
 	// frequent, we expect this to achieve a reasonable balance between
 	// collecting the data we need and imposing a high performance cost
 	// (e.g. skewing even the CPU profile).
-	DefaultBlockProfileRate = 10
+	DefaultBlockProfileRate = controlapi.DefaultBlockProfileRate
 
 	// DefaultMutexProfileRate is the default profiling rate for mutex
 	// profiles. Like the block rate above, we use a default rate of 10%
 	// for the same reasons.
-	DefaultMutexProfileRate = 10
+	DefaultMutexProfileRate = controlapi.DefaultMutexProfileRate
 )
 
 // Profile includes profile-related RPC stubs. It provides a way to
@@ -81,13 +81,7 @@ func (p *Profile) Stop() {
 }
 
 // CPUProfileOpts contains options specifically for CPU profiles.
-type CPUProfileOpts struct {
-	// FilePayload is the destination for the profiling output.
-	urpc.FilePayload
-
-	// Duration is the duration of the profile.
-	Duration time.Duration `json:"duration"`
-}
+type CPUProfileOpts = controlapi.CPUProfileOpts
 
 // CPU is an RPC stub which collects a CPU profile.
 func (p *Profile) CPU(o *CPUProfileOpts, _ *struct{}) error {
@@ -117,15 +111,7 @@ func (p *Profile) CPU(o *CPUProfileOpts, _ *struct{}) error {
 }
 
 // HeapProfileOpts contains options specifically for heap profiles.
-type HeapProfileOpts struct {
-	// FilePayload is the destination for the profiling output.
-	urpc.FilePayload
-
-	// Delay is the sleep time, similar to Duration. This may
-	// not affect the data collected however, as the heap will
-	// continue only the memory associated with the last alloc.
-	Delay time.Duration `json:"delay"`
-}
+type HeapProfileOpts = controlapi.HeapProfileOpts
 
 // Heap generates a heap profile.
 func (p *Profile) Heap(o *HeapProfileOpts, _ *struct{}) error {
@@ -150,10 +136,7 @@ func (p *Profile) Heap(o *HeapProfileOpts, _ *struct{}) error {
 }
 
 // GoroutineProfileOpts contains options specifically for goroutine profiles.
-type GoroutineProfileOpts struct {
-	// FilePayload is the destination for the profiling output.
-	urpc.FilePayload
-}
+type GoroutineProfileOpts = controlapi.GoroutineProfileOpts
 
 // Goroutine dumps out the stack trace for all running goroutines.
 func (p *Profile) Goroutine(o *GoroutineProfileOpts, _ *struct{}) error {
@@ -168,16 +151,7 @@ func (p *Profile) Goroutine(o *GoroutineProfileOpts, _ *struct{}) error {
 }
 
 // BlockProfileOpts contains options specifically for block profiles.
-type BlockProfileOpts struct {
-	// FilePayload is the destination for the profiling output.
-	urpc.FilePayload
-
-	// Duration is the duration of the profile.
-	Duration time.Duration `json:"duration"`
-
-	// Rate is the block profile rate.
-	Rate int `json:"rate"`
-}
+type BlockProfileOpts = controlapi.BlockProfileOpts
 
 // Block dumps a blocking profile.
 func (p *Profile) Block(o *BlockProfileOpts, _ *struct{}) error {
@@ -210,16 +184,7 @@ func (p *Profile) Block(o *BlockProfileOpts, _ *struct{}) error {
 }
 
 // MutexProfileOpts contains options specifically for mutex profiles.
-type MutexProfileOpts struct {
-	// FilePayload is the destination for the profiling output.
-	urpc.FilePayload
-
-	// Duration is the duration of the profile.
-	Duration time.Duration `json:"duration"`
-
-	// Fraction is the mutex profile fraction.
-	Fraction int `json:"fraction"`
-}
+type MutexProfileOpts = controlapi.MutexProfileOpts
 
 // Mutex dumps a mutex profile.
 func (p *Profile) Mutex(o *MutexProfileOpts, _ *struct{}) error {
@@ -251,13 +216,7 @@ func (p *Profile) Mutex(o *MutexProfileOpts, _ *struct{}) error {
 }
 
 // TraceProfileOpts contains options specifically for traces.
-type TraceProfileOpts struct {
-	// FilePayload is the destination for the profiling output.
-	urpc.FilePayload
-
-	// Duration is the duration of the profile.
-	Duration time.Duration `json:"duration"`
-}
+type TraceProfileOpts = controlapi.TraceProfileOpts
 
 // Trace is an RPC stub which starts collection of an execution trace.
 func (p *Profile) Trace(o *TraceProfileOpts, _ *struct{}) error {

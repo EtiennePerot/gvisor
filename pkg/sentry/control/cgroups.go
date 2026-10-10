@@ -15,10 +15,10 @@
 package control
 
 import (
-	"fmt"
 	"strings"
 
 	"gvisor.dev/gvisor/pkg/context"
+	"gvisor.dev/gvisor/pkg/sentry/control/controlapi"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
 )
 
@@ -28,7 +28,7 @@ type Cgroups struct {
 }
 
 func (c *Cgroups) findCgroup(ctx context.Context, file CgroupControlFile) (kernel.Cgroup, error) {
-	ctl, err := file.controller()
+	ctl, err := kernel.ParseCgroupController(file.Controller)
 	if err != nil {
 		return kernel.Cgroup{}, err
 	}
@@ -37,37 +37,10 @@ func (c *Cgroups) findCgroup(ctx context.Context, file CgroupControlFile) (kerne
 
 // CgroupControlFile identifies a specific control file within a
 // specific cgroup, for the hierarchy with a given controller.
-type CgroupControlFile struct {
-	Controller string `json:"controller"`
-	Path       string `json:"path"`
-	Name       string `json:"name"`
-}
-
-func (f *CgroupControlFile) controller() (kernel.CgroupControllerType, error) {
-	return kernel.ParseCgroupController(f.Controller)
-}
+type CgroupControlFile = controlapi.CgroupControlFile
 
 // CgroupsResult represents the result of a cgroup operation.
-type CgroupsResult struct {
-	Data    string `json:"value"`
-	IsError bool   `json:"is_error"`
-}
-
-// AsError interprets the result as an error.
-func (r *CgroupsResult) AsError() error {
-	if r.IsError {
-		return fmt.Errorf("%s", r.Data)
-	}
-	return nil
-}
-
-// Unpack splits CgroupsResult into a (value, error) tuple.
-func (r *CgroupsResult) Unpack() (string, error) {
-	if r.IsError {
-		return "", fmt.Errorf("%s", r.Data)
-	}
-	return r.Data, nil
-}
+type CgroupsResult = controlapi.CgroupsResult
 
 func newValue(val string) CgroupsResult {
 	return CgroupsResult{
@@ -83,27 +56,13 @@ func newError(err error) CgroupsResult {
 }
 
 // CgroupsResults represents the list of results for a batch command.
-type CgroupsResults struct {
-	Results []CgroupsResult `json:"results"`
-}
-
-func (o *CgroupsResults) appendValue(val string) {
-	o.Results = append(o.Results, newValue(val))
-}
-
-func (o *CgroupsResults) appendError(err error) {
-	o.Results = append(o.Results, newError(err))
-}
+type CgroupsResults = controlapi.CgroupsResults
 
 // CgroupsReadArg represents the arguments for a single read command.
-type CgroupsReadArg struct {
-	File CgroupControlFile `json:"file"`
-}
+type CgroupsReadArg = controlapi.CgroupsReadArg
 
 // CgroupsReadArgs represents the list of arguments for a batched read command.
-type CgroupsReadArgs struct {
-	Args []CgroupsReadArg `json:"args"`
-}
+type CgroupsReadArgs = controlapi.CgroupsReadArgs
 
 // cgroup is an interface implemented by both kernel.Cgroup and kernel.Cgroup2.
 type cgroup interface {
@@ -126,15 +85,15 @@ func (c *Cgroups) ReadControlFiles(args *CgroupsReadArgs, out *CgroupsResults) e
 	for _, arg := range args.Args {
 		cg, err := c.resolveCgroup(ctx, arg.File)
 		if err != nil {
-			out.appendError(err)
+			out.Results = append(out.Results, newError(err))
 			continue
 		}
 
 		val, err := cg.ReadControl(ctx, arg.File.Name)
 		if err != nil {
-			out.appendError(err)
+			out.Results = append(out.Results, newError(err))
 		} else {
-			out.appendValue(val)
+			out.Results = append(out.Results, newValue(val))
 		}
 	}
 
@@ -142,15 +101,10 @@ func (c *Cgroups) ReadControlFiles(args *CgroupsReadArgs, out *CgroupsResults) e
 }
 
 // CgroupsWriteArg represents the arguments for a single write command.
-type CgroupsWriteArg struct {
-	File  CgroupControlFile `json:"file"`
-	Value string            `json:"value"`
-}
+type CgroupsWriteArg = controlapi.CgroupsWriteArg
 
 // CgroupsWriteArgs represents the lust of arguments for a batched write command.
-type CgroupsWriteArgs struct {
-	Args []CgroupsWriteArg `json:"args"`
-}
+type CgroupsWriteArgs = controlapi.CgroupsWriteArgs
 
 // WriteControlFiles is an RPC stub for batch-writing cgroupfs control files.
 func (c *Cgroups) WriteControlFiles(args *CgroupsWriteArgs, out *CgroupsResults) error {
@@ -159,15 +113,15 @@ func (c *Cgroups) WriteControlFiles(args *CgroupsWriteArgs, out *CgroupsResults)
 	for _, arg := range args.Args {
 		cg, err := c.resolveCgroup(ctx, arg.File)
 		if err != nil {
-			out.appendError(err)
+			out.Results = append(out.Results, newError(err))
 			continue
 		}
 
 		err = cg.WriteControl(ctx, arg.File.Name, arg.Value)
 		if err != nil {
-			out.appendError(err)
+			out.Results = append(out.Results, newError(err))
 		} else {
-			out.appendValue("")
+			out.Results = append(out.Results, newValue(""))
 		}
 	}
 	return nil
