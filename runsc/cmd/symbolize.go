@@ -19,16 +19,45 @@ import (
 	"os"
 
 	"github.com/google/subcommands"
+	specs "github.com/opencontainers/runtime-spec/specs-go"
 
-	"gvisor.dev/gvisor/runsc/cmd/sentry/sentrycmd"
 	"gvisor.dev/gvisor/runsc/cmd/util"
+	"gvisor.dev/gvisor/runsc/config"
 	"gvisor.dev/gvisor/runsc/flag"
 	"gvisor.dev/gvisor/runsc/gvisorbinaries"
 )
 
-// Symbolize implements subcommands.Command for the "symbolize" command.
+// Symbolize implements subcommands.Command for the "symbolize" command, by
+// forwarding it to the Sentry binary whose coverage metadata it needs.
 type Symbolize struct {
-	sentrycmd.Symbolize
+	dumpAll bool
+}
+
+// Name implements subcommands.Command.Name.
+func (*Symbolize) Name() string {
+	return "symbolize"
+}
+
+// Synopsis implements subcommands.Command.Synopsis.
+func (*Symbolize) Synopsis() string {
+	return "Convert synthetic instruction pointers from kcov into positions in the gVisor source code. Only used when Go coverage is enabled."
+}
+
+// Usage implements subcommands.Command.Usage.
+func (*Symbolize) Usage() string {
+	return `symbolize - converts synthetic instruction pointers into positions in the gVisor source code.
+`
+}
+
+// SetFlags implements subcommands.Command.SetFlags.
+func (c *Symbolize) SetFlags(f *flag.FlagSet) {
+	f.BoolVar(&c.dumpAll, "all", false, "dump information on all coverage blocks along with their synthetic PCs")
+}
+
+// FetchSpec implements util.SubCommand.FetchSpec.
+func (*Symbolize) FetchSpec(*config.Config, *flag.FlagSet) (string, *specs.Spec, error) {
+	// This command does not operate on a single container, so nothing to fetch.
+	return "", nil, nil
 }
 
 // Execute implements subcommands.Command.Execute.
@@ -43,7 +72,7 @@ func (c *Symbolize) Execute(ctx context.Context, f *flag.FlagSet, args ...any) s
 		return util.Errorf("Sentry sidecar binary %q is not available: %v", sentry.Name, err)
 	}
 	argv := []string{p, c.Name()}
-	if c.DumpAll {
+	if c.dumpAll {
 		argv = append(argv, "-all")
 	}
 	err = sentry.Exec(gvisorbinaries.Options{Argv: argv, Envv: os.Environ()})
