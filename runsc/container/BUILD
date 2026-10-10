@@ -23,8 +23,6 @@ go_library(
         "//pkg/cleanup",
         "//pkg/log",
         "//pkg/sentry/control",
-        "//pkg/sentry/fsimpl/erofs",
-        "//pkg/sentry/fsimpl/tmpfs",
         "//pkg/sentry/hostmm",
         "//pkg/sentry/state/checkpointfiles",
         "//pkg/sighandling",
