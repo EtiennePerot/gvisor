@@ -47,7 +47,7 @@ func (*Platforms) SetFlags(f *flag.FlagSet) {}
 
 // Execute implements subcommands.Command.Execute.
 func (*Platforms) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcommands.ExitStatus {
-	for _, p := range platform.List() {
+	for _, p := range platform.HostSetupNames() {
 		fmt.Fprintf(os.Stdout, "%s\n", p)
 	}
 	return subcommands.ExitSuccess
