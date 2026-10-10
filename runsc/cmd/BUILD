@@ -8,6 +8,7 @@ package(
 go_library(
     name = "cmd",
     srcs = [
+        "boot.go",
         "checkpoint.go",
         "cmd.go",
         "cpu_features.go",
