@@ -204,8 +204,8 @@ docs(
 genrule(
     name = "syscalljson",
     outs = ["syscalls.json"],
-    cmd = "$(location //runsc) -- help syscalls -format json -filename $@",
-    tools = ["//runsc"],
+    cmd = "$(location //runsc/cmd/sentry:gvisor_sentry) -- syscalls -format json -filename $@",
+    tools = ["//runsc/cmd/sentry:gvisor_sentry"],
 )
 
 # Generate markdown from the json dump.
