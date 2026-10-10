@@ -34,7 +34,6 @@ go_library(
         "//pkg/sentry/checkpoint",
         "//pkg/sentry/control",
         "//pkg/sentry/devices/nvproxy/nvconf",
-        "//pkg/sentry/fsimpl/erofs",
         "//pkg/sentry/platform",
         "//pkg/sentry/seccheck",
         "//pkg/sentry/state/checkpointfiles",

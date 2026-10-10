@@ -51,7 +51,6 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/checkpoint"
 	"gvisor.dev/gvisor/pkg/sentry/control"
 	"gvisor.dev/gvisor/pkg/sentry/devices/nvproxy/nvconf"
-	"gvisor.dev/gvisor/pkg/sentry/fsimpl/erofs"
 	"gvisor.dev/gvisor/pkg/sentry/platform"
 	"gvisor.dev/gvisor/pkg/sentry/seccheck"
 	"gvisor.dev/gvisor/pkg/sentry/state/checkpointfiles"
@@ -2791,7 +2790,7 @@ func SetUserMappings(spec *specs.Spec, pid int) error {
 func (s *Sandbox) Mount(cid, fstype, src, dest string) error {
 	var files []*os.File
 	switch fstype {
-	case erofs.Name:
+	case "erofs":
 		if imageFile, err := os.Open(src); err != nil {
 			return fmt.Errorf("opening %s: %v", src, err)
 		} else {
