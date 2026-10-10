@@ -11,6 +11,7 @@ go_library(
         "boot.go",
         "chroot.go",
         "symbolize.go",
+        "syscalls.go",
     ],
     visibility = ["//runsc:__subpackages__"],
     deps = [
@@ -29,6 +30,7 @@ go_library(
         "//pkg/sentry/devices/nvproxy",
         "//pkg/sentry/devices/nvproxy/nvconf",
         "//pkg/sentry/hostmm",
+        "//pkg/sentry/kernel",
         "//pkg/sentry/platform",
         "//pkg/sentry/syscalls/linux",
         "//pkg/tcpip/nftables",
