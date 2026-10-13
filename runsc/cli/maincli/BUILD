@@ -32,6 +32,7 @@ go_test(
     embed = [":maincli"],
     deps = [
         "//runsc/cmd",
+        "//runsc/cmd/sentry/sentrycmd",
         "//runsc/flag",
         "@com_github_google_subcommands//:go_default_library",
     ],
