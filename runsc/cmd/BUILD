@@ -8,7 +8,6 @@ package(
 go_library(
     name = "cmd",
     srcs = [
-        "boot.go",
         "checkpoint.go",
         "cmd.go",
         "cpu_features.go",
@@ -139,6 +138,7 @@ go_test(
         "//runsc/config",
         "//runsc/container",
         "//runsc/flag",
+        "//runsc/gvisorbinaries",
         "//runsc/mitigate",
         "//runsc/sandbox",
         "//runsc/specutils",
