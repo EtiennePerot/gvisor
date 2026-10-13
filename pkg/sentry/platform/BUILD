@@ -11,7 +11,6 @@ go_library(
         "context.go",
         "cpuid_amd64.go",
         "cpuid_arm64.go",
-        "host_setup.go",
         "mmap_min_addr.go",
         "platform.go",
     ],
