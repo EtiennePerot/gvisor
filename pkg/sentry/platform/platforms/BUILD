@@ -39,6 +39,9 @@ go_test(
     name = "platforms_test",
     size = "small",
     srcs = ["platforms_test.go"],
-    embed = [":platforms"],
-    deps = ["//pkg/sentry/platform"],
+    library = ":platforms",
+    deps = [
+        "//pkg/sentry/platform",
+        "//pkg/sentry/platform/platformdesc",
+    ],
 )
