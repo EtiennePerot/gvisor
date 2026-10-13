@@ -51,7 +51,7 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/checkpoint"
 	"gvisor.dev/gvisor/pkg/sentry/control"
 	"gvisor.dev/gvisor/pkg/sentry/devices/nvproxy/nvconf"
-	"gvisor.dev/gvisor/pkg/sentry/platform"
+	"gvisor.dev/gvisor/pkg/sentry/platform/platformdesc"
 	"gvisor.dev/gvisor/pkg/sentry/seccheck"
 	"gvisor.dev/gvisor/pkg/sentry/state/checkpointfiles"
 	"gvisor.dev/gvisor/pkg/state/statefile"
@@ -964,7 +964,7 @@ func (s *Sandbox) createSandboxProcess(conf *config.Config, args *Args, startSyn
 	// a time. Try to make RLIMIT_MEMLOCK unlimited so that it can do so. runsc
 	// expects to run in a memory cgroup that limits its memory usage as
 	// required.
-	// This needs to be done before exec'ing `runsc boot`, as that subcommand
+	// This needs to be done before exec'ing the Sentry, as the Sentry
 	// runs as an unprivileged user that will not be able to call `setrlimit`
 	// by itself. Calling `setrlimit` here will have the side-effect of setting
 	// the limit on the currently-running `runsc` process as well, but that
@@ -1017,7 +1017,7 @@ func (s *Sandbox) createSandboxProcess(conf *config.Config, args *Args, startSyn
 	}
 	lfOpts.Command = "boot" // Revert command to "boot".
 
-	sentryBin := &gvisorbinaries.GvisorSentry
+	sentryBin := sentryBinary(conf)
 	// runsc cannot tell whether the Sentry sidecar uses cgo, so assume it
 	// does if runsc does: race builds pair a race runsc with a race Sentry.
 	// Caveats: a cgo runsc booting a pure Sentry (e.g. a cgo test binary)
@@ -1026,7 +1026,6 @@ func (s *Sandbox) createSandboxProcess(conf *config.Config, args *Args, startSyn
 	// so that Sentry's stubs would crash; no build pairs them today.
 	sentryUsesCgo := config.CgoEnabled
 	if conf.Network == config.NetworkPlugin {
-		sentryBin = &gvisorbinaries.GvisorSentryPluginStack
 		sentryUsesCgo = true
 	}
 	bootBinPath, err := sentryBin.Path()
@@ -1156,7 +1155,7 @@ func (s *Sandbox) createSandboxProcess(conf *config.Config, args *Args, startSyn
 		return err
 	}
 
-	gPlatform, err := platform.LookupHostSetup(conf.Platform)
+	gPlatform, err := platformdesc.Lookup(conf.Platform)
 	if err != nil {
 		return fmt.Errorf("cannot look up platform: %w", err)
 	}
@@ -1321,7 +1320,7 @@ func (s *Sandbox) createSandboxProcess(conf *config.Config, args *Args, startSyn
 				// CAP_SETPCAP is required to clear the bounding set.
 				uintptr(capability.CAP_SETPCAP),
 			)
-			if gPlatform.Requirements().RequiresCapSysPtrace {
+			if gPlatform.Requirements.RequiresCapSysPtrace {
 				cmd.SysProcAttr.AmbientCaps = append(cmd.SysProcAttr.AmbientCaps,
 					uintptr(capability.CAP_SYS_PTRACE))
 			}
@@ -2589,7 +2588,7 @@ func (s *Sandbox) configureStdios(conf *config.Config, stdios []*os.File) error 
 // platform does not need a device file, then nil is returned.
 // devicePath may be empty to use a sane platform-specific default.
 func deviceFileForPlatform(name, devicePath string) (*fd.FD, error) {
-	p, err := platform.LookupHostSetup(name)
+	p, err := platformdesc.Lookup(name)
 	if err != nil {
 		return nil, err
 	}
@@ -2615,8 +2614,16 @@ func getNvproxyDriverVersion(conf *config.Config) (string, error) {
 	}
 }
 
+// sentryBinary returns the Sentry sidecar binary that boots the sandbox.
+func sentryBinary(conf *config.Config) *gvisorbinaries.Binary {
+	if conf.Network == config.NetworkPlugin {
+		return &gvisorbinaries.GvisorSentryPluginStack
+	}
+	return &gvisorbinaries.GvisorSentry
+}
+
 // checkBinaryPermissions verifies that the required binary bits are set on
-// the runsc executable.
+// the Sentry executable, which re-executes itself as an unprivileged user.
 func checkBinaryPermissions(conf *config.Config) error {
 	// All platforms need the other exe bit
 	neededBits := os.FileMode(0001)
@@ -2625,12 +2632,12 @@ func checkBinaryPermissions(conf *config.Config) error {
 		neededBits |= os.FileMode(0004)
 	}
 
-	exePath, err := os.Executable()
+	exePath, err := sentryBinary(conf).Path()
 	if err != nil {
-		return fmt.Errorf("getting exe path: %v", err)
+		return fmt.Errorf("getting Sentry path: %v", err)
 	}
 
-	// Check the permissions of the runsc binary and print an error if it
+	// Check the permissions of the Sentry binary and print an error if it
 	// doesn't match expectations.
 	info, err := os.Stat(exePath)
 	if err != nil {
