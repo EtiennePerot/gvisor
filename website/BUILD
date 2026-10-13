@@ -204,7 +204,7 @@ docs(
 genrule(
     name = "syscalljson",
     outs = ["syscalls.json"],
-    cmd = "$(location //runsc/cmd/sentry:gvisor_sentry) -- syscalls -format json -filename $@",
+    cmd = "$(location //runsc/cmd/sentry:gvisor_sentry) -- help syscalls -format json -filename $@",
     tools = ["//runsc/cmd/sentry:gvisor_sentry"],
 )
 

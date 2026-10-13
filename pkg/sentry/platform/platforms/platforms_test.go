@@ -15,26 +15,18 @@
 package platforms
 
 import (
+	"slices"
 	"testing"
 
 	"gvisor.dev/gvisor/pkg/sentry/platform"
+	"gvisor.dev/gvisor/pkg/sentry/platform/platformdesc"
 )
 
-// TestHostSetupMatchesConstructor checks that each registered platform's
-// HostSetup agrees with its Constructor.
-func TestHostSetupMatchesConstructor(t *testing.T) {
-	for _, name := range platform.List() {
-		c, err := platform.Lookup(name)
-		if err != nil {
-			t.Fatalf("platform.Lookup(%q): %v", name, err)
-		}
-		h, err := platform.LookupHostSetup(name)
-		if err != nil {
-			t.Errorf("platform.LookupHostSetup(%q): %v", name, err)
-			continue
-		}
-		if got, want := h.Requirements(), c.Requirements(); got != want {
-			t.Errorf("platform %q: HostSetup requirements %+v, Constructor requirements %+v", name, got, want)
-		}
+// TestDescs checks that every registered platform has a description and that
+// every description has a registered platform.
+func TestDescs(t *testing.T) {
+	got, want := platformdesc.List(), platform.List()
+	if !slices.Equal(got, want) {
+		t.Errorf("platformdesc.List() = %v, want platform.List() = %v", got, want)
 	}
 }
