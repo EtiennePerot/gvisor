@@ -102,6 +102,7 @@ deps_test(
         "//runsc/cli/sentrycli",
         "//runsc/cmd/nvproxy",
         "//runsc/cmd/sandboxsetup",
+        "//runsc/cmd/sentry/forwardcmd",
         "//runsc/cmd/sentry/sentrycmd",
         "//runsc/cmd/util",
         "//runsc/config",

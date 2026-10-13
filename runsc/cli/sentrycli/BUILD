@@ -13,8 +13,10 @@ go_library(
     deps = [
         "//runsc/cli",
         "//runsc/cmd/nvproxy",
+        "//runsc/cmd/sentry/forwardcmd",
         "//runsc/cmd/sentry/sentrycmd",
         "//runsc/cmd/util",
         "//runsc/gvisorbinaries",
+        "@com_github_google_subcommands//:go_default_library",
     ],
 )
