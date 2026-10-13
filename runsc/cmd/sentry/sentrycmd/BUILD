@@ -10,14 +10,12 @@ go_library(
     srcs = [
         "boot.go",
         "chroot.go",
-        "symbolize.go",
     ],
     visibility = ["//runsc:__subpackages__"],
     deps = [
         "//pkg/abi/linux",
         "//pkg/abi/tpu",
         "//pkg/coretag",
-        "//pkg/coverage",
         "//pkg/cpuid",
         "//pkg/fd",
         "//pkg/hostarch",
@@ -29,7 +27,7 @@ go_library(
         "//pkg/sentry/devices/nvproxy",
         "//pkg/sentry/devices/nvproxy/nvconf",
         "//pkg/sentry/hostmm",
-        "//pkg/sentry/platform",
+        "//pkg/sentry/platform/platformdesc",
         "//pkg/sentry/syscalls/linux",
         "//pkg/tcpip/nftables",
         "//pkg/timing",
