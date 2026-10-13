@@ -32,6 +32,7 @@ go_library(
         "//pkg/tcpip/nftables",
         "//pkg/timing",
         "//runsc/boot",
+        "//runsc/boot/sentryapi",
         "//runsc/cmd/sandboxsetup",
         "//runsc/cmd/util",
         "//runsc/config",
