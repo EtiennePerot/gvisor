@@ -25,7 +25,9 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/runsc/cgroup"
+	"gvisor.dev/gvisor/runsc/specutils"
 )
 
 func TestIsRunning(t *testing.T) {
@@ -244,5 +246,102 @@ func TestCalculateCPUNum(t *testing.T) {
 				t.Errorf("calculateCPUNum() got cpuPeriod = %d, want %d", gotPeriod, tc.cpuPeriod)
 			}
 		})
+	}
+}
+
+func TestRootfsUpperTarFlags(t *testing.T) {
+	tmpDir := t.TempDir()
+	targetPath := filepath.Join(tmpDir, "target.tar")
+	if err := os.WriteFile(targetPath, []byte("tar-data"), 0644); err != nil {
+		t.Fatalf("os.WriteFile(%q) failed: %v", targetPath, err)
+	}
+	symlinkPath := filepath.Join(tmpDir, "symlink.tar")
+	if err := os.Symlink(targetPath, symlinkPath); err != nil {
+		t.Fatalf("os.Symlink(%q, %q) failed: %v", targetPath, symlinkPath, err)
+	}
+
+	if f, err := os.OpenFile(symlinkPath, rootfsUpperTarFlags(symlinkPath), 0644); err == nil {
+		f.Close()
+		t.Fatalf("os.OpenFile(%q, rootfsUpperTarFlags) error = nil, want %v", symlinkPath, unix.ELOOP)
+	} else if !errors.Is(err, unix.ELOOP) {
+		t.Errorf("os.OpenFile(%q, rootfsUpperTarFlags) error = %v, want %v", symlinkPath, err, unix.ELOOP)
+	}
+
+	f, err := os.OpenFile(targetPath, rootfsUpperTarFlags(targetPath), 0644)
+	if err != nil {
+		t.Fatalf("os.OpenFile(%q, rootfsUpperTarFlags) error = %v, want nil", targetPath, err)
+	}
+	defer f.Close()
+
+	procFDPath := fmt.Sprintf("/proc/self/fd/%d", f.Fd())
+	dupFile, err := os.OpenFile(procFDPath, rootfsUpperTarFlags(procFDPath), 0644)
+	if err != nil {
+		t.Fatalf("os.OpenFile(%q, rootfsUpperTarFlags) error = %v, want nil", procFDPath, err)
+	}
+	dupFile.Close()
+
+	for _, tc := range []struct {
+		path string
+		want bool
+	}{
+		{path: "/proc/self/fd/3", want: true},
+		{path: "/proc/thread-self/fd/4", want: true},
+		{path: "/dev/fd/5", want: true},
+		{path: "/proc/self/fd/", want: false},
+		{path: "/proc/self/fd/../etc/passwd", want: false},
+		{path: "/proc/self/fd/2147483648", want: false},
+		{path: "/tmp/upper.tar", want: false},
+	} {
+		if got := specutils.IsProcFDPath(tc.path); got != tc.want {
+			t.Errorf("specutils.IsProcFDPath(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestOpenReadOnlyTree(t *testing.T) {
+	dir := t.TempDir()
+	const name = "file"
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0666); err != nil {
+		t.Fatalf("os.WriteFile failed: %v", err)
+	}
+	treeFD, err := openReadOnlyTree(dir)
+	if errors.Is(err, unix.EPERM) || errors.Is(err, unix.ENOSYS) {
+		t.Skipf("openReadOnlyTree needs CAP_SYS_ADMIN and Linux 5.12: %v", err)
+	}
+	if err != nil {
+		t.Fatalf("openReadOnlyTree failed: %v", err)
+	}
+	defer unix.Close(treeFD)
+	f, err := openCheckpointFile(treeFD, dir, name, unix.O_RDONLY)
+	if err != nil {
+		t.Fatalf("open through the read-only tree failed: %v", err)
+	}
+	defer f.Close()
+	fd := int(f.Fd())
+
+	// A symlink leading out of the directory is not followed.
+	if err := os.Symlink(filepath.Join("..", filepath.Base(dir), name), filepath.Join(dir, "escape")); err != nil {
+		t.Fatalf("os.Symlink failed: %v", err)
+	}
+	if ef, err := openCheckpointFile(treeFD, dir, "escape", unix.O_RDONLY); err == nil {
+		ef.Close()
+		t.Errorf("open through a symlink leaving the directory succeeded, want EXDEV")
+	} else if !errors.Is(err, unix.EXDEV) {
+		t.Errorf("open through a symlink leaving the directory failed with %v, want EXDEV", err)
+	}
+
+	// The file can not be reopened for writing through any path.
+	for _, flags := range []int{unix.O_WRONLY, unix.O_RDWR} {
+		wfd, err := unix.Open(fmt.Sprintf("/proc/self/fd/%d", fd), flags|unix.O_CLOEXEC, 0)
+		if err == nil {
+			unix.Close(wfd)
+			t.Errorf("reopening with flags %#x succeeded, want EROFS", flags)
+		} else if !errors.Is(err, unix.EROFS) {
+			t.Errorf("reopening with flags %#x failed with %v, want EROFS", flags, err)
+		}
+	}
+	// The directory itself is unaffected.
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("y"), 0666); err != nil {
+		t.Errorf("writing through the original path failed: %v", err)
 	}
 }

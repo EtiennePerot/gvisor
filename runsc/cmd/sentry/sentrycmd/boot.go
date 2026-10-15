@@ -211,6 +211,11 @@ type Boot struct {
 	// procfs mount isn't needed anymore.
 	procMountSyncFD int
 
+	// procUmounterFD is the /proc unmounter sidecar binary, which is spawned
+	// to unmount /proc on behalf of this process. Only set with setUpRoot
+	// and without rootless.
+	procUmounterFD int
+
 	// procMountSyncFile holds the *os.File for procMountSyncFD when this
 	// process continues without re-exec'ing itself (see
 	// `applyCapsAllThreads`). It keeps the FD alive.
@@ -230,6 +235,7 @@ type Boot struct {
 	// particular is uint32 and there is no flag.Uint32Var().
 	procDriverNvidiaParams             string
 	nvidiaFabricIMEXManagementDevMinor int64
+	nvidiaMNCCManagementDevMinor       int64
 
 	// uid and gid are the user and group IDs to switch to after setting up the
 	// user namespace.
@@ -274,6 +280,7 @@ func (b *Boot) SetFlags(f *flag.FlagSet) {
 	f.Int64Var(&b.cpuPeriod, "cpu-period", 0, "raw CFS cpu period in usecs to expose via sandbox cgroupfs (0 means use default 100ms)")
 	f.IntVar(&b.cpuDMALatencyFD, "cpu-dma-latency-fd", -1, "file descriptor holding /dev/cpu_dma_latency open")
 	f.IntVar(&b.procMountSyncFD, "proc-mount-sync-fd", -1, "file descriptor that has to be written to when /proc isn't needed anymore and can be unmounted")
+	f.IntVar(&b.procUmounterFD, "proc-umounter-fd", -1, "file descriptor of the /proc unmounter binary")
 	f.IntVar(&b.syncUsernsFD, "sync-userns-fd", -1, "file descriptor used to synchronize rootless user namespace initialization.")
 	f.Uint64Var(&b.totalMem, "total-memory", 0, "sets the initial amount of total memory to report back to the container")
 	f.Uint64Var(&b.totalHostMem, "total-host-memory", 0, "total memory reported by host /proc/meminfo")
@@ -320,6 +327,7 @@ func (b *Boot) SetFlags(f *flag.FlagSet) {
 	f.StringVar(&b.nvidiaDriverVersion, "nvidia-driver-version", "", "Nvidia driver ABI version to use, or 'latest' for the newest supported one")
 	f.StringVar(&b.procDriverNvidiaParams, "nvidia-host-params", "", "value of /proc/driver/nvidia/params on the host")
 	f.Int64Var(&b.nvidiaFabricIMEXManagementDevMinor, "nvidia-fabric-imex-mgmt-minor", -1, "DeviceFileMinor in /proc/driver/nvidia/capabilities/fabric-imex-mgmt on the host")
+	f.Int64Var(&b.nvidiaMNCCManagementDevMinor, "nvidia-mncc-mgmt-minor", -1, "DeviceFileMinor in /proc/driver/nvidia/capabilities/mncc-mgmt on the host")
 }
 
 // willReexec returns true if this boot process will re-execute itself to
@@ -458,6 +466,10 @@ func (b *Boot) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcomma
 					b.nvidiaFabricIMEXManagementDevMinor = int64(nvhs.FabricIMEXManagementDevMinor)
 					argOverride["nvidia-fabric-imex-mgmt-minor"] = strconv.FormatUint(uint64(nvhs.FabricIMEXManagementDevMinor), 10)
 				}
+				if nvhs.HaveMNCCManagement {
+					b.nvidiaMNCCManagementDevMinor = int64(nvhs.MNCCManagementDevMinor)
+					argOverride["nvidia-mncc-mgmt-minor"] = strconv.FormatUint(uint64(nvhs.MNCCManagementDevMinor), 10)
+				}
 			}
 		}
 		timer.Reached("set nvproxy flags")
@@ -474,7 +486,13 @@ func (b *Boot) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcomma
 			// /proc is umounted from a forked process, because the
 			// current one is going to drop capabilities and won't be
 			// able to umount it.
-			cmd, w := sandboxsetup.ExecProcUmounter()
+			if b.procUmounterFD < 0 {
+				util.Fatalf("--proc-umounter-fd is required to set up the root")
+			}
+			umounter := os.NewFile(uintptr(b.procUmounterFD), "proc umounter")
+			cmd, w := sandboxsetup.ExecProcUmounter(umounter)
+			umounter.Close()
+			argOverride["proc-umounter-fd"] = "-1"
 			if b.willReexec() {
 				defer cmd.Wait()
 				defer w.Close()
@@ -726,6 +744,8 @@ func (b *Boot) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcomma
 			ProcDriverNvidiaParams:       b.procDriverNvidiaParams,
 			HaveFabricIMEXManagement:     b.nvidiaFabricIMEXManagementDevMinor >= 0,
 			FabricIMEXManagementDevMinor: uint32(b.nvidiaFabricIMEXManagementDevMinor),
+			HaveMNCCManagement:           b.nvidiaMNCCManagementDevMinor >= 0,
+			MNCCManagementDevMinor:       uint32(b.nvidiaMNCCManagementDevMinor),
 		},
 		HostTHP:                  b.hostTHP,
 		SaveFDs:                  b.saveFDs.GetFDs(),

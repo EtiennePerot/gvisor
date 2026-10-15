@@ -77,8 +77,8 @@ directories.
 
 ### I'm getting an error like: `panic: unable to attach: operation not permitted` or `fork/exec /proc/self/exe: invalid argument: unknown` {#runsc-perms}
 
-Make sure that permissions are correct on the `runsc` binary and on the
-sidecar binaries in the `gvisor-bin/` directory next to it.
+Make sure that permissions are correct on the `runsc` binary and on the sidecar
+binaries in the `gvisor-bin/` directory next to it.
 
 ```bash
 sudo chmod a+rx /usr/local/bin/runsc /usr/local/bin/gvisor-bin /usr/local/bin/gvisor-bin/*

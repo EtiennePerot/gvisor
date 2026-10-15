@@ -38,10 +38,13 @@ import (
 	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/erofs"
 	"gvisor.dev/gvisor/pkg/errors/linuxerr"
+	"gvisor.dev/gvisor/pkg/hostarch"
 	"gvisor.dev/gvisor/pkg/refs"
 	"gvisor.dev/gvisor/pkg/sentry/checkpoint"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
 	"gvisor.dev/gvisor/pkg/sentry/memmap"
+	"gvisor.dev/gvisor/pkg/sentry/pgalloc"
+	"gvisor.dev/gvisor/pkg/sentry/usage"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
 	"gvisor.dev/gvisor/pkg/sync"
 )
@@ -83,6 +86,12 @@ type filesystem struct {
 
 	// mf implements memmap.File for this image.
 	mf imageMemmapFile
+
+	// memoryFile is the application memory file. memoryFile is immutable.
+	memoryFile *pgalloc.MemoryFile `state:"nosave"`
+
+	// zeroPage is a page of memoryFile that backs mappings of sparse holes.
+	zeroPage memmap.FileRange
 
 	// useReadForIO indicates that file I/O should be driven by read syscalls
 	// from the image file descriptor instead of the image mapping.
@@ -158,6 +167,12 @@ func (fstype FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virt
 		return nil, nil, err
 	}
 
+	memoryFile := pgalloc.MemoryFileFromContext(ctx)
+	if memoryFile == nil {
+		ctx.Warningf("erofs.FilesystemType.GetFilesystem: CtxMemoryFile is nil")
+		return nil, nil, linuxerr.EINVAL
+	}
+
 	devMinor, err := vfsObj.GetAnonBlockDevMinor()
 	if err != nil {
 		return nil, nil, err
@@ -167,6 +182,7 @@ func (fstype FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virt
 		mopts:             opts.Data,
 		iopts:             iopts,
 		image:             image,
+		memoryFile:        memoryFile,
 		devMinor:          devMinor,
 		useReadForIO:      useReadForIO,
 		mf:                imageMemmapFile{image: image},
@@ -174,6 +190,11 @@ func (fstype FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virt
 	}
 	fs.vfsfs.Init(vfsObj, &fstype, fs)
 	cu.Add(func() { fs.vfsfs.DecRef(ctx) })
+
+	fs.zeroPage, err = fs.memoryFile.Allocate(hostarch.PageSize, pgalloc.AllocOpts{Kind: usage.PageCache, MemCgID: pgalloc.MemoryCgroupIDFromContext(ctx)})
+	if err != nil {
+		return nil, nil, err
+	}
 
 	fs.inodeBuckets = make([]inodeBucket, runtime.GOMAXPROCS(0))
 	for i := range fs.inodeBuckets {
@@ -231,6 +252,9 @@ func (fs *filesystem) Release(ctx context.Context) {
 	// An extra reference was held by the filesystem on the root.
 	if fs.root != nil {
 		fs.root.DecRef(ctx)
+	}
+	if fs.zeroPage.Length() != 0 {
+		fs.memoryFile.DecRef(fs.zeroPage)
 	}
 	fs.image.Close()
 	fs.vfsfs.VirtualFilesystem().PutAnonBlockDevMinor(fs.devMinor)
@@ -747,6 +771,13 @@ func (d *dentry) open(ctx context.Context, rp *vfs.ResolvingPath, opts *vfs.Open
 	ats := vfs.AccessTypesForOpenFlags(opts)
 	if err := d.inode.checkPermissions(rp.Credentials(), ats); err != nil {
 		return nil, err
+	}
+	if ft := d.inode.fileType(); opts.FileExec && ft != linux.S_IFREG && ft != linux.S_IFLNK {
+		// Only regular files may be executed, and exec opens of special files
+		// fail with EACCES rather than the ENXIO below, as in Linux's
+		// fs/namei.c:may_open(). Symlinks are exempt so that they produce
+		// ELOOP, also per may_open().
+		return nil, linuxerr.EACCES
 	}
 
 	switch d.inode.fileType() {

@@ -159,27 +159,13 @@ func testMultiContainerCheckpointRestore(t *testing.T, conf *config.Config, comp
 		t.Fatalf("Failed to wait for output file: %v", err)
 	}
 
-	checkpointWaiter := make(chan error, 1)
-	go func() {
-		// WaitCheckpoint on the second container.
-		checkpointWaiter <- conts[1].WaitCheckpoint()
-	}()
-
 	// Checkpoint root container; save state into new file.
 	if err := conts[0].Checkpoint(conf, dir, sandbox.CheckpointOpts{Compression: compression}); err != nil {
 		t.Fatalf("error checkpointing container to empty file: %v", err)
 	}
 
-	// Wait for the checkpoint to complete. The initial sandbox not destroyed yet
-	// to check that no conflict with it occurs during restore.
-	select {
-	case waitErr := <-checkpointWaiter:
-		if waitErr != nil {
-			t.Errorf("error waiting for checkpoint to complete: %v", waitErr)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatalf("timed out waiting for checkpoint to complete")
-	}
+	// Checkpoint returns after saving. Keep the initial sandbox alive to check
+	// that it does not conflict with the restored containers.
 
 	lastNum, err := readOutputNum(outputPath, -1)
 	if err != nil {
@@ -676,11 +662,9 @@ func TestCheckpointRestoreAnnotation(t *testing.T) {
 	}
 	defer cleanup()
 
-	if err := conts[0].WaitCheckpoint(); err != nil {
-		t.Fatalf("error waiting for checkpoint: %v", err)
-	}
-
-	// Wait until the checkpoint read unblocks and writes to `out`.
+	// The proc fd was opened before the trigger, so its read waits for that
+	// checkpoint even if it has already completed. A new WaitCheckpoint RPC
+	// would instead wait for the next generation.
 	if err := waitForContent(out, "resume\n"); err != nil {
 		t.Fatal(err)
 	}
@@ -1480,11 +1464,6 @@ func testMultiContainerChainedCheckpointRestore(t *testing.T, conf *config.Confi
 			t.Fatalf("iter %d: os.MkdirAll failed: %v", iter, err)
 		}
 
-		checkpointWaiter := make(chan error, 1)
-		go func() {
-			checkpointWaiter <- conts[1].WaitCheckpoint()
-		}()
-
 		// Checkpoint root container with SplitFSCheckpointPaths targeting both
 		// sub-containers' tmpfs mounts.
 		checkpointOpts := sandbox.CheckpointOpts{
@@ -1496,15 +1475,6 @@ func testMultiContainerChainedCheckpointRestore(t *testing.T, conf *config.Confi
 		}
 		if err := conts[0].Checkpoint(conf, checkpointDir, checkpointOpts); err != nil {
 			t.Fatalf("iter %d: error checkpointing container: %v", iter, err)
-		}
-
-		select {
-		case waitErr := <-checkpointWaiter:
-			if waitErr != nil {
-				t.Errorf("iter %d: error waiting for checkpoint to complete: %v", iter, waitErr)
-			}
-		case <-time.After(10 * time.Second):
-			t.Fatalf("iter %d: timed out waiting for checkpoint to complete", iter)
 		}
 
 		checkFSCheckpointFiles(t, checkpointDir, tc.wantPrefix)
@@ -1591,4 +1561,135 @@ func resetOutputFile(t *testing.T, path string) *os.File {
 	}
 	t.Cleanup(func() { f.Close() })
 	return f
+}
+
+// TestMultiContainerCheckpointRestoreJoinPIDNamespace checks that a container
+// started after restore joins a restored container's PID namespace by path.
+func TestMultiContainerCheckpointRestoreJoinPIDNamespace(t *testing.T) {
+	conf := testutil.TestConfig(t)
+	setupTestRootDir(t, conf)
+
+	dir, err := os.MkdirTemp(testutil.TmpDir(), "checkpoint-test")
+	if err != nil {
+		t.Fatalf("os.MkdirTemp() failed: %v", err)
+	}
+	defer os.RemoveAll(dir)
+	if err := os.Chmod(dir, 0777); err != nil {
+		t.Fatalf("error chmoding file: %q, %v", dir, err)
+	}
+
+	// The second container runs in a PID namespace of its own, named by path.
+	const pidnsPath = "/tmp/shared-pidns"
+	podSpecs, ids := createSpecs(sleepCmd, []string{"/bin/sleep", "1000"})
+	podSpecs[1].Linux = &specs.Linux{
+		Namespaces: []specs.LinuxNamespace{{Type: specs.PIDNamespace, Path: pidnsPath}},
+	}
+	conts, cleanup, err := startContainers(conf, podSpecs, ids)
+	if err != nil {
+		t.Fatalf("error starting containers: %v", err)
+	}
+	defer cleanup()
+	if err := conts[0].Checkpoint(conf, dir, sandbox.CheckpointOpts{}); err != nil {
+		t.Fatalf("error checkpointing: %v", err)
+	}
+
+	newIDs := []string{testutil.RandomContainerID(), testutil.RandomContainerID()}
+	podSpecs[1].Annotations[specutils.ContainerdSandboxIDAnnotation] = newIDs[0]
+	_, cleanupRestored, err := restoreContainers(conf, podSpecs, newIDs, dir)
+	if err != nil {
+		t.Fatalf("error restoring containers: %v", err)
+	}
+	defer cleanupRestored()
+
+	// A new container naming the same path joins the restored namespace, where
+	// the restored container's process is PID 1.
+	joinSpec := testutil.NewSpecWithArgs("/bin/sleep", "2000")
+	joinSpec.Annotations[specutils.ContainerdContainerTypeAnnotation] = specutils.ContainerdContainerTypeContainer
+	joinSpec.Annotations[specutils.ContainerdSandboxIDAnnotation] = newIDs[0]
+	joinSpec.Linux = &specs.Linux{
+		Namespaces: []specs.LinuxNamespace{{Type: specs.PIDNamespace, Path: pidnsPath}},
+	}
+	joined, cleanupJoined, err := startContainers(conf, []*specs.Spec{joinSpec}, []string{testutil.RandomContainerID()})
+	if err != nil {
+		t.Fatalf("error starting container: %v", err)
+	}
+	defer cleanupJoined()
+	out, err := executeCombinedOutput(conf, joined[0], nil, "/bin/cat", "/proc/1/cmdline")
+	if err != nil {
+		t.Fatalf("error reading /proc/1/cmdline: %v", err)
+	}
+	if got, want := strings.ReplaceAll(string(out), "\x00", " "), "/bin/sleep 1000 "; got != want {
+		t.Errorf("PID 1 in the joined namespace runs %q, want %q", got, want)
+	}
+}
+
+// TestMultiContainerCheckpointRestoreJoinCgroupNamespace checks that a
+// container started after restore joins a restored container's cgroup
+// namespace by path.
+func TestMultiContainerCheckpointRestoreJoinCgroupNamespace(t *testing.T) {
+	conf := testutil.TestConfig(t)
+	conf.InSandboxCgroup = config.InSandboxCgroupV2
+	setupTestRootDir(t, conf)
+
+	dir, err := os.MkdirTemp(testutil.TmpDir(), "checkpoint-test")
+	if err != nil {
+		t.Fatalf("os.MkdirTemp() failed: %v", err)
+	}
+	defer os.RemoveAll(dir)
+	if err := os.Chmod(dir, 0777); err != nil {
+		t.Fatalf("error chmoding file: %q, %v", dir, err)
+	}
+
+	// The second container runs in a cgroup namespace of its own, named by
+	// path.
+	const cgroupnsPath = "/tmp/shared-cgroupns"
+	mnt := specs.Mount{Destination: "/sys/fs/cgroup", Type: "cgroup"}
+	withCgroupNamespace := func(spec *specs.Spec) {
+		spec.Mounts = append(spec.Mounts, mnt)
+		spec.Linux = &specs.Linux{
+			Namespaces: []specs.LinuxNamespace{{Type: specs.CgroupNamespace, Path: cgroupnsPath}},
+		}
+		createSharedMount(mnt, "test-mount", spec)
+	}
+	podSpecs, ids := createSpecs(sleepCmd, sleepCmd)
+	createSharedMount(mnt, "test-mount", podSpecs[0])
+	withCgroupNamespace(podSpecs[1])
+	conts, cleanup, err := startContainers(conf, podSpecs, ids)
+	if err != nil {
+		t.Fatalf("error starting containers: %v", err)
+	}
+	defer cleanup()
+	if err := conts[0].Checkpoint(conf, dir, sandbox.CheckpointOpts{}); err != nil {
+		t.Fatalf("error checkpointing: %v", err)
+	}
+
+	newIDs := []string{testutil.RandomContainerID(), testutil.RandomContainerID()}
+	podSpecs[1].Annotations[specutils.ContainerdSandboxIDAnnotation] = newIDs[0]
+	restored, cleanupRestored, err := restoreContainers(conf, podSpecs, newIDs, dir)
+	if err != nil {
+		t.Fatalf("error restoring containers: %v", err)
+	}
+	defer cleanupRestored()
+
+	joinSpec := testutil.NewSpecWithArgs(sleepCmd...)
+	joinSpec.Annotations[specutils.ContainerdContainerTypeAnnotation] = specutils.ContainerdContainerTypeContainer
+	joinSpec.Annotations[specutils.ContainerdSandboxIDAnnotation] = newIDs[0]
+	withCgroupNamespace(joinSpec)
+	joined, cleanupJoined, err := startContainers(conf, []*specs.Spec{joinSpec}, []string{testutil.RandomContainerID()})
+	if err != nil {
+		t.Fatalf("error starting container: %v", err)
+	}
+	defer cleanupJoined()
+
+	cgroupNamespace := func(c *Container) string {
+		t.Helper()
+		out, err := executeCombinedOutput(conf, c, nil, "/bin/readlink", "/proc/self/ns/cgroup")
+		if err != nil {
+			t.Fatalf("error reading the cgroup namespace of %q: %v", c.ID, err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	if got, want := cgroupNamespace(joined[0]), cgroupNamespace(restored[1]); got != want {
+		t.Errorf("new container is in cgroup namespace %q, want the restored container's %q", got, want)
+	}
 }
