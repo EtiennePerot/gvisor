@@ -2030,6 +2030,12 @@ func (apfl *AsyncPagesFileLoad) main() {
 				apfl.errVal.Store(linuxerr.EIO)
 				apfl.mu.Unlock()
 				apfl.amflsMu.Unlock()
+				// Earlier completions in this batch may have satisfied
+				// waiters whose pages are no longer in unloaded, so the
+				// exit path won't find them; wake them now.
+				for _, w := range wakeups {
+					w.wakeup.Notify(1)
+				}
 				return
 			}
 			apfl.bytesLoaded += op.total

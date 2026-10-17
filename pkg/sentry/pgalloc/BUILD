@@ -207,6 +207,7 @@ go_test(
     name = "pgalloc_test",
     size = "small",
     srcs = [
+        "async_load_test.go",
         "pgalloc_64k_test.go",
         "pgalloc_test.go",
         "save_restore_test.go",
@@ -216,6 +217,7 @@ go_test(
         "//pkg/hostarch",
         "//pkg/memutil",
         "//pkg/sentry/memmap",
+        "//pkg/sentry/state/stateio",
         "@org_golang_x_sys//unix:go_default_library",
     ],
 )
