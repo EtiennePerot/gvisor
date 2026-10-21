@@ -643,6 +643,35 @@ func WaitForReady(pid int, timeout time.Duration, ready func() (bool, error)) er
 	return backoff.Retry(op, b)
 }
 
+// ProcessStartTime returns the start time of process pid, in clock ticks
+// after system boot (field 22 of /proc/[pid]/stat). Together with the PID, it
+// identifies a process across PID reuse.
+func ProcessStartTime(pid int) (uint64, error) {
+	stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return 0, err
+	}
+	return parseProcStatStartTime(stat)
+}
+
+// parseProcStatStartTime returns the start time field of the given contents
+// of /proc/[pid]/stat.
+func parseProcStatStartTime(stat []byte) (uint64, error) {
+	// The command name (field 2) is in parentheses and may itself contain
+	// spaces and parentheses. The fields after it are separated by spaces.
+	i := bytes.LastIndexByte(stat, ')')
+	if i < 0 {
+		return 0, fmt.Errorf("malformed /proc/[pid]/stat: %q", stat)
+	}
+	fields := strings.Fields(string(stat[i+1:]))
+	// fields[0] is field 3 (state), so field 22 (starttime) is fields[19].
+	const startTimeIdx = 22 - 3
+	if len(fields) <= startTimeIdx {
+		return 0, fmt.Errorf("malformed /proc/[pid]/stat: %q", stat)
+	}
+	return strconv.ParseUint(fields[startTimeIdx], 10, 64)
+}
+
 // WaitForNonChildExit waits for the given process to exit, up to `timeout`.
 // As the name implies, `pid` must not be a child of the current process.
 // Returns immediately if the process does not exist.

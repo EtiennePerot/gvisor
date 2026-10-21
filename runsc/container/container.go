@@ -118,6 +118,12 @@ type Container struct {
 	// be 0 if the gofer has been killed.
 	GoferPid sandbox.Pid `json:"goferPid"`
 
+	// GoferStartTime is the start time of the gofer process, as returned by
+	// specutils.ProcessStartTime. It is used to tell whether GoferPid still
+	// refers to the gofer: the gofer may exit before the container does, and
+	// its PID may then be reused by an unrelated process. 0 if unknown.
+	GoferStartTime uint64 `json:"goferStartTime,omitempty"`
+
 	// Sandbox is the sandbox this container is running in. It's set when the
 	// container is created and reset when the sandbox is destroyed.
 	Sandbox *sandbox.Sandbox `json:"sandbox"`
@@ -1403,7 +1409,7 @@ func (c *Container) stop() error {
 	}
 
 	// Try killing gofer if it does not exit with container.
-	if goferPid := c.GoferPid.Load(); goferPid != 0 {
+	if goferPid := c.liveGoferPid(); goferPid != 0 {
 		log.Debugf("Killing gofer for container, cid: %s, PID: %d", c.ID, goferPid)
 		// The gofer process may have been racily reaped by the goroutine from
 		// c.Wait() so ignore ESRCH errors.
@@ -1432,8 +1438,33 @@ func (c *Container) stop() error {
 	return nil
 }
 
-func (c *Container) waitForStopped() error {
+// liveGoferPid returns c.GoferPid if it still refers to the gofer process.
+// Otherwise, the gofer has exited and been reaped, and its PID may have been
+// reused by an unrelated process that must not be signaled or waited for; in
+// this case, liveGoferPid clears c.GoferPid and returns 0.
+func (c *Container) liveGoferPid() int {
 	goferPid := c.GoferPid.Load()
+	if goferPid == 0 || c.goferIsChild || c.GoferStartTime == 0 {
+		// The PID of an unreaped child can't be reused, and c.Wait() clears
+		// c.GoferPid when it reaps the gofer. State files written before
+		// GoferStartTime was added keep the old behavior.
+		return goferPid
+	}
+	startTime, err := specutils.ProcessStartTime(goferPid)
+	if err == nil && startTime == c.GoferStartTime {
+		return goferPid
+	}
+	if err == nil {
+		log.Infof("Gofer for container %q (PID %d) has exited, its PID now belongs to another process", c.ID, goferPid)
+	} else {
+		log.Debugf("Gofer for container %q (PID %d) has exited: %v", c.ID, goferPid, err)
+	}
+	c.GoferPid.Store(0)
+	return 0
+}
+
+func (c *Container) waitForStopped() error {
+	goferPid := c.liveGoferPid()
 	if goferPid == 0 {
 		return nil
 	}
@@ -1794,6 +1825,13 @@ func (c *Container) createGoferProcess(conf *config.Config, mountHints *sentryap
 	log.Infof("Gofer started, PID: %d", cmd.Process.Pid)
 	c.GoferPid.Store(cmd.Process.Pid)
 	c.goferIsChild = true
+	// The gofer is our unreaped child, so its PID can't have been reused yet.
+	if startTime, err := specutils.ProcessStartTime(cmd.Process.Pid); err == nil {
+		c.GoferStartTime = startTime
+	} else {
+		log.Warningf("Failed to read the start time of the gofer (PID %d): %v", cmd.Process.Pid, err)
+		c.GoferStartTime = 0
+	}
 	rpcPidCh <- cmd.Process.Pid
 
 	if pinGoferNetNS {
@@ -1981,7 +2019,7 @@ func (c *Container) IsSandboxRoot() bool {
 
 // adjustGoferOOMScoreAdj sets the oom_store_adj for the container's gofer.
 func (c *Container) adjustGoferOOMScoreAdj() error {
-	goferPid := c.GoferPid.Load()
+	goferPid := c.liveGoferPid()
 	if goferPid == 0 || c.Spec.Process.OOMScoreAdj == nil {
 		return nil
 	}

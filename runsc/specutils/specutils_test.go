@@ -16,6 +16,7 @@ package specutils
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -981,5 +982,58 @@ func TestTPUProxyEnabled(t *testing.T) {
 				t.Errorf("TPUProxyEnabled() got: %v, want: %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestParseProcStatStartTime(t *testing.T) {
+	for _, tc := range []struct {
+		stat    string
+		want    uint64
+		wantErr bool
+	}{
+		{
+			stat: "1234 (sleep) S 1 1234 1234 0 -1 4194304 97 0 0 0 0 0 0 0 20 0 1 0 5678 2215936 247 18446744073709551615",
+			want: 5678,
+		},
+		{
+			// Spaces and parentheses in the command name.
+			stat: "1234 (a) b (c) R 1 1234 1234 0 -1 4194304 97 0 0 0 0 0 0 0 20 0 1 0 42 2215936 247",
+			want: 42,
+		},
+		{
+			stat:    "1234 (sleep) S 1 1234",
+			wantErr: true,
+		},
+		{
+			stat:    "garbage",
+			wantErr: true,
+		},
+	} {
+		got, err := parseProcStatStartTime([]byte(tc.stat))
+		if (err != nil) != tc.wantErr || got != tc.want {
+			t.Errorf("parseProcStatStartTime(%q) = %d, %v, want %d, error: %t", tc.stat, got, err, tc.want, tc.wantErr)
+		}
+	}
+}
+
+func TestProcessStartTime(t *testing.T) {
+	self, err := ProcessStartTime(os.Getpid())
+	if err != nil || self == 0 {
+		t.Fatalf("ProcessStartTime(self) = %d, %v, want > 0, nil", self, err)
+	}
+
+	cmd := exec.Command("/bin/sleep", "100")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("starting sleep: %v", err)
+	}
+	pid := cmd.Process.Pid
+	child, err := ProcessStartTime(pid)
+	if err != nil || child < self {
+		t.Errorf("ProcessStartTime(child) = %d, %v, want >= %d, nil", child, err, self)
+	}
+	cmd.Process.Kill()
+	cmd.Wait()
+	if got, err := ProcessStartTime(pid); err == nil && got == child {
+		t.Errorf("ProcessStartTime(%d) after the process was reaped = %d, nil, want an error or another start time", pid, got)
 	}
 }

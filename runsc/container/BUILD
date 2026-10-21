@@ -114,6 +114,14 @@ go_test(
 )
 
 go_test(
+    name = "gofer_pid_test",
+    size = "small",
+    srcs = ["gofer_pid_test.go"],
+    embed = [":container"],
+    deps = ["//runsc/specutils"],
+)
+
+go_test(
     name = "serialization_test",
     srcs = ["serialization_test.go"],
     deps = [
