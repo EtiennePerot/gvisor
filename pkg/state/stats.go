@@ -23,6 +23,14 @@ import (
 	"gvisor.dev/gvisor/pkg/gohacks"
 )
 
+// CollectStats controls whether Save and Load collect per-type timing
+// statistics (see Stats). Timing every object is a noticeable fraction of the
+// cost of Save and Load, so this is off by default; runsc enables it with
+// debug logging.
+//
+// It must not be changed while Save or Load is running.
+var CollectStats = false
+
 type statEntry struct {
 	count uint
 	total time.Duration
@@ -32,6 +40,8 @@ type statEntry struct {
 //
 // This currently provides a meaningful String function and no other way to
 // extract stats about individual types.
+//
+// Stats are only collected if CollectStats is set.
 //
 // All exported receivers accept nil.
 type Stats struct {
@@ -52,16 +62,26 @@ type Stats struct {
 
 	// last is the monotonic time of the last sample.
 	last int64
+
+	// enabled is true if stats are being collected.
+	enabled bool
 }
 
 // init initializes statistics.
 func (s *Stats) init() {
+	s.enabled = CollectStats
+	if !s.enabled {
+		return
+	}
 	s.last = gohacks.Nanotime()
 	s.stack = append(s.stack, 0)
 }
 
 // fini finalizes statistics.
 func (s *Stats) fini(resolve func(id typeID) string) {
+	if !s.enabled {
+		return
+	}
 	s.done()
 
 	// Resolve all type names.
@@ -84,6 +104,8 @@ func (s *Stats) sample(id typeID) {
 }
 
 // start starts a sample.
+//
+// Preconditions: s.enabled.
 func (s *Stats) start(id typeID) {
 	last := s.stack[len(s.stack)-1]
 	s.sample(last)
@@ -91,6 +113,8 @@ func (s *Stats) start(id typeID) {
 }
 
 // done finishes the current sample.
+//
+// Preconditions: s.enabled.
 func (s *Stats) done() {
 	last := s.stack[len(s.stack)-1]
 	s.sample(last)
@@ -105,6 +129,9 @@ type sliceEntry struct {
 
 // String returns a table representation of the stats.
 func (s *Stats) String() string {
+	if !s.enabled {
+		return "(not collected)"
+	}
 	// Build a list of stat entries.
 	ss := make([]sliceEntry, 0, len(s.byType))
 	for id := 0; id < len(s.names); id++ {
