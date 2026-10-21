@@ -102,3 +102,38 @@ func TestPointRegistrationFields(t *testing.T) {
 		})
 	}
 }
+
+func TestSyscallPointNames(t *testing.T) {
+	Initialize()
+	for _, name := range []string{
+		"syscall/sysno/0/enter",
+		"syscall/sysno/0/exit",
+		"syscall/execve/enter",
+		"syscall/execve/exit",
+	} {
+		if _, ok := Points[name]; !ok {
+			t.Errorf("point %q not registered", name)
+		}
+	}
+}
+
+func TestValidateFields(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		fields []FieldDesc
+		ok     bool
+	}{
+		{name: "empty", ok: true},
+		{name: "one", fields: []FieldDesc{{ID: 1, Name: "a"}}, ok: true},
+		{name: "distinct", fields: []FieldDesc{{ID: 1, Name: "a"}, {ID: 2, Name: "b"}, {ID: 3, Name: "c"}}, ok: true},
+		{name: "default", fields: defaultContextFields, ok: true},
+		{name: "repeated_name", fields: []FieldDesc{{ID: 1, Name: "a"}, {ID: 2, Name: "b"}, {ID: 3, Name: "a"}}},
+		{name: "repeated_id", fields: []FieldDesc{{ID: 1, Name: "a"}, {ID: 2, Name: "b"}, {ID: 2, Name: "c"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := validateFields(tc.fields); (err == nil) != tc.ok {
+				t.Errorf("validateFields(%+v) = %v, want ok = %t", tc.fields, err, tc.ok)
+			}
+		})
+	}
+}
