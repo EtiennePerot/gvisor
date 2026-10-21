@@ -1174,7 +1174,7 @@ func (s *Sandbox) createSandboxProcess(conf *config.Config, args *Args, startSyn
 	log.Infof("Control socket path: %q", s.ControlSocketPath)
 	donations.DonateAndClose("controller-fd", os.NewFile(uintptr(sockFD), "control_server_socket"))
 
-	specFile, err := specutils.OpenSpec(args.BundleDir)
+	specFile, err := specutils.CopySpec(args.BundleDir)
 	if err != nil {
 		return fmt.Errorf("cannot open spec file in bundle dir %v: %w", args.BundleDir, err)
 	}

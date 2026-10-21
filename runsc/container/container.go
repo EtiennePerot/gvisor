@@ -1611,8 +1611,8 @@ func (c *Container) createGoferProcess(conf *config.Config, mountHints *sentryap
 	cmd.Args = append(cmd.Args, "gofer", "--bundle", c.BundleDir)
 	cmd.Args = append(cmd.Args, "--gofer-mount-confs="+c.GoferMountConfs.String())
 
-	// Open the spec file to donate to the sandbox.
-	specFile, err := specutils.OpenSpec(c.BundleDir)
+	// Copy the spec file to donate to the gofer.
+	specFile, err := specutils.CopySpec(c.BundleDir)
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("opening spec file: %v", err)
 	}

@@ -16,7 +16,10 @@ package specutils
 
 import (
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -981,5 +984,40 @@ func TestTPUProxyEnabled(t *testing.T) {
 				t.Errorf("TPUProxyEnabled() got: %v, want: %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestCopySpec checks that CopySpec's copy isn't affected by later changes to
+// the bundle's config.json.
+func TestCopySpec(t *testing.T) {
+	bundleDir := t.TempDir()
+	specPath := filepath.Join(bundleDir, "config.json")
+	const want = `{"ociVersion": "1.0.0"}`
+	if err := os.WriteFile(specPath, []byte(want), 0644); err != nil {
+		t.Fatalf("os.WriteFile failed: %v", err)
+	}
+	f, err := CopySpec(bundleDir)
+	if err != nil {
+		t.Fatalf("CopySpec failed: %v", err)
+	}
+	defer f.Close()
+
+	// Truncate and rewrite config.json in place, like a caller reusing the
+	// bundle would.
+	if err := os.WriteFile(specPath, []byte(`{}`), 0644); err != nil {
+		t.Fatalf("os.WriteFile failed: %v", err)
+	}
+	got, err := io.ReadAll(f)
+	if err != nil {
+		t.Fatalf("io.ReadAll failed: %v", err)
+	}
+	if string(got) != want {
+		t.Errorf("spec copy = %q, want %q", got, want)
+	}
+}
+
+func TestCopySpecMissing(t *testing.T) {
+	if _, err := CopySpec(t.TempDir()); !os.IsNotExist(err) {
+		t.Errorf("CopySpec of a bundle without config.json returned error %v, want ENOENT", err)
 	}
 }

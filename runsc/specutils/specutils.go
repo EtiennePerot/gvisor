@@ -242,6 +242,33 @@ func OpenSpec(bundleDir string) (*os.File, error) {
 	return os.Open(filepath.Join(bundleDir, "config.json"))
 }
 
+// CopySpec returns a file holding a private copy of the OCI runtime spec from
+// the given bundle directory, positioned at its start.
+//
+// It is meant to be passed to processes that may read the spec after the
+// runtime operation that created them has returned: "Any updates to
+// config.json after [create] MUST NOT affect the container" -OCI spec.
+func CopySpec(bundleDir string) (*os.File, error) {
+	data, err := os.ReadFile(filepath.Join(bundleDir, "config.json"))
+	if err != nil {
+		return nil, err
+	}
+	fd, err := unix.MemfdCreate("config.json", unix.MFD_CLOEXEC)
+	if err != nil {
+		return nil, fmt.Errorf("memfd_create: %w", err)
+	}
+	f := os.NewFile(uintptr(fd), "config.json")
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("writing spec copy: %w", err)
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("seeking spec copy: %w", err)
+	}
+	return f, nil
+}
+
 // SpecOpts says how to read a spec.
 type SpecOpts struct {
 	Conf *config.Config
