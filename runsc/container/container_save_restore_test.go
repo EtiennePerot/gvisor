@@ -1020,31 +1020,137 @@ func TestCheckpointRestoreEROFS(t *testing.T) {
 func TestCheckpointResume(t *testing.T) {
 	for name, conf := range configs(t, true /* noOverlay */) {
 		t.Run(name, func(t *testing.T) {
-			dir, err := os.MkdirTemp(testutil.TmpDir(), "checkpoint-test")
+			for _, compression := range []statefile.CompressionLevel{
+				statefile.CompressionLevelNone,
+				statefile.CompressionLevelFlateBestSpeed,
+			} {
+				t.Run(string(compression), func(t *testing.T) {
+					testCheckpointResume(t, conf, compression)
+				})
+			}
+		})
+	}
+}
+
+func testCheckpointResume(t *testing.T, conf *config.Config, compression statefile.CompressionLevel) {
+	dir, err := os.MkdirTemp(testutil.TmpDir(), "checkpoint-test")
+	if err != nil {
+		t.Fatalf("os.MkdirTemp failed: %v", err)
+	}
+	defer os.RemoveAll(dir)
+	if err := os.Chmod(dir, 0777); err != nil {
+		t.Fatalf("error chmoding file: %q, %v", dir, err)
+	}
+
+	outputPath := filepath.Join(dir, "output")
+	outputFile, err := createWriteableOutputFile(outputPath)
+	if err != nil {
+		t.Fatalf("error creating output file: %v", err)
+	}
+	defer outputFile.Close()
+
+	script := fmt.Sprintf("i=0; while true; do echo $i >> %q; sleep 1; i=$((i+1)); done", outputPath)
+	spec := testutil.NewSpecWithArgs("bash", "-c", script)
+	_, bundleDir, cleanup, err := testutil.SetupContainer(spec, conf)
+	if err != nil {
+		t.Fatalf("error setting up container: %v", err)
+	}
+	defer cleanup()
+
+	// Create and start the container.
+	args := Args{
+		ID:        testutil.RandomContainerID(),
+		Spec:      spec,
+		BundleDir: bundleDir,
+	}
+	cont, err := New(conf, args)
+	if err != nil {
+		t.Fatalf("error creating container: %v", err)
+	}
+	defer cont.Destroy()
+	if err := cont.Start(conf); err != nil {
+		t.Fatalf("error starting container: %v", err)
+	}
+
+	// Wait until application has ran.
+	if err := waitForFileNotEmpty(outputFile); err != nil {
+		t.Fatalf("Failed to wait for output file: %v", err)
+	}
+
+	// Checkpoint running container; save state into new file.
+	if err := cont.Checkpoint(conf, dir, sandbox.CheckpointOpts{Compression: compression, Resume: true}); err != nil {
+		t.Fatalf("error checkpointing container to empty file: %v", err)
+	}
+
+	if !cont.Sandbox.Checkpointed {
+		t.Fatalf("sandbox returned wrong value for Sandbox.Checkpointed, got: false, want: true")
+	}
+
+	if cont.Sandbox.Restored {
+		t.Fatalf("sandbox returned wrong value for Sandbox.Restored, got: true, want: false")
+	}
+
+	// The application must keep running after the checkpoint.
+	lastNum, err := readOutputNum(outputPath, -1)
+	if err != nil {
+		t.Fatalf("error reading output: %v", err)
+	}
+	if err := testutil.Poll(func() error {
+		num, err := readOutputNum(outputPath, -1)
+		if err != nil {
+			return err
+		}
+		if num <= lastNum {
+			return fmt.Errorf("output did not advance past %d", lastNum)
+		}
+		return nil
+	}, 10*time.Second); err != nil {
+		t.Fatalf("container did not keep running after checkpoint: %v", err)
+	}
+}
+
+// TestCheckpointPagesWriteFailureKillsSandbox checks that if writing
+// application memory to the checkpoint fails partway through a checkpoint
+// that does not resume, the sandbox exits rather than resuming: memory that
+// was written before the failure may already have been released.
+func TestCheckpointPagesWriteFailureKillsSandbox(t *testing.T) {
+	for name, conf := range configs(t, true /* noOverlay */) {
+		t.Run(name, func(t *testing.T) {
+			outDir, err := os.MkdirTemp(testutil.TmpDir(), "checkpoint-failure-output")
 			if err != nil {
 				t.Fatalf("os.MkdirTemp failed: %v", err)
 			}
-			defer os.RemoveAll(dir)
-			if err := os.Chmod(dir, 0777); err != nil {
-				t.Fatalf("error chmoding file: %q, %v", dir, err)
+			defer os.RemoveAll(outDir)
+			if err := os.Chmod(outDir, 0777); err != nil {
+				t.Fatalf("error chmoding dir: %v", err)
 			}
-
-			outputPath := filepath.Join(dir, "output")
+			outputPath := filepath.Join(outDir, "output")
 			outputFile, err := createWriteableOutputFile(outputPath)
 			if err != nil {
 				t.Fatalf("error creating output file: %v", err)
 			}
 			defer outputFile.Close()
 
-			script := fmt.Sprintf("i=0; while true; do echo $i >> %q; sleep 1; i=$((i+1)); done", outputPath)
-			spec := testutil.NewSpecWithArgs("bash", "-c", script)
+			// The checkpoint image directory is too small to hold the 256 MiB
+			// of data written to /dev/shm below, but large enough to hold the state
+			// file, so that saving fails while writing application memory.
+			imageDir, err := os.MkdirTemp(testutil.TmpDir(), "checkpoint-failure-image")
+			if err != nil {
+				t.Fatalf("os.MkdirTemp failed: %v", err)
+			}
+			defer os.RemoveAll(imageDir)
+			if err := unix.Mount("tmpfs", imageDir, "tmpfs", 0, "size=96m,mode=0777"); err != nil {
+				t.Fatalf("mount tmpfs failed: %v", err)
+			}
+			defer unix.Unmount(imageDir, unix.MNT_DETACH)
+
+			script := fmt.Sprintf("head -c 268435456 /dev/urandom > /dev/shm/data && echo ready >> %q && sleep 1000", outputPath)
+			spec := testutil.NewSpecWithArgs("sh", "-c", script)
 			_, bundleDir, cleanup, err := testutil.SetupContainer(spec, conf)
 			if err != nil {
 				t.Fatalf("error setting up container: %v", err)
 			}
 			defer cleanup()
-
-			// Create and start the container.
 			args := Args{
 				ID:        testutil.RandomContainerID(),
 				Spec:      spec,
@@ -1054,28 +1160,32 @@ func TestCheckpointResume(t *testing.T) {
 			if err != nil {
 				t.Fatalf("error creating container: %v", err)
 			}
+			defer cont.Destroy()
 			if err := cont.Start(conf); err != nil {
 				t.Fatalf("error starting container: %v", err)
 			}
-
-			// Wait until application has ran.
 			if err := waitForFileNotEmpty(outputFile); err != nil {
 				t.Fatalf("Failed to wait for output file: %v", err)
 			}
 
-			// Checkpoint running container; save state into new file.
-			if err := cont.Checkpoint(conf, dir, sandbox.CheckpointOpts{Resume: true}); err != nil {
-				t.Fatalf("error checkpointing container to empty file: %v", err)
+			err = cont.Checkpoint(conf, imageDir, sandbox.CheckpointOpts{Compression: statefile.CompressionLevelNone})
+			if err == nil {
+				t.Fatalf("checkpoint to a full filesystem succeeded, want error")
 			}
+			t.Logf("checkpoint failed as expected: %v", err)
 
-			if !cont.Sandbox.Checkpointed {
-				t.Fatalf("sandbox returned wrong value for Sandbox.Checkpointed, got: false, want: true")
+			if err := testutil.Poll(func() error {
+				running, err := cont.Sandbox.IsRunning()
+				if err != nil {
+					return err
+				}
+				if running {
+					return fmt.Errorf("sandbox still running")
+				}
+				return nil
+			}, 10*time.Second); err != nil {
+				t.Fatalf("sandbox did not exit after failed checkpoint: %v", err)
 			}
-
-			if cont.Sandbox.Restored {
-				t.Fatalf("sandbox returned wrong value for Sandbox.Restored, got: true, want: false")
-			}
-			cont.Destroy()
 		})
 	}
 }
