@@ -907,7 +907,7 @@ func (k *Kernel) saveToLocked(ctx context.Context, stateFile, pagesMetadata io.W
 	if err != nil {
 		return err
 	}
-	log.Infof("Kernel save stats: %s", stats.String())
+	log.Debugf("Kernel save stats: %s", stats.String())
 	log.Infof("Kernel save took [%s].", time.Since(kernelStart))
 
 	if fsOpts != nil {
@@ -1116,7 +1116,7 @@ func (k *Kernel) LoadFrom(ctx context.Context, r io.Reader, asyncMFLoader *Async
 	if err != nil {
 		return err
 	}
-	log.Infof("Kernel load stats: %s", stats.String())
+	log.Debugf("Kernel load stats: %s", stats.String())
 	log.Infof("Kernel load took [%s].", time.Since(kernelStart))
 	timeline.Reached("Kernel loaded")
 
@@ -1203,7 +1203,7 @@ func (k *Kernel) ExtractRootfsUpperLayer(ctx context.Context, r io.Reader, async
 	if err != nil {
 		return err
 	}
-	log.Infof("Kernel load stats: %s", stats.String())
+	log.Debugf("Kernel load stats: %s", stats.String())
 	log.Infof("Kernel load took [%s].", time.Since(kernelStart))
 
 	if asyncMFLoader == nil {
