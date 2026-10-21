@@ -297,7 +297,7 @@ func makeFSRestoreOptsForLocalCheckpoint(args *Args) ([]fsRestoreOpts, error) {
 			ManifestFile:      stateio.NewBufioReadCloser(args.FSRestoreFDs[offset].ReleaseToFile(checkpointfiles.FSCheckpointManifestFileName)),
 			MultiTarFile:      stateio.NewBufioReadCloser(args.FSRestoreFDs[offset+1].ReleaseToFile(checkpointfiles.FSCheckpointMultiTarFileName)),
 			PagesMetadataFile: stateio.NewBufioReadCloser(args.FSRestoreFDs[offset+2].ReleaseToFile(checkpointfiles.PagesMetadataFileName)),
-			PagesFile:         stateio.NewPagesFileFDReaderDefault(int32(args.FSRestoreFDs[offset+3].Release())),
+			PagesFile:         stateio.NewPagesFileFDReaderDefault(int32(args.FSRestoreFDs[offset+3].Release()), args.NumCPU),
 		}
 	}
 	return opts, nil

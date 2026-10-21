@@ -389,7 +389,7 @@ func (cm *containerManager) Restore(o *sentryapi.RestoreOpts, _ *struct{}) (retE
 		return fmt.Errorf("at least one file must be passed to Restore")
 	}
 
-	stateFile, pagesMetadata, pagesFile, err := getRestoreReaders(o)
+	stateFile, pagesMetadata, pagesFile, err := getRestoreReaders(o, int(cm.l.k.ApplicationCores()))
 	if err != nil {
 		return err
 	}
@@ -486,14 +486,16 @@ func (cm *containerManager) Restore(o *sentryapi.RestoreOpts, _ *struct{}) (retE
 	return cm.restorer.restoreContainerInfo(cm.l, &cm.l.root)
 }
 
-func getRestoreReaders(o *sentryapi.RestoreOpts) (io.ReadCloser, io.ReadCloser, stateio.AsyncReader, error) {
+// getRestoreReaders returns readers for the checkpoint files of a restore into
+// a sandbox that can use the given number of CPUs.
+func getRestoreReaders(o *sentryapi.RestoreOpts, cpus int) (io.ReadCloser, io.ReadCloser, stateio.AsyncReader, error) {
 	if o.UseCheckpointGofer {
 		return getRestoreReadersForCheckpointGofer(o)
 	}
-	return getRestoreReadersForLocalCheckpointFiles(o)
+	return getRestoreReadersForLocalCheckpointFiles(o, cpus)
 }
 
-func getRestoreReadersForLocalCheckpointFiles(o *sentryapi.RestoreOpts) (io.ReadCloser, io.ReadCloser, stateio.AsyncReader, error) {
+func getRestoreReadersForLocalCheckpointFiles(o *sentryapi.RestoreOpts, cpus int) (io.ReadCloser, io.ReadCloser, stateio.AsyncReader, error) {
 	stateFile, err := o.ReleaseFD(0)
 	if err != nil {
 		return nil, nil, nil, err
@@ -528,7 +530,7 @@ func getRestoreReadersForLocalCheckpointFiles(o *sentryapi.RestoreOpts) (io.Read
 	// compressio.Reader or compressio.NewSimpleReader().
 	return stateFile,
 		stateio.NewBufioReadCloser(pagesMetadataFile),
-		stateio.NewPagesFileFDReaderDefault(int32(pagesFile.Release())),
+		stateio.NewPagesFileFDReaderDefault(int32(pagesFile.Release()), cpus),
 		nil
 }
 

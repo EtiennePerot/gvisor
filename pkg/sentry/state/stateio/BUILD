@@ -45,6 +45,7 @@ go_test(
         "bufwriter_test.go",
         "fdwriter_test.go",
         "ioreader_test.go",
+        "pagesfile_test.go",
         "iowriter_test.go",
     ],
     embed = [":stateio"],
