@@ -166,6 +166,11 @@ func createLoader(conf *config.Config, spec *specs.Spec) (*Loader, func(), error
 		cleanup()
 		return nil, nil, fmt.Errorf("boot.New: %w", err)
 	}
+	if err := l.StartControlServer(); err != nil {
+		l.Destroy()
+		cleanup()
+		return nil, nil, err
+	}
 	return l, cleanup, nil
 }
 

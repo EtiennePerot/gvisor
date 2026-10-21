@@ -798,6 +798,13 @@ func (b *Boot) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcomma
 		defer metric.StopProfilingMetrics()
 	}
 
+	// The sandbox has booted: serve control RPCs, including any that the
+	// parent process queued on the control socket while the sandbox was booting.
+	if err := l.StartControlServer(); err != nil {
+		l.Destroy()
+		util.Fatalf("%v", err)
+	}
+
 	// Notify the parent process the sandbox has booted (and that the controller
 	// is up).
 	timer.Reached("notifying parent")
