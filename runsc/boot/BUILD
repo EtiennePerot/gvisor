@@ -30,6 +30,7 @@ go_library(
         "strace.go",
         "tpuproxy.go",
         "vfs.go",
+        "zygote.go",
     ],
     visibility = [
         "//pkg/test:__subpackages__",

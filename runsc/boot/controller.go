@@ -152,9 +152,13 @@ func (cm *containerManager) StartRoot(cid *string, _ *struct{}) error {
 	log.Debugf("containerManager.StartRoot, cid: %s", *cid)
 	cm.l.mu.Lock()
 	state := cm.l.state
+	adoptedErr := cm.l.checkAdoptedLocked()
 	cm.l.mu.Unlock()
 	if state != created {
 		return fmt.Errorf("sandbox is not in created state, cannot start root container: state=%s", state)
+	}
+	if adoptedErr != nil {
+		return adoptedErr
 	}
 	// Tell the root container to start and wait for the result.
 	return cm.onStart()
@@ -367,6 +371,9 @@ func (cm *containerManager) Restore(o *sentryapi.RestoreOpts, _ *struct{}) (retE
 
 	if cm.l.state != created {
 		return fmt.Errorf("cannot restore a container in state=%s", cm.l.state)
+	}
+	if err := cm.l.checkAdoptedLocked(); err != nil {
+		return err
 	}
 	defer func() {
 		if retErr != nil {

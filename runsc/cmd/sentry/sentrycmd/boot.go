@@ -248,6 +248,9 @@ type Boot struct {
 
 	// noRootContainer boots without a root container. See Create.noRootContainer.
 	noRootContainer bool
+
+	// zygote boots a zygote: a sandbox that a root container adopts later.
+	zygote bool
 }
 
 // Name implements subcommands.Command.Name.
@@ -292,6 +295,7 @@ func (b *Boot) SetFlags(f *flag.FlagSet) {
 	f.IntVar(&b.uid, "uid", 0, "user ID")
 	f.IntVar(&b.gid, "gid", 0, "user ID")
 	f.BoolVar(&b.noRootContainer, "no-root-container", false, "if true, boot the sandbox without a root container; containers are added later as subcontainers")
+	f.BoolVar(&b.zygote, "zygote", false, "if true, boot a zygote that a root container adopts later")
 
 	// Open FDs that are donated to the sandbox.
 	f.IntVar(&b.specFD, "spec-fd", -1, "required fd with the container spec")
@@ -748,6 +752,7 @@ func (b *Boot) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcomma
 		FSRestoreCheckpointGofer: b.fsRestoreCheckpointGofer,
 		RootfsUpperTarFD:         b.rootfsUpperTarFD,
 		NoRootContainer:          b.noRootContainer,
+		Zygote:                   b.zygote,
 		StartupTimer:             timer,
 	}
 	l, err := boot.New(bootArgs)

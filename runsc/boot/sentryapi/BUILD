@@ -25,6 +25,7 @@ go_library(
         "sentryapi.go",
         "usage.go",
         "vfs.go",
+        "zygote.go",
     ],
     visibility = [
         "//pkg/test:__subpackages__",

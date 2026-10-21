@@ -241,6 +241,9 @@ type Loader struct {
 
 	noRootContainer noRootContainer
 
+	// zygote is set for a sandbox booted as a zygote. See zygote.go.
+	zygote zygoteState
+
 	// mountHints provides extra information about mounts for containers that
 	// apply to the entire pod.
 	mountHints *sentryapi.PodMountHints
@@ -553,6 +556,9 @@ type Args struct {
 	// NoRootContainer boots without a root container; Spec then has neither
 	// Process nor Root. See Loader.noRootContainer.
 	NoRootContainer bool
+	// Zygote boots the sandbox as a zygote that a root container adopts
+	// later. See zygoteState.
+	Zygote bool
 
 	// StartupTimer tracks overall sandbox startup.
 	// The `Loader` records midpoints on it as it goes through loader creation
@@ -686,6 +692,7 @@ func New(args Args) (*Loader, error) {
 			enabled: args.NoRootContainer,
 			exit:    make(chan struct{}),
 		},
+		zygote:                zygoteState{enabled: args.Zygote},
 		processes:             map[execID]*execProcess{eid: {}},
 		sharedMounts:          make(map[string]*vfs.Mount),
 		stopProfiling:         stopProfiling,
