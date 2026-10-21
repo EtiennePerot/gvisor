@@ -218,6 +218,7 @@ go_test(
         "//pkg/memutil",
         "//pkg/sentry/memmap",
         "//pkg/sentry/state/stateio",
+        "//pkg/sync",
         "@org_golang_x_sys//unix:go_default_library",
     ],
 )

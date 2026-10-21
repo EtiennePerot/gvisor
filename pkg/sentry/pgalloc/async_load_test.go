@@ -28,6 +28,7 @@ import (
 	"gvisor.dev/gvisor/pkg/hostarch"
 	"gvisor.dev/gvisor/pkg/sentry/memmap"
 	"gvisor.dev/gvisor/pkg/sentry/state/stateio"
+	"gvisor.dev/gvisor/pkg/sync"
 )
 
 // saveWithPagesFile saves f's metadata and returns it along with the pages
@@ -208,5 +209,248 @@ func TestAsyncLoadFinishesWhenUnloadedPagesBecomeWaste(t *testing.T) {
 	}
 	if dstB.IsAsyncLoading() {
 		t.Errorf("B: IsAsyncLoading() = true after async page loading completed")
+	}
+}
+
+// steppedReaderAt blocks each read until it receives from release.
+type steppedReaderAt struct {
+	r       *bytes.Reader
+	release chan struct{}
+}
+
+func (s *steppedReaderAt) ReadAt(b []byte, off int64) (int, error) {
+	<-s.release
+	return s.r.ReadAt(b, off)
+}
+
+// countingReader tracks the number of reads in flight.
+type countingReader struct {
+	*stateio.IOReader
+
+	mu          sync.Mutex
+	inflight    int
+	maxInflight int
+}
+
+func (r *countingReader) add() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.inflight++
+	r.maxInflight = max(r.maxInflight, r.inflight)
+}
+
+func (r *countingReader) AddRead(id int, off int64, df stateio.DestinationFile, fr memmap.FileRange, dst []byte) {
+	r.add()
+	r.IOReader.AddRead(id, off, df, fr, dst)
+}
+
+func (r *countingReader) AddReadv(id int, off int64, total uint64, df stateio.DestinationFile, frs []memmap.FileRange, dsts []unix.Iovec) {
+	r.add()
+	r.IOReader.AddReadv(id, off, total, df, frs, dsts)
+}
+
+func (r *countingReader) Wait(cs []stateio.Completion, minCompletions int) ([]stateio.Completion, error) {
+	cs, err := r.IOReader.Wait(cs, minCompletions)
+	r.mu.Lock()
+	r.inflight -= len(cs)
+	r.mu.Unlock()
+	return cs, err
+}
+
+// counts returns the current number of reads in flight, and the maximum
+// since the last call to resetMax.
+func (r *countingReader) counts() (inflight, maxInflight int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.inflight, r.maxInflight
+}
+
+func (r *countingReader) resetMax() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.maxInflight = r.inflight
+}
+
+// waitInflight waits for r to have exactly want reads in flight, and for that
+// to remain the case for a short time.
+func (r *countingReader) waitInflight(t *testing.T, want int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if n, _ := r.counts(); n == want {
+			time.Sleep(50 * time.Millisecond)
+			if n, _ := r.counts(); n == want {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			n, _ := r.counts()
+			t.Fatalf("got %d reads in flight, want %d", n, want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// TestAsyncLoadUnawaitedReadLimits checks the number of reads of pages without
+// waiters that async page loading starts with each AsyncPagesFileLoadOpts.
+func TestAsyncLoadUnawaitedReadLimits(t *testing.T) {
+	const maxParallel = 8
+	for _, tc := range []struct {
+		name string
+		opts AsyncPagesFileLoadOpts
+		// Maximum number of reads in flight before and after Unthrottle.
+		wantThrottled   int
+		wantUnthrottled int
+	}{
+		{
+			name:            "Unlimited",
+			opts:            AsyncPagesFileLoadOpts{},
+			wantThrottled:   maxParallel,
+			wantUnthrottled: maxParallel,
+		},
+		{
+			name:            "Throttled",
+			opts:            AsyncPagesFileLoadOpts{Throttled: true},
+			wantThrottled:   1,
+			wantUnthrottled: maxParallel,
+		},
+		{
+			name:            "Limited",
+			opts:            AsyncPagesFileLoadOpts{MaxUnawaitedReads: 2},
+			wantThrottled:   2,
+			wantUnthrottled: 2,
+		},
+		{
+			name:            "ThrottledThenLimited",
+			opts:            AsyncPagesFileLoadOpts{Throttled: true, MaxUnawaitedReads: 2},
+			wantThrottled:   1,
+			wantUnthrottled: 2,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := newSaveTestMemoryFile(t, false)
+			fr := allocateSaveTestPages(t, src)
+			meta, pages := saveWithPagesFile(t, src, fr)
+
+			// One page per read, so that each page is read separately.
+			ra := &steppedReaderAt{r: bytes.NewReader(pages), release: make(chan struct{})}
+			ar := &countingReader{IOReader: stateio.NewIOReader(ra, hostarch.PageSize, 1, maxParallel)}
+			apflDone := make(chan error, 1)
+			apfl, err := StartAsyncPagesFileLoad(ar, func(err error) { apflDone <- err }, nil, tc.opts)
+			if err != nil {
+				t.Fatalf("StartAsyncPagesFileLoad: %v", err)
+			}
+			dst := newSaveTestMemoryFile(t, false)
+			if err := dst.LoadFrom(context.Background(), bytes.NewReader(meta), &LoadOpts{PagesFile: apfl}); err != nil {
+				t.Fatalf("LoadFrom: %v", err)
+			}
+			apfl.MemoryFilesDone()
+			t.Cleanup(func() { dst.DecRef(fr) })
+
+			// Complete reads one at a time.
+			for range 3 {
+				ar.waitInflight(t, tc.wantThrottled)
+				ra.release <- struct{}{}
+			}
+			ar.waitInflight(t, tc.wantThrottled)
+			if _, got := ar.counts(); got != tc.wantThrottled {
+				t.Errorf("before Unthrottle: got up to %d reads in flight, want %d", got, tc.wantThrottled)
+			}
+			// Unthrottle takes effect when the loader next runs, i.e. when
+			// the next read completes.
+			ar.resetMax()
+			apfl.Unthrottle()
+			ra.release <- struct{}{}
+			for range 3 {
+				ar.waitInflight(t, tc.wantUnthrottled)
+				ra.release <- struct{}{}
+			}
+			ar.waitInflight(t, tc.wantUnthrottled)
+			close(ra.release)
+			select {
+			case err := <-apflDone:
+				if err != nil {
+					t.Fatalf("async page loading failed: %v", err)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatalf("async page loading did not complete")
+			}
+			if _, got := ar.counts(); got != tc.wantUnthrottled {
+				t.Errorf("after Unthrottle: got up to %d reads in flight, want %d", got, tc.wantUnthrottled)
+			}
+			checkLoadedPages(t, dst, fr)
+		})
+	}
+}
+
+// TestAsyncLoadLimitedAwaitedReads checks that reads of pages with waiters are
+// not limited by AsyncPagesFileLoadOpts.Throttled and MaxUnawaitedReads.
+func TestAsyncLoadLimitedAwaitedReads(t *testing.T) {
+	const maxParallel = 8
+	src := newSaveTestMemoryFile(t, false)
+	fr := allocateSaveTestPages(t, src)
+	meta, pages := saveWithPagesFile(t, src, fr)
+
+	ra := &steppedReaderAt{r: bytes.NewReader(pages), release: make(chan struct{})}
+	ar := &countingReader{IOReader: stateio.NewIOReader(ra, hostarch.PageSize, 1, maxParallel)}
+	apflDone := make(chan error, 1)
+	apfl, err := StartAsyncPagesFileLoad(ar, func(err error) { apflDone <- err }, nil, AsyncPagesFileLoadOpts{Throttled: true, MaxUnawaitedReads: 1})
+	if err != nil {
+		t.Fatalf("StartAsyncPagesFileLoad: %v", err)
+	}
+	dst := newSaveTestMemoryFile(t, false)
+	if err := dst.LoadFrom(context.Background(), bytes.NewReader(meta), &LoadOpts{PagesFile: apfl}); err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+	apfl.MemoryFilesDone()
+	t.Cleanup(func() { dst.DecRef(fr) })
+
+	// The read of page 0 is in flight. Wait for the last 4 pages, each in a
+	// separate goroutine. The loader only starts reading them after the next
+	// read completes.
+	ar.waitInflight(t, 1)
+	const numWaiters = 4
+	var wg sync.WaitGroup
+	for i := range numWaiters {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			page := uint64(fr.Length()/hostarch.PageSize) - 1 - uint64(i)
+			start := fr.Start + page*hostarch.PageSize
+			if _, err := dst.MapInternal(memmap.FileRange{start, start + hostarch.PageSize}, hostarch.Read); err != nil {
+				t.Errorf("MapInternal(page %d): %v", page, err)
+			}
+		}()
+	}
+	time.Sleep(100 * time.Millisecond)
+	ra.release <- struct{}{}
+	// All awaited pages are read concurrently, but the loader starts no new
+	// read of pages without waiters while they are in flight.
+	ar.waitInflight(t, numWaiters)
+	close(ra.release)
+	wg.Wait()
+	select {
+	case err := <-apflDone:
+		if err != nil {
+			t.Fatalf("async page loading failed: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("async page loading did not complete")
+	}
+	checkLoadedPages(t, dst, fr)
+}
+
+// checkLoadedPages checks that the pages of fr in f have the contents written
+// by saveWithPagesFile.
+func checkLoadedPages(t *testing.T, f *MemoryFile, fr memmap.FileRange) {
+	t.Helper()
+	buf := make([]byte, hostarch.PageSize)
+	for i := 0; i < int(fr.Length()/hostarch.PageSize); i++ {
+		if _, err := unix.Pread(f.FD(), buf, int64(fr.Start)+int64(i*int(hostarch.PageSize))); err != nil {
+			t.Fatalf("Pread page %d: %v", i, err)
+		}
+		if got, want := buf[17], byte(i+1); got != want {
+			t.Errorf("page %d: got byte %d, want %d", i, got, want)
+		}
 	}
 }

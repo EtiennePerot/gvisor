@@ -1378,6 +1378,14 @@ type AsyncPagesFileLoad struct {
 
 	// ops stores all aplOps.
 	ops []aplOp
+
+	// maxUnawaitedReads is AsyncPagesFileLoadOpts.MaxUnawaitedReads.
+	// maxUnawaitedReads is immutable.
+	maxUnawaitedReads int
+
+	// unawaitedReads is the number of inflight reads of pages without
+	// waiters.
+	unawaitedReads int
 }
 
 // Possible events in AsyncPagesFileLoad.lfStatus:
@@ -1499,6 +1507,11 @@ type AsyncPagesFileLoadOpts struct {
 	// If Throttled is true, reads of pages without waiters are throttled
 	// until AsyncPagesFileLoad.Unthrottle() is called.
 	Throttled bool
+
+	// If MaxUnawaitedReads is positive, at most MaxUnawaitedReads reads of
+	// pages without waiters are in flight at any time. Reads of pages with
+	// waiters are not limited.
+	MaxUnawaitedReads int
 }
 
 // StartAsyncPagesFileLoad constructs asynchronous loading state for the pages
@@ -1512,15 +1525,16 @@ func StartAsyncPagesFileLoad(ar stateio.AsyncReader, doneCallback func(error), t
 	// Cap maxParallel due to the uint32 range of bitmap.Bitmap.
 	maxParallel := min(ar.MaxParallel(), 1<<30)
 	apfl := &AsyncPagesFileLoad{
-		timeStartWaiters: math.MaxInt64,
-		timeline:         timeline.Fork("async page loading"),
-		doneCallback:     doneCallback,
-		ar:               ar,
-		maxReadBytes:     maxReadBytes,
-		throttled:        atomicbitops.FromBool(opts.Throttled),
-		qavail:           maxParallel,
-		opsBusy:          bitmap.New(uint32(maxParallel)),
-		ops:              make([]aplOp, maxParallel),
+		timeStartWaiters:  math.MaxInt64,
+		timeline:          timeline.Fork("async page loading"),
+		doneCallback:      doneCallback,
+		ar:                ar,
+		maxReadBytes:      maxReadBytes,
+		throttled:         atomicbitops.FromBool(opts.Throttled),
+		qavail:            maxParallel,
+		opsBusy:           bitmap.New(uint32(maxParallel)),
+		ops:               make([]aplOp, maxParallel),
+		maxUnawaitedReads: opts.MaxUnawaitedReads,
 	}
 	// Mark ops in opsBusy that don't actually exist as permanently busy.
 	for i, n := maxParallel, apfl.opsBusy.Size(); i < n; i++ {
@@ -1538,8 +1552,9 @@ func StartAsyncPagesFileLoad(ar stateio.AsyncReader, doneCallback func(error), t
 	return apfl, nil
 }
 
-// Unthrottle allows apfl to read pages without waiters at full parallelism.
-// It is idempotent.
+// Unthrottle allows apfl to read pages without waiters at full parallelism, or
+// up to AsyncPagesFileLoadOpts.MaxUnawaitedReads in parallel if that is
+// positive. It is idempotent.
 func (apfl *AsyncPagesFileLoad) Unthrottle() {
 	if apfl.throttled.Swap(false) {
 		apfl.lfStatus.Notify(aplLFPending)
@@ -1643,6 +1658,27 @@ func (apfl *AsyncPagesFileLoad) canEnqueue() bool {
 	return apfl.qavail > 0
 }
 
+// canStartUnawaitedRead returns true if a new read of pages without waiters
+// can be started, after flushing curOp if necessary.
+func (apfl *AsyncPagesFileLoad) canStartUnawaitedRead() bool {
+	if !apfl.canEnqueue() {
+		return false
+	}
+	if apfl.throttled.Load() {
+		// Only start a read when no other read is in flight or under
+		// construction.
+		return apfl.qavail == len(apfl.ops) && apfl.curOp == nil
+	}
+	if apfl.maxUnawaitedReads > 0 {
+		n := apfl.unawaitedReads
+		if apfl.curOp != nil && apfl.curOp.tempRef {
+			n++
+		}
+		return n < apfl.maxUnawaitedReads
+	}
+	return true
+}
+
 // Preconditions: apfl.canEnqueue() == true.
 func (apfl *AsyncPagesFileLoad) enqueueCurOp() {
 	if apfl.qavail <= 0 {
@@ -1658,6 +1694,9 @@ func (apfl *AsyncPagesFileLoad) enqueueCurOp() {
 
 	apfl.qavail--
 	apfl.curOp = nil
+	if op.tempRef {
+		apfl.unawaitedReads++
+	}
 	if len(op.frs) == 1 && len(op.iovecs) == 1 {
 		// Perform a non-vectorized read to save an indirection (and possible
 		// userspace-to-kernelspace copy) in the AsyncReader implementation.
@@ -1935,8 +1974,7 @@ func (apfl *AsyncPagesFileLoad) main() {
 		}
 		apfl.mu.Unlock()
 		// Fill remaining queue with reads for pages with no waiters.
-		throttled := apfl.throttled.Load()
-		if apfl.canEnqueue() && (!throttled || (apfl.qavail == maxParallel && apfl.curOp == nil)) {
+		if apfl.canStartUnawaitedRead() {
 			apfl.amflsMu.Lock()
 			// Unawaited loads from earlier MemoryFiles are prioritized over
 			// unawaited loads from later MemoryFiles. Callers of
@@ -1974,24 +2012,24 @@ func (apfl *AsyncPagesFileLoad) main() {
 					// prevent pages from becoming waste due to concurrent
 					// dropping of the last reference.
 					var n uint64
-					if throttled && apfl.curOp != nil {
-						// Only extend the single throttled read.
-						n = apfl.combine(amfl, ulFR, ul.off, true /* tempRef */)
-					} else {
+					if apfl.canStartUnawaitedRead() {
 						n = apfl.enqueueRange(amfl, ulFR, ul.off, true /* tempRef */)
+					} else if apfl.curOp != nil {
+						// Extend the read under construction, but don't
+						// start another.
+						n = apfl.combine(amfl, ulFR, ul.off, true /* tempRef */)
 					}
 					if n == 0 {
 						apfl.mu.Unlock()
 						amfl.f.mu.Unlock()
 						break amflsLoop
 					}
-					partial := n < ulFR.Length()
 					ulFR.End = ulFR.Start + n
 					ulseg = amfl.unloaded.SplitAfter(ulseg, ulFR.End)
 					ulseg.ValuePtr().started = true
 					amfl.minUnstarted = ulFR.End
 					amfl.f.incRefLocked(ulFR)
-					if (throttled && partial) || !apfl.canEnqueue() {
+					if !apfl.canEnqueue() {
 						apfl.mu.Unlock()
 						amfl.f.mu.Unlock()
 						break amflsLoop
@@ -2047,6 +2085,7 @@ func (apfl *AsyncPagesFileLoad) main() {
 			apfl.opsBusy.Remove(uint32(c.ID))
 			apfl.qavail++
 			if op.tempRef {
+				apfl.unawaitedReads--
 				// Delay f.DecRef(fr) until after dropping locks. This is
 				// required to avoid lock recursion via dropping the last
 				// reference => asyncMemoryFileLoad.cancelWasteLoad() =>
