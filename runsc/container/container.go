@@ -151,7 +151,16 @@ type Container struct {
 	// This field isn't saved to json, because only a creator of a gofer
 	// process will have it as a child process.
 	goferIsChild bool `nojson:"true"`
+
+	// exitedBeforeStart is set by CheckStopped if the sandbox exited while
+	// the container was still created, e.g. because the sandbox failed to
+	// boot (see Args.AsyncBoot). It isn't saved to json.
+	exitedBeforeStart bool `nojson:"true"`
 }
+
+// errExitedBeforeStart is reported when starting or restoring a container
+// whose sandbox exited first.
+var errExitedBeforeStart = errors.New("the sandbox exited before the container started, it may have failed to boot (see the sandbox logs)")
 
 // Args is used to configure a new container.
 type Args struct {
@@ -204,6 +213,13 @@ type Args struct {
 	// neither Process nor Root, and no gofer is started. Only valid when ID is
 	// the sandbox ID.
 	NoRootContainer bool
+
+	// AsyncBoot makes New return as soon as the sandbox process has started,
+	// rather than once the sandbox has booted, so that the sandbox boots while
+	// the caller proceeds. The next command that talks to the sandbox (e.g.
+	// start or restore) waits for the boot to complete, and reports boot
+	// failures. It only applies when New creates a sandbox.
+	AsyncBoot bool
 }
 
 // New creates the container in a new Sandbox process, unless the metadata
@@ -452,6 +468,7 @@ func (c *Container) createRoot(conf *config.Config, args Args, sandboxID string)
 			FSRestoreImagePaths: args.FSRestoreImagePaths,
 			FSRestoreDirect:     args.FSRestoreDirect,
 			NoRootContainer:     args.NoRootContainer,
+			AsyncBoot:           args.AsyncBoot,
 		}
 		sand, err := sandbox.New(conf, sandArgs)
 		if err != nil {
@@ -518,6 +535,9 @@ func (c *Container) startImpl(conf *config.Config, action string, startRoot func
 	defer unlock.Clean()
 
 	if err := c.requireStatus(action, Created); err != nil {
+		if c.exitedBeforeStart {
+			return fmt.Errorf("%w: %w", err, errExitedBeforeStart)
+		}
 		return err
 	}
 
@@ -529,6 +549,9 @@ func (c *Container) startImpl(conf *config.Config, action string, startRoot func
 
 	if specutils.IsRootContainer(c.Spec) {
 		if err := startRoot(conf, c.Spec); err != nil {
+			if running, _ := c.Sandbox.IsRunning(); !running {
+				return fmt.Errorf("%w: %w", err, errExitedBeforeStart)
+			}
 			return err
 		}
 	} else {
@@ -2550,6 +2573,7 @@ func (c *Container) CheckStopped() error {
 		}
 		if !running {
 			log.Warningf("Sandbox isn't running anymore, marking container %v as stopped:", c.ID)
+			c.exitedBeforeStart = c.Status == Created
 			c.changeStatus(Stopped)
 		}
 	} else {

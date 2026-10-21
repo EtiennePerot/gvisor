@@ -346,6 +346,10 @@ type Args struct {
 	// NoRootContainer boots without a root container: no gofer FDs, no root
 	// process. See container.Args.NoRootContainer.
 	NoRootContainer bool
+
+	// AsyncBoot makes New return once the sandbox process has started,
+	// without waiting for the sandbox to boot. See container.Args.AsyncBoot.
+	AsyncBoot bool
 }
 
 // New creates the sandbox process. The caller must call Destroy() on the
@@ -389,10 +393,48 @@ func New(conf *config.Config, args *Args) (*Sandbox, error) {
 		}
 	}
 
+	if args.AsyncBoot {
+		// The sandbox notifies that it has booted by writing to its start-sync
+		// file. Nobody waits for it, so let it write to /dev/null.
+		devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+		if err != nil {
+			return nil, err
+		}
+		err = s.createSandboxProcess(conf, args, devNull)
+		devNull.Close()
+		if err != nil {
+			return nil, fmt.Errorf("cannot create sandbox process: %w", err)
+		}
+		// The control socket is already listening, so RPCs wait for the
+		// sandbox to boot and fail if it doesn't.
+		log.Infof("Not waiting for sandbox %q to boot", s.ID)
+	} else if err := s.createSandboxProcessAndWait(conf, args); err != nil {
+		return nil, err
+	}
+
+	if conf.MetricServer != "" {
+		// The sandbox was configured to export metrics. We must gather data
+		// about registered metrics prior to any process starting in the
+		// sandbox. With AsyncBoot, this waits for the sandbox to boot.
+		log.Debugf("Getting metric registration information from sandbox %q", s.ID)
+		var registeredMetrics controlapi.MetricsRegistrationResponse
+		if err := s.call(sentryapi.MetricsGetRegistered, nil, &registeredMetrics); err != nil {
+			return nil, fmt.Errorf("cannot get registered metrics: %v", err)
+		}
+		s.RegisteredMetrics = registeredMetrics.RegisteredMetrics
+	}
+
+	c.Release()
+	return s, nil
+}
+
+// createSandboxProcessAndWait creates the sandbox process and waits for it to
+// boot.
+func (s *Sandbox) createSandboxProcessAndWait(conf *config.Config, args *Args) error {
 	// Create pipe to synchronize when sandbox process has been booted.
 	clientSyncFile, sandboxSyncFile, err := os.Pipe()
 	if err != nil {
-		return nil, fmt.Errorf("creating pipe for sandbox %q: %v", s.ID, err)
+		return fmt.Errorf("creating pipe for sandbox %q: %v", s.ID, err)
 	}
 	defer clientSyncFile.Close()
 
@@ -402,7 +444,7 @@ func New(conf *config.Config, args *Args) (*Sandbox, error) {
 	// process exits unexpectedly.
 	sandboxSyncFile.Close()
 	if err != nil {
-		return nil, fmt.Errorf("cannot create sandbox process: %w", err)
+		return fmt.Errorf("cannot create sandbox process: %w", err)
 	}
 
 	// Wait until the sandbox has booted.
@@ -417,25 +459,12 @@ func New(conf *config.Config, args *Args) (*Sandbox, error) {
 		// rpc calls.
 		if strings.Contains(err.Error(), io.EOF.Error()) {
 			if permsErr := checkBinaryPermissions(conf); permsErr != nil {
-				return nil, fmt.Errorf("%v: %v", err, permsErr)
+				return fmt.Errorf("%v: %v", err, permsErr)
 			}
 		}
-		return nil, fmt.Errorf("cannot read client sync file: %w", err)
+		return fmt.Errorf("cannot read client sync file: %w", err)
 	}
-
-	if conf.MetricServer != "" {
-		// The control server is up and the sandbox was configured to export metrics.
-		// We must gather data about registered metrics prior to any process starting in the sandbox.
-		log.Debugf("Getting metric registration information from sandbox %q", s.ID)
-		var registeredMetrics controlapi.MetricsRegistrationResponse
-		if err := s.call(sentryapi.MetricsGetRegistered, nil, &registeredMetrics); err != nil {
-			return nil, fmt.Errorf("cannot get registered metrics: %v", err)
-		}
-		s.RegisteredMetrics = registeredMetrics.RegisteredMetrics
-	}
-
-	c.Release()
-	return s, nil
+	return nil
 }
 
 // CreateSubcontainer creates a container inside the sandbox.

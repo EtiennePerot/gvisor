@@ -106,7 +106,13 @@ func (*Create) Synopsis() string {
 
 // Usage implements subcommands.Command.Usage.
 func (*Create) Usage() string {
-	return "create [flags] <container id> - create a secure container\n"
+	return `create [flags] <container id> - create a secure container
+
+When create starts a new sandbox, it returns once the sandbox process has
+started, without waiting for the sandbox to boot. Subsequent commands that
+talk to the sandbox (e.g. start) wait for the boot to complete, and report
+sandbox boot failures.
+`
 }
 
 // SetFlags implements subcommands.Command.SetFlags.
@@ -204,6 +210,7 @@ func (c *Create) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcom
 		FSRestoreImagePaths: []string(c.fsRestoreImagePaths),
 		FSRestoreDirect:     c.fsRestoreDirect,
 		NoRootContainer:     c.noRootContainer,
+		AsyncBoot:           true,
 	}
 	if _, err := container.New(conf, contArgs); err != nil {
 		return util.Errorf("creating container: %v", err)

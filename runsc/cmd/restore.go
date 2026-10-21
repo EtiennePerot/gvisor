@@ -154,6 +154,8 @@ func (r *Restore) Execute(_ context.Context, f *flag.FlagSet, args ...any) subco
 		FSRestoreDirect:     r.fsRestoreDirect || r.direct,
 		CheckpointDirPath:   r.imagePath,
 		NoRootContainer:     r.noRootContainer,
+		// The sandbox boots while Restore prepares the checkpoint images.
+		AsyncBoot: true,
 	}
 
 	log.Debugf("Restore container, cid: %s, rootDir: %q", id, conf.RootDir)
