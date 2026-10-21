@@ -13,6 +13,7 @@ go_library(
         "no_xdp.go",
         "sandbox.go",
         "xdp.go",
+        "zygote.go",
     ],
     visibility = [
         "//runsc:__subpackages__",

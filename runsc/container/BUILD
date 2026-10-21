@@ -13,6 +13,7 @@ go_library(
         "null_netns.go",
         "state_file.go",
         "status.go",
+        "zygote.go",
     ],
     visibility = [
         "//runsc:__subpackages__",
@@ -55,6 +56,7 @@ go_test(
         "multi_container_test.go",
         "shared_volume_test.go",
         "trace_test.go",
+        "zygote_test.go",
     ],
     # Only run the default platform for the tsan test, which should
     # be compatible. For non-tsan builds, run all platforms.
@@ -110,6 +112,18 @@ go_test(
         "@org_golang_google_protobuf//proto:go_default_library",
         "@org_golang_google_protobuf//types/known/emptypb:go_default_library",
         "@org_golang_x_sys//unix:go_default_library",
+    ],
+)
+
+go_test(
+    name = "zygote_spec_test",
+    size = "small",
+    srcs = ["zygote_spec_test.go"],
+    embed = [":container"],
+    deps = [
+        "//runsc/config",
+        "//runsc/flag",
+        "@com_github_opencontainers_runtime_spec//specs-go:go_default_library",
     ],
 )
 

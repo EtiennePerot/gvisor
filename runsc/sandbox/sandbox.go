@@ -249,6 +249,16 @@ type Sandbox struct {
 	// Restored will be true when the sandbox has been restored.
 	Restored bool `json:"restored"`
 
+	// ZygoteShape is set for a zygote that no container adopted yet: it
+	// identifies the containers that may adopt it. See Args.Zygote.
+	ZygoteShape string `json:"zygoteShape,omitempty"`
+
+	// NetNSPath, if set, is the network namespace that the sandbox network
+	// is copied from, instead of the network namespace of the sandbox
+	// process. It is set for adopted zygotes, which stay in the empty network
+	// namespace they were booted in.
+	NetNSPath string `json:"netNSPath,omitempty"`
+
 	// savingsMu protects the cached time saved by restoration.
 	savingsMu sync.Mutex `nojson:"true"`
 
@@ -346,6 +356,14 @@ type Args struct {
 	// NoRootContainer boots without a root container: no gofer FDs, no root
 	// process. See container.Args.NoRootContainer.
 	NoRootContainer bool
+
+	// Zygote boots the sandbox as a zygote: a sandbox booted ahead of time,
+	// without a gofer, that a root container adopts later (see Adopt).
+	Zygote bool
+
+	// SpecFile, if set, is the spec passed to the sandbox, instead of the
+	// bundle's config.json.
+	SpecFile *os.File
 }
 
 // New creates the sandbox process. The caller must call Destroy() on the
@@ -494,7 +512,7 @@ func (s *Sandbox) StartRoot(conf *config.Config, spec *specs.Spec) error {
 		return err
 	}
 	// Configure the network.
-	if err := setupNetwork(conn, pid, conf, disableIPv6, false); err != nil {
+	if err := setupNetwork(conn, pid, s.NetNSPath, conf, disableIPv6, false); err != nil {
 		return fmt.Errorf("setting up network: %w", err)
 	}
 
@@ -609,7 +627,7 @@ func (s *Sandbox) Restore(conf *config.Config, spec *specs.Spec, cid string, ima
 		}
 		// Scrape the host network to get the network config and store it in the
 		// loader. The kernel will restore loaded network stack with this config.
-		if err := setupNetwork(conn, s.Pid.Load(), conf, disableIPv6, true); err != nil {
+		if err := setupNetwork(conn, s.Pid.Load(), s.NetNSPath, conf, disableIPv6, true); err != nil {
 			return fmt.Errorf("setting up network: %w", err)
 		}
 	} else {
@@ -1125,6 +1143,9 @@ func (s *Sandbox) createSandboxProcess(conf *config.Config, args *Args, startSyn
 	if args.NoRootContainer {
 		cmd.Args = append(cmd.Args, "--no-root-container")
 	}
+	if args.Zygote {
+		cmd.Args = append(cmd.Args, "--zygote")
+	}
 
 	cmd.Env = sandboxProcessEnv(conf, sandboxProcessEnvOptions{
 		sentryUsesCgo: sentryUsesCgo,
@@ -1174,11 +1195,15 @@ func (s *Sandbox) createSandboxProcess(conf *config.Config, args *Args, startSyn
 	log.Infof("Control socket path: %q", s.ControlSocketPath)
 	donations.DonateAndClose("controller-fd", os.NewFile(uintptr(sockFD), "control_server_socket"))
 
-	specFile, err := specutils.OpenSpec(args.BundleDir)
-	if err != nil {
-		return fmt.Errorf("cannot open spec file in bundle dir %v: %w", args.BundleDir, err)
+	if args.SpecFile != nil {
+		donations.Donate("spec-fd", args.SpecFile)
+	} else {
+		specFile, err := specutils.OpenSpec(args.BundleDir)
+		if err != nil {
+			return fmt.Errorf("cannot open spec file in bundle dir %v: %w", args.BundleDir, err)
+		}
+		donations.DonateAndClose("spec-fd", specFile)
 	}
-	donations.DonateAndClose("spec-fd", specFile)
 
 	if err := donations.DonateLogFile("pod-init-config-fd", conf.PodInitConfig, os.O_RDONLY, lfOpts); err != nil {
 		return err

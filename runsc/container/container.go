@@ -204,6 +204,15 @@ type Args struct {
 	// neither Process nor Root, and no gofer is started. Only valid when ID is
 	// the sandbox ID.
 	NoRootContainer bool
+
+	// Zygote boots the root container's sandbox as a zygote that a root
+	// container created later with AdoptZygote adopts. See zygote.go.
+	Zygote bool
+
+	// AdoptZygote, if set, is the root directory of a zygote with the same ID
+	// that the root container adopts instead of booting a new sandbox. If it
+	// cannot, it boots a new sandbox.
+	AdoptZygote string
 }
 
 // New creates the container in a new Sandbox process, unless the metadata
@@ -233,6 +242,19 @@ func New(conf *config.Config, args Args) (*Container, error) {
 
 	if err := modifySpecForDirectfs(conf, args.Spec); err != nil {
 		return nil, fmt.Errorf("failed to modify spec for directfs: %v", err)
+	}
+
+	if args.Zygote {
+		if args.AdoptZygote != "" {
+			return nil, fmt.Errorf("a zygote cannot adopt a zygote")
+		}
+		if why := zygoteIneligible(conf, &args); why != "" {
+			return nil, fmt.Errorf("container cannot be a zygote: %s", why)
+		}
+		var err error
+		if args.Spec, err = zygoteSpec(args.Spec, args.BundleDir); err != nil {
+			return nil, fmt.Errorf("creating zygote spec: %w", err)
+		}
 	}
 
 	sandboxID := args.ID
@@ -314,12 +336,22 @@ func New(conf *config.Config, args Args) (*Container, error) {
 	//      already started sandbox. In this case, container ID is different than
 	//      the sandbox ID.
 	if specutils.IsRootContainer(args.Spec) {
-		var err error
-		rootCgroup, err = c.createRoot(conf, args, sandboxID)
-		if err != nil {
-			return nil, err
+		adopted := false
+		if args.AdoptZygote != "" {
+			if err := c.adoptZygote(conf, &args); err != nil {
+				log.Warningf("Cannot adopt zygote %q, booting a new sandbox: %v", args.AdoptZygote, err)
+				c.GoferMountConfs = nil
+			} else {
+				adopted = true
+			}
 		}
-
+		if !adopted {
+			var err error
+			rootCgroup, err = c.createRoot(conf, args, sandboxID)
+			if err != nil {
+				return nil, err
+			}
+		}
 	} else {
 		log.Debugf("Creating new container, cid: %s, sandbox: %s", c.ID, sandboxID)
 
@@ -422,12 +454,22 @@ func (c *Container) createRoot(conf *config.Config, args Args, sandboxID string)
 			devIOFile       *os.File
 			specFile        *os.File
 		)
-		if !args.NoRootContainer {
+		// A zygote gets the gofer of the container that adopts it.
+		if !args.NoRootContainer && !args.Zygote {
 			var err error
 			ioFiles, goferFilestores, devIOFile, specFile, err = c.createGoferProcess(conf, mountHints, args.Attached, cloneIntoCgroupFD)
 			if err != nil {
 				return fmt.Errorf("cannot create gofer process: %w", err)
 			}
+		}
+		var zygoteShape string
+		var zygoteSpecFile *os.File
+		if args.Zygote {
+			var err error
+			if zygoteShape, zygoteSpecFile, err = zygoteBootSpec(conf, args.BundleDir); err != nil {
+				return err
+			}
+			defer zygoteSpecFile.Close()
 		}
 
 		// Start a new sandbox for this container. Any errors after this point
@@ -452,11 +494,14 @@ func (c *Container) createRoot(conf *config.Config, args Args, sandboxID string)
 			FSRestoreImagePaths: args.FSRestoreImagePaths,
 			FSRestoreDirect:     args.FSRestoreDirect,
 			NoRootContainer:     args.NoRootContainer,
+			Zygote:              args.Zygote,
+			SpecFile:            zygoteSpecFile,
 		}
 		sand, err := sandbox.New(conf, sandArgs)
 		if err != nil {
 			return fmt.Errorf("cannot create sandbox: %w", err)
 		}
+		sand.ZygoteShape = zygoteShape
 		c.Sandbox = sand
 		return nil
 

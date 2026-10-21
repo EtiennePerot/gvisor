@@ -51,7 +51,10 @@ import (
 // Run the following container to test it:
 //
 //	docker run -di --runtime=runsc -p 8080:80 -v $PWD:/usr/local/apache2/htdocs/ httpd:2.4
-func setupNetwork(conn *urpc.Client, pid int, conf *config.Config, disableIPv6 bool, isRestore bool) error {
+//
+// For the sandbox network, netnsPath is the network namespace to copy, or
+// empty for the network namespace of the sandbox process pid.
+func setupNetwork(conn *urpc.Client, pid int, netnsPath string, conf *config.Config, disableIPv6 bool, isRestore bool) error {
 	log.Infof("Setting up network")
 
 	switch conf.Network {
@@ -63,7 +66,10 @@ func setupNetwork(conn *urpc.Client, pid int, conf *config.Config, disableIPv6 b
 	case config.NetworkSandbox:
 		// Build the path to the net namespace of the sandbox process.
 		// This is what we will copy.
-		nsPath := filepath.Join("/proc", strconv.Itoa(pid), "ns/net")
+		nsPath := netnsPath
+		if nsPath == "" {
+			nsPath = filepath.Join("/proc", strconv.Itoa(pid), "ns/net")
+		}
 		if err := createInterfacesAndRoutesFromNS(conn, nsPath, conf, disableIPv6, isRestore); err != nil {
 			return fmt.Errorf("creating interfaces from net namespace %q: %v", nsPath, err)
 		}

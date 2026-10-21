@@ -142,6 +142,10 @@ func (r *Restore) Execute(_ context.Context, f *flag.FlagSet, args ...any) subco
 	var cu cleanup.Cleanup
 	defer cu.Clean()
 
+	if r.zygote {
+		return util.Errorf("--zygote is only supported by create")
+	}
+
 	runArgs := container.Args{
 		ID:                  id,
 		Spec:                nil,
@@ -154,6 +158,7 @@ func (r *Restore) Execute(_ context.Context, f *flag.FlagSet, args ...any) subco
 		FSRestoreDirect:     r.fsRestoreDirect || r.direct,
 		CheckpointDirPath:   r.imagePath,
 		NoRootContainer:     r.noRootContainer,
+		AdoptZygote:         r.adoptZygote,
 	}
 
 	log.Debugf("Restore container, cid: %s, rootDir: %q", id, conf.RootDir)

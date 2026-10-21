@@ -90,6 +90,15 @@ type Create struct {
 	// sandbox-wide settings only and containers are added afterwards.
 	noRootContainer bool
 
+	// zygote boots a zygote: a sandbox for a root container that does not
+	// exist yet, that a later create (or restore) of a root container with
+	// the same ID adopts with --adopt-zygote.
+	zygote bool
+
+	// adoptZygote is the root directory of a zygote to adopt instead of
+	// booting a new sandbox.
+	adoptZygote string
+
 	// spec is the cached OCI spec.
 	spec *specs.Spec
 }
@@ -119,6 +128,8 @@ func (c *Create) SetFlags(f *flag.FlagSet) {
 	f.Var(&c.fsRestoreImagePaths, "fs-restore-image-path", "path to filesystem checkpoint (<dir> or <dir>/<prefix>) to restore (can be repeated; combining bundles from different checkpoints is only supported for create/run, not restore)")
 	f.BoolVar(&c.fsRestoreDirect, "fs-restore-direct", false, "open files in fs-restore-image-path with O_DIRECT")
 	f.BoolVar(&c.noRootContainer, "no-root-container", false, "create a sandbox with no root container; the bundle spec describes only the sandbox and containers are added later as subcontainers")
+	f.BoolVar(&c.zygote, "zygote", false, "boot a zygote: a sandbox for a root container with the same ID and an otherwise identical spec, created later with --adopt-zygote. The zygote gets no access to the bundle's process arguments, environment, hostname, rootfs, mount sources or network namespace")
+	f.StringVar(&c.adoptZygote, "adopt-zygote", "", "runsc root directory of a zygote (see --zygote) for the root container to adopt instead of booting a new sandbox; a new sandbox is booted if the zygote cannot be adopted")
 }
 
 // passFiles takes ownership of the descriptors supplied by --pass-fd. The
@@ -204,6 +215,8 @@ func (c *Create) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcom
 		FSRestoreImagePaths: []string(c.fsRestoreImagePaths),
 		FSRestoreDirect:     c.fsRestoreDirect,
 		NoRootContainer:     c.noRootContainer,
+		Zygote:              c.zygote,
+		AdoptZygote:         c.adoptZygote,
 	}
 	if _, err := container.New(conf, contArgs); err != nil {
 		return util.Errorf("creating container: %v", err)
