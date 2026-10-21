@@ -419,7 +419,7 @@ func (ds *decodeState) decodeStruct(ods *objectDecodeState, obj reflect.Value, e
 func (ds *decodeState) decodeMap(ods *objectDecodeState, obj reflect.Value, encoded *wire.Map) {
 	if obj.IsNil() {
 		// See pointerTo.
-		obj.Set(reflect.MakeMap(obj.Type()))
+		obj.Set(reflect.MakeMapWithSize(obj.Type(), len(encoded.Keys)))
 	}
 	keyType, valueType := obj.Type().Key(), obj.Type().Elem()
 	// Struct loaders and array element loaders can retain their addresses in
