@@ -90,6 +90,9 @@ type filesystem struct {
 	// memoryFile is the application memory file. memoryFile is immutable.
 	memoryFile *pgalloc.MemoryFile `state:"nosave"`
 
+	// imageRestored is true once image has been reopened after restore.
+	imageRestored bool `state:"nosave"`
+
 	// zeroPage is a page of memoryFile that backs mappings of sparse holes.
 	zeroPage memmap.FileRange
 

@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 
+	gcontext "gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/erofs"
 	"gvisor.dev/gvisor/pkg/refs"
 	"gvisor.dev/gvisor/pkg/sentry/pgalloc"
@@ -29,10 +30,16 @@ import (
 func (fs *filesystem) afterLoad(ctx context.Context) {
 	fs.memoryFile = pgalloc.MemoryFileFromContext(ctx)
 	fdmap := vfs.RestoreFilesystemFDMapFromContext(ctx)
-	fd, ok := fdmap[fs.iopts.UniqueID]
-	if !ok {
-		panic(fmt.Sprintf("no image FD available for filesystem with unique ID %q, map: %#v", fs.iopts.UniqueID, fdmap))
+	if fd, ok := fdmap[fs.iopts.UniqueID]; ok {
+		fs.reopenImage(fd)
 	}
+	// Otherwise, the image FD has not been donated yet; this happens when the
+	// kernel state is decoded before every container has registered.
+	// CompleteRestore reopens the image.
+}
+
+// reopenImage replaces fs.image with the image read from the host FD fd.
+func (fs *filesystem) reopenImage(fd int) {
 	newImage, err := erofs.OpenImage(os.NewFile(uintptr(fd), "EROFS image file"))
 	if err != nil {
 		panic(fmt.Sprintf("erofs.OpenImage failed: %v", err))
@@ -43,6 +50,32 @@ func (fs *filesystem) afterLoad(ctx context.Context) {
 	// We need to update the image in place, as there are other pointers
 	// pointing to this image as well.
 	*fs.image = *newImage
+	fs.imageRestored = true
+}
+
+var _ vfs.FilesystemImplSaveRestoreExtension = (*filesystem)(nil)
+
+// PrepareSave implements vfs.FilesystemImplSaveRestoreExtension.PrepareSave.
+func (fs *filesystem) PrepareSave(ctx gcontext.Context) error {
+	return nil
+}
+
+// BeforeResume implements vfs.FilesystemImplSaveRestoreExtension.BeforeResume.
+func (fs *filesystem) BeforeResume(ctx gcontext.Context) {}
+
+// CompleteRestore implements
+// vfs.FilesystemImplSaveRestoreExtension.CompleteRestore.
+func (fs *filesystem) CompleteRestore(ctx gcontext.Context, opts vfs.CompleteRestoreOptions) error {
+	if fs.imageRestored {
+		return nil
+	}
+	fdmap := vfs.RestoreFilesystemFDMapFromContext(ctx)
+	fd, ok := fdmap[fs.iopts.UniqueID]
+	if !ok {
+		return fmt.Errorf("no image FD available for filesystem with unique ID %q, map: %#v", fs.iopts.UniqueID, fdmap)
+	}
+	fs.reopenImage(fd)
+	return nil
 }
 
 // saveParent is called by stateify.
