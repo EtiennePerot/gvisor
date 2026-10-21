@@ -30,6 +30,7 @@ import (
 	"gvisor.dev/gvisor/pkg/unet"
 	"gvisor.dev/gvisor/pkg/urpc"
 	"gvisor.dev/gvisor/runsc/boot/sentryapi"
+	"gvisor.dev/gvisor/runsc/cli/maxprocs"
 	"gvisor.dev/gvisor/runsc/cmd/sandboxsetup"
 	"gvisor.dev/gvisor/runsc/cmd/util"
 	"gvisor.dev/gvisor/runsc/config"
@@ -165,6 +166,11 @@ func (g *Gofer) SetFlags(f *flag.FlagSet) {
 
 // Execute implements subcommands.Command.
 func (g *Gofer) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcommands.ExitStatus {
+	// Unlike other runsc commands, the gofer is long-lived and serves file
+	// system requests for the whole sandbox, so it uses the runtime's
+	// default GOMAXPROCS, which follows its cgroup CPU limit.
+	maxprocs.Restore()
+
 	if g.bundleDir == "" || len(g.ioFDs) < 1 || g.specFD < 0 {
 		f.Usage()
 		return subcommands.ExitUsageError

@@ -18,6 +18,9 @@ package maincli
 import (
 	"github.com/google/subcommands"
 	"gvisor.dev/gvisor/runsc/cli"
+	// Bound GOMAXPROCS on hosts with many CPUs, early in package
+	// initialization.
+	_ "gvisor.dev/gvisor/runsc/cli/maxprocs"
 	"gvisor.dev/gvisor/runsc/cmd"
 	"gvisor.dev/gvisor/runsc/cmd/alias"
 	"gvisor.dev/gvisor/runsc/cmd/profile"
