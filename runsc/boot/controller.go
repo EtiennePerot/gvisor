@@ -422,9 +422,7 @@ func (cm *containerManager) Restore(o *sentryapi.RestoreOpts, _ *struct{}) (retE
 
 	if o.HavePagesFile {
 		// This immediately starts loading the main MemoryFile asynchronously.
-		// For background restore, throttle page loading until the kernel is
-		// restored, so that restore does not wait behind page reads.
-		cm.restorer.asyncMFLoader = kernel.NewAsyncMFLoader(pagesMetadata, pagesFile, cm.restorer.mainMF, timer.Fork("PagesFileLoader"), pgalloc.AsyncPagesFileLoadOpts{Throttled: o.Background}) // transfers ownership
+		cm.restorer.asyncMFLoader = kernel.NewAsyncMFLoader(pagesMetadata, pagesFile, cm.restorer.mainMF, timer.Fork("PagesFileLoader"), pageLoadOpts(o)) // transfers ownership
 		pagesMetadata = nil
 		pagesFile = nil
 		timer.Reached("created async MF loader")
@@ -487,6 +485,40 @@ func (cm *containerManager) Restore(o *sentryapi.RestoreOpts, _ *struct{}) (retE
 	}
 	timer.Reached("restorer initialized")
 	return cm.restorer.restoreContainerInfo(cm.l, &cm.l.root)
+}
+
+// During background restore from local checkpoint files, reads of pages that
+// no task is waiting for are limited to backgroundRestoreMaxUnawaitedReads
+// concurrent reads of at most backgroundRestoreMaxUnawaitedReadBytes each, so
+// that a page fault waits for at most that much background I/O before its
+// own read starts. Two reads keep the pages file busy while the loader
+// processes each completion.
+const (
+	backgroundRestoreMaxUnawaitedReads     = 2
+	backgroundRestoreMaxUnawaitedReadBytes = 512 << 10
+)
+
+// pageLoadOpts returns options for asynchronous page loading during restore.
+func pageLoadOpts(o *sentryapi.RestoreOpts) pgalloc.AsyncPagesFileLoadOpts {
+	if !o.Background {
+		// Restore waits for all pages to be loaded before the application
+		// runs, so load them as fast as possible.
+		return pgalloc.AsyncPagesFileLoadOpts{}
+	}
+	// The application runs while pages are still being loaded in the
+	// background. Throttle reads of pages that nothing waits for until the
+	// kernel is restored, so that restore doesn't wait behind them.
+	opts := pgalloc.AsyncPagesFileLoadOpts{Throttled: true}
+	if !o.UseCheckpointGofer {
+		// Limit them, so that they compete less with the application for
+		// CPU, and with its page faults for I/O. Reads from local files are
+		// cheap, so small concurrent reads suffice to load pages quickly.
+		// Reads through the checkpoint gofer have higher latency, so don't
+		// limit them.
+		opts.MaxUnawaitedReads = backgroundRestoreMaxUnawaitedReads
+		opts.MaxUnawaitedReadBytes = backgroundRestoreMaxUnawaitedReadBytes
+	}
+	return opts
 }
 
 func getRestoreReaders(o *sentryapi.RestoreOpts) (io.ReadCloser, io.ReadCloser, stateio.AsyncReader, error) {

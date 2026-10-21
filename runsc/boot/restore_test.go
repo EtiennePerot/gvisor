@@ -17,7 +17,49 @@ package boot
 import (
 	"math"
 	"testing"
+
+	"gvisor.dev/gvisor/pkg/sentry/pgalloc"
+	"gvisor.dev/gvisor/runsc/boot/sentryapi"
 )
+
+func TestPageLoadOpts(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts sentryapi.RestoreOpts
+		want pgalloc.AsyncPagesFileLoadOpts
+	}{
+		{
+			name: "Foreground",
+			opts: sentryapi.RestoreOpts{},
+			want: pgalloc.AsyncPagesFileLoadOpts{},
+		},
+		{
+			name: "ForegroundCheckpointGofer",
+			opts: sentryapi.RestoreOpts{UseCheckpointGofer: true},
+			want: pgalloc.AsyncPagesFileLoadOpts{},
+		},
+		{
+			name: "Background",
+			opts: sentryapi.RestoreOpts{Background: true},
+			want: pgalloc.AsyncPagesFileLoadOpts{
+				Throttled:             true,
+				MaxUnawaitedReads:     backgroundRestoreMaxUnawaitedReads,
+				MaxUnawaitedReadBytes: backgroundRestoreMaxUnawaitedReadBytes,
+			},
+		},
+		{
+			name: "BackgroundCheckpointGofer",
+			opts: sentryapi.RestoreOpts{Background: true, UseCheckpointGofer: true},
+			want: pgalloc.AsyncPagesFileLoadOpts{Throttled: true},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := pageLoadOpts(&tc.opts); got != tc.want {
+				t.Errorf("pageLoadOpts(%+v) = %+v, want %+v", tc.opts, got, tc.want)
+			}
+		})
+	}
+}
 
 func TestTSCOffsetFromSnapshot(t *testing.T) {
 	const (

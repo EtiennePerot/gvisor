@@ -215,7 +215,7 @@ func TestSignalUnkillablePolicyRestore(t *testing.T) {
 // recorded. Then, it is restored in two new containers and the first number
 // printed from these containers is checked. Both should be the next consecutive
 // number after the last number from the checkpointed container.
-func testCheckpointRestore(t *testing.T, conf *config.Config, compression statefile.CompressionLevel, newSpecWithScript func(string) *specs.Spec) {
+func testCheckpointRestore(t *testing.T, conf *config.Config, compression statefile.CompressionLevel, background bool, newSpecWithScript func(string) *specs.Spec) {
 	dir, err := os.MkdirTemp(testutil.TmpDir(), "checkpoint-test")
 	if err != nil {
 		t.Fatalf("os.MkdirTemp failed: %v", err)
@@ -293,7 +293,7 @@ func testCheckpointRestore(t *testing.T, conf *config.Config, compression statef
 	}
 	defer cont2.Destroy()
 
-	if err := cont2.Restore(conf, dir, false /* direct */, false /* background */, nil /* networkArgs */); err != nil {
+	if err := cont2.Restore(conf, dir, false /* direct */, background, nil /* networkArgs */); err != nil {
 		t.Fatalf("error restoring container: %v", err)
 	}
 
@@ -377,11 +377,17 @@ func TestCheckpointRestore(t *testing.T) {
 			}
 			for _, compression := range compressionLevels {
 				t.Run(string(compression), func(t *testing.T) {
-					testCheckpointRestore(t, conf, compression, func(script string) *specs.Spec {
+					testCheckpointRestore(t, conf, compression, false /* background */, func(script string) *specs.Spec {
 						return testutil.NewSpecWithArgs("bash", "-c", script)
 					})
 				})
 			}
+			// Background restore requires an uncompressed checkpoint.
+			t.Run("background", func(t *testing.T) {
+				testCheckpointRestore(t, conf, statefile.CompressionLevelNone, true /* background */, func(script string) *specs.Spec {
+					return testutil.NewSpecWithArgs("bash", "-c", script)
+				})
+			})
 		})
 	}
 }
@@ -992,7 +998,7 @@ func TestCheckpointRestoreEROFS(t *testing.T) {
 			// Skip overlay because test requires writing to host file.
 			for name, conf := range configs(t, true /* noOverlay */) {
 				t.Run(name, func(t *testing.T) {
-					testCheckpointRestore(t, conf, statefile.CompressionLevelDefault, func(script string) *specs.Spec {
+					testCheckpointRestore(t, conf, statefile.CompressionLevelDefault, false /* background */, func(script string) *specs.Spec {
 						spec := testutil.NewSpecWithArgs("/busybox", "sh", "-c", script)
 						spec.Root = &specs.Root{
 							Path:     rootfsDir,
