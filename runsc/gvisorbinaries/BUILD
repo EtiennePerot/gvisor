@@ -1,4 +1,4 @@
-load("//tools:defs.bzl", "go_library")
+load("//tools:defs.bzl", "go_library", "go_test")
 
 package(
     default_applicable_licenses = ["//:license"],
@@ -7,7 +7,10 @@ package(
 
 go_library(
     name = "gvisorbinaries",
-    srcs = ["gvisorbinaries.go"],
+    srcs = [
+        "gvisorbinaries.go",
+        "prefetch.go",
+    ],
     importpath = "gvisor.dev/gvisor/runsc/gvisorbinaries",
     visibility = [
         "//visibility:public",
@@ -20,4 +23,12 @@ go_library(
         "//runsc/version",
         "@org_golang_x_sys//unix:go_default_library",
     ],
+)
+
+go_test(
+    name = "gvisorbinaries_test",
+    size = "small",
+    srcs = ["prefetch_test.go"],
+    embed = [":gvisorbinaries"],
+    deps = ["@org_golang_x_sys//unix:go_default_library"],
 )
