@@ -63,6 +63,50 @@ type sharedContext struct {
 	kicked         bool
 	// The task associated with the context fell asleep.
 	sleeping bool
+	// longAppRuns is the number of consecutive times, up to
+	// longAppRunsToSkipSpin, that the application ran for longer than
+	// deepSleepTimeout before returning to the Sentry.
+	longAppRuns uint32
+}
+
+// longAppRunsToSkipSpin is the number of consecutive long application runs
+// after which the Sentry stops spinning while waiting for a context.
+const longAppRunsToSkipSpin = 2
+
+// updateAppRunStats records whether the application ran for longer than the
+// dispatcher's spin budget (deepSleepTimeout) before it returned to the
+// Sentry.
+//
+// AckedTime and StateChangedTime are written by the stub, so they can't be
+// trusted. They are only used for this heuristic: tampering with them can
+// only make the Sentry spin or sleep.
+//
+// Precondition: must be called before resetLatencyMeasures().
+//
+//go:nosplit
+func (sc *sharedContext) updateAppRunStats() {
+	ackedAt := atomic.LoadUint64(&sc.shared.AckedTime)
+	changedAt := atomic.LoadUint64(&sc.shared.StateChangedTime)
+	if ackedAt == ackReset || changedAt < ackedAt {
+		return
+	}
+	if changedAt-ackedAt <= deepSleepTimeout {
+		sc.longAppRuns = 0
+	} else if sc.longAppRuns < longAppRunsToSkipSpin {
+		sc.longAppRuns++
+	}
+}
+
+// skipSentrySpin returns true if the Sentry should wait for this context in
+// the slow path right away instead of spinning in the dispatcher first.
+//
+// The dispatcher gives up spinning after deepSleepTimeout. If the application
+// ran for longer than that the last few times, the spin is very likely to
+// time out again, so it would only burn CPU time (which, under a CPU quota,
+// the application could have used) before falling back to the slow path
+// anyway.
+func (sc *sharedContext) skipSentrySpin() bool {
+	return sc.longAppRuns >= longAppRunsToSkipSpin
 }
 
 // String returns the ID of this shared context.

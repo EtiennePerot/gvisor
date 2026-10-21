@@ -311,3 +311,48 @@ func TestStuckSubprocessHelper(t *testing.T) {
 	}
 	select {}
 }
+
+func TestSkipSentrySpin(t *testing.T) {
+	oldTimeout := deepSleepTimeout
+	deepSleepTimeout = 1000
+	t.Cleanup(func() { deepSleepTimeout = oldTimeout })
+
+	sc := &sharedContext{shared: &sysmsg.ThreadContext{}}
+	run := func(ticks uint64) {
+		atomic.StoreUint64(&sc.shared.AckedTime, 5000)
+		atomic.StoreUint64(&sc.shared.StateChangedTime, 5000+ticks)
+		sc.updateAppRunStats()
+	}
+	if sc.skipSentrySpin() {
+		t.Errorf("new context: skipSentrySpin() = true, want false")
+	}
+	for i, step := range []struct {
+		ticks uint64
+		want  bool
+	}{
+		{ticks: 2000, want: false}, // One long run is not enough.
+		{ticks: 2000, want: true},  // Two consecutive long runs skip the spin.
+		{ticks: 2000, want: true},
+		{ticks: 1000, want: false}, // One short run spins again.
+		{ticks: 2000, want: false},
+		{ticks: 10, want: false},
+		{ticks: 2000, want: false},
+		{ticks: 2000, want: true},
+	} {
+		run(step.ticks)
+		if got := sc.skipSentrySpin(); got != step.want {
+			t.Errorf("step %d (run of %d ticks): skipSentrySpin() = %t, want %t", i, step.ticks, got, step.want)
+		}
+	}
+
+	// Measurements without an application run (reset or bogus timestamps)
+	// don't change the decision.
+	sc.resetLatencyMeasures()
+	sc.updateAppRunStats()
+	atomic.StoreUint64(&sc.shared.AckedTime, 5000)
+	atomic.StoreUint64(&sc.shared.StateChangedTime, 10)
+	sc.updateAppRunStats()
+	if !sc.skipSentrySpin() {
+		t.Errorf("skipSentrySpin() changed after measurements without an application run")
+	}
+}

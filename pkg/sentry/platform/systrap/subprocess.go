@@ -892,6 +892,11 @@ func (s *subprocess) switchToApp(c *platformContext, ac *arch.Context64) (isSysc
 		s.incAwakeContexts()
 	}
 	ctx.setState(sysmsg.ContextStateNone)
+	if ctx.skipSentrySpin() {
+		// The stub thread has to wake up the Sentry via the state futex.
+		// This has to be visible before the context is queued.
+		ctx.disableSentryFastPath()
+	}
 	if err := s.contextQueue.add(ctx); err != nil {
 		return false, false, hostarch.NoAccess, err
 	}
@@ -956,7 +961,7 @@ func (s *subprocess) waitOnState(ctx *sharedContext) error {
 		return errDeadSubprocess
 	}
 	ctx.kicked = false
-	slowPath := false
+	slowPath := ctx.skipSentrySpin()
 	if !s.contextQueue.fastPathEnabled() || atomic.LoadUint32(&s.contextQueue.numActiveThreads) == 0 {
 		ctx.kicked = s.kickSysmsgThread()
 	}
@@ -994,8 +999,11 @@ func (s *subprocess) waitOnState(ctx *sharedContext) error {
 	}
 
 	ctx.recordLatency()
+	ctx.updateAppRunStats()
 	ctx.resetLatencyMeasures()
-	ctx.enableSentryFastPath()
+	if !ctx.skipSentrySpin() {
+		ctx.enableSentryFastPath()
+	}
 
 	return nil
 }
