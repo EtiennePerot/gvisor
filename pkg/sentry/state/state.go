@@ -23,6 +23,7 @@ import (
 
 	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/context"
+	"gvisor.dev/gvisor/pkg/garbage"
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
 	"gvisor.dev/gvisor/pkg/sentry/state/stateio"
@@ -124,6 +125,13 @@ func (opts *SaveOpts) Save(ctx context.Context, k *kernel.Kernel, w *watchdog.Wa
 		wt = curTime.Sub(opts.StartTime)
 		log.Infof("Before save wall time: %s", wt.String())
 	}
+
+	suspendGCForSave()
+	if opts.Resume {
+		defer garbage.Resume()
+	}
+	// Otherwise, the sandbox is killed after the save, and collecting the
+	// garbage left by the save would only delay its exit.
 
 	log.Infof("Sandbox save started, pausing all tasks.")
 	k.Pause()

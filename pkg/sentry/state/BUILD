@@ -1,4 +1,4 @@
-load("//tools:defs.bzl", "go_library")
+load("//tools:defs.bzl", "go_library", "go_test")
 
 package(
     default_applicable_licenses = ["//:license"],
@@ -9,6 +9,7 @@ go_library(
     name = "state",
     srcs = [
         "state.go",
+        "state_gc.go",
         "state_metadata.go",
         "state_tsc.go",
         "state_unsafe.go",
@@ -17,6 +18,7 @@ go_library(
     deps = [
         "//pkg/abi/linux",
         "//pkg/context",
+        "//pkg/garbage",
         "//pkg/log",
         "//pkg/sentry/kernel",
         "//pkg/sentry/platform",
@@ -26,4 +28,11 @@ go_library(
         "//pkg/state/statefile",
         "@org_golang_x_sys//unix:go_default_library",
     ],
+)
+
+go_test(
+    name = "state_test",
+    size = "small",
+    srcs = ["state_gc_test.go"],
+    library = ":state",
 )
