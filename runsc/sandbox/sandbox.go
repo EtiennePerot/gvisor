@@ -475,9 +475,24 @@ func getDisableIPv6(spec *specs.Spec) (bool, error) {
 	return valInt != 0, nil
 }
 
+// diskPaths returns the host paths that the sandbox does file I/O on: the root
+// filesystem and the sources of gofer mounts.
+func diskPaths(spec *specs.Spec) []string {
+	var paths []string
+	if spec.Root != nil {
+		paths = append(paths, spec.Root.Path)
+	}
+	for _, m := range spec.Mounts {
+		if specutils.IsGoferMount(m) {
+			paths = append(paths, m.Source)
+		}
+	}
+	return paths
+}
+
 // StartRoot starts running the root container process inside the sandbox.
 func (s *Sandbox) StartRoot(conf *config.Config, spec *specs.Spec) error {
-	if err := hostsettings.Handle(conf); err != nil {
+	if err := hostsettings.Handle(conf, diskPaths(spec)); err != nil {
 		return fmt.Errorf("host settings: %w (use --host-settings=ignore to bypass)", err)
 	}
 	pid := s.Pid.Load()
@@ -563,7 +578,7 @@ func (s *Sandbox) StartSubcontainer(spec *specs.Spec, conf *config.Config, cid s
 
 // Restore sends the restore call for a container in the sandbox.
 func (s *Sandbox) Restore(conf *config.Config, spec *specs.Spec, cid string, imagePath string, direct, background bool, networkArgs *sentryapi.CreateLinksAndRoutesArgs) error {
-	if err := hostsettings.Handle(conf); err != nil {
+	if err := hostsettings.Handle(conf, append(diskPaths(spec), imagePath)); err != nil {
 		return fmt.Errorf("host settings: %w (use --host-settings=ignore to bypass)", err)
 	}
 

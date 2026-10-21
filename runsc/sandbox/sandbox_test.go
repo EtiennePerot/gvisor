@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/runsc/cgroup"
 	"gvisor.dev/gvisor/runsc/specutils"
@@ -428,5 +429,21 @@ func TestIsGCSRestorePath(t *testing.T) {
 				t.Errorf("isGCSRestorePath(%q) = (%t, %t), want (%t, %t)", tc.path, gotGCS, gotPrefixed, tc.wantGCS, tc.wantPrefixed)
 			}
 		})
+	}
+}
+
+func TestDiskPaths(t *testing.T) {
+	spec := &specs.Spec{
+		Root: &specs.Root{Path: "/bundle/rootfs"},
+		Mounts: []specs.Mount{
+			{Destination: "/proc", Type: "proc", Source: "proc"},
+			{Destination: "/data", Type: "bind", Source: "/var/data"},
+			{Destination: "/etc/hosts", Type: "none", Source: "/var/hosts", Options: []string{"rbind", "ro"}},
+			{Destination: "/tmp", Type: "tmpfs", Source: "tmpfs"},
+		},
+	}
+	want := []string{"/bundle/rootfs", "/var/data", "/var/hosts"}
+	if got := diskPaths(spec); !slices.Equal(got, want) {
+		t.Errorf("diskPaths() = %v, want %v", got, want)
 	}
 }

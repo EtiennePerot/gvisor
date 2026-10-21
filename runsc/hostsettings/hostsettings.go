@@ -28,13 +28,15 @@ import (
 )
 
 // Handle deals with host settings according to the given config.
-func Handle(conf *config.Config) error {
+// diskPaths are host paths that the sandbox does I/O on, e.g. its root
+// filesystem; the settings of the disks holding them are checked too.
+func Handle(conf *config.Config, diskPaths []string) error {
 	switch conf.HostSettings {
 	case config.HostSettingsIgnore:
 		log.Infof("Host settings not checked per config.")
 		return nil
 	case config.HostSettingsCheck, config.HostSettingsCheckMandatory:
-		deltas, errs := check(conf)
+		deltas, errs := check(conf, diskPaths)
 		for _, err := range errs {
 			log.Warningf("Checking host settings: error: %v", err)
 		}
@@ -47,7 +49,7 @@ func Handle(conf *config.Config) error {
 			}
 		}
 	case config.HostSettingsAdjust, config.HostSettingsEnforce:
-		deltas, errs := check(conf)
+		deltas, errs := check(conf, diskPaths)
 		for _, err := range errs {
 			log.Warningf("Host settings: error: %v", err)
 		}
@@ -83,7 +85,7 @@ type Setting interface {
 
 	// Delta checks whether the current value of the setting is optimal.
 	// If already optimal, it returns a nil Delta.
-	Delta() (*Delta, error)
+	Delta(conf *config.Config) (*Delta, error)
 }
 
 // Delta is a change to make to a host setting.
@@ -185,10 +187,10 @@ func (s pathSetting) Delta(conf *config.Config) (*Delta, error) {
 
 // checks checks the host settings and returns any deltas to do or errors
 // occurred while checking.
-func check(conf *config.Config) ([]*Delta, []error) {
+func check(conf *config.Config, diskPaths []string) ([]*Delta, []error) {
 	log.Debugf("Checking host settings")
-	settings := []pathSetting{
-		{
+	settings := []Setting{
+		pathSetting{
 			path:    "/sys/kernel/mm/transparent_hugepage/shmem_enabled",
 			purpose: "turning on transparent hugepages support in shmem increases memory allocation performance",
 			delta: func(conf *config.Config, current string) (string, bool, error) {
@@ -213,7 +215,7 @@ func check(conf *config.Config) ([]*Delta, []error) {
 				}
 			},
 		},
-		{
+		pathSetting{
 			path:    "/sys/kernel/mm/transparent_hugepage/defrag",
 			purpose: "disabling direct compaction improves page fault latency when hugepages are not immediately available",
 			delta: func(conf *config.Config, current string) (string, bool, error) {
@@ -236,7 +238,7 @@ func check(conf *config.Config) ([]*Delta, []error) {
 				}
 			},
 		},
-		{
+		pathSetting{
 			path:    "/proc/sys/vm/max_map_count",
 			purpose: "increasing max_map_count decreases the likelihood of host VMA exhaustion",
 			delta: func(conf *config.Config, current string) (string, bool, error) {
@@ -251,7 +253,7 @@ func check(conf *config.Config) ([]*Delta, []error) {
 				return strconv.Itoa(recommendedMaxMapCount), false, nil
 			},
 		},
-		{
+		pathSetting{
 			path:    "/proc/sys/user/max_user_namespaces",
 			purpose: "runsc requires creating at least 2 new user namespaces and may run into the limit when creating multiple containers",
 			delta: func(conf *config.Config, current string) (string, bool, error) {
@@ -271,7 +273,7 @@ func check(conf *config.Config) ([]*Delta, []error) {
 				return strconv.Itoa(recommendedMaxUserNamespaces), false, nil
 			},
 		},
-		{
+		pathSetting{
 			path:          "/proc/sys/kernel/unprivileged_userns_clone",
 			mightNotExist: true,
 			purpose:       "in rootless mode, runsc requires the ability to create new user namespaces without privileges",
@@ -290,7 +292,7 @@ func check(conf *config.Config) ([]*Delta, []error) {
 				return "1", true, nil
 			},
 		},
-		{
+		pathSetting{
 			path:              "/proc/sys/kernel/unprivileged_userns_apparmor_policy",
 			mightNotExist:     true,
 			mightLackReadPerm: true,
@@ -311,6 +313,8 @@ func check(conf *config.Config) ([]*Delta, []error) {
 			},
 		},
 	}
+	disks := diskResolver{sysfs: "/sys", mountInfo: "/proc/self/mountinfo", stat: statDev}
+	settings = append(settings, disks.bfqIdleSettings(diskPaths)...)
 	var deltas []*Delta
 	var errs []error
 	for _, setting := range settings {
