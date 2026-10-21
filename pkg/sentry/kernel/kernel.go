@@ -188,6 +188,12 @@ type Kernel struct {
 	rootIPCNamespace     *IPCNamespace
 	rootCgroupNamespace  *CgroupNamespace
 
+	// restoreStart is the time at which DecodeFrom started, and
+	// restoreInitAppCores is the value of applicationCores at that time. They
+	// are only used by FinishLoadFrom.
+	restoreStart        time.Time `state:"nosave"`
+	restoreInitAppCores uint      `state:"nosave"`
+
 	// signalUnkillable controls protection of PID namespace init processes from
 	// signals under Linux SIGNAL_UNKILLABLE semantics (see SignalUnkillablePolicy).
 	signalUnkillable SignalUnkillablePolicy
@@ -1077,14 +1083,39 @@ func (k *Kernel) invalidateUnsavableMappings(ctx context.Context) error {
 // Preconditions: k is not in use.
 func (k *Kernel) LoadFrom(ctx context.Context, r io.Reader, asyncMFLoader *AsyncMFLoader, timeReady chan struct{}, networkArgs inet.NetworkArgs, clocks sentrytime.Clocks, vfsOpts *vfs.CompleteRestoreOptions, timeline *timing.Timeline) error {
 	defer timeline.End()
-	loadStart := time.Now()
+
+	// Suspend fdnotifier notifications.
+	fdnotifier.Pause()
+	defer fdnotifier.Resume()
+
+	if err := k.DecodeFrom(ctx, r, timeline); err != nil {
+		return err
+	}
+	return k.FinishLoadFrom(ctx, r, asyncMFLoader, timeReady, networkArgs, clocks, vfsOpts, timeline)
+}
+
+// DecodeFrom is the first part of LoadFrom. It decodes the kernel object graph
+// from r, but does not load memory files or complete the restore of
+// filesystems, networking and clocks; FinishLoadFrom does that.
+//
+// Unlike FinishLoadFrom, DecodeFrom does not need filesystem server FDs. The
+// host FDs and private memory files that it needs must be in ctx, unless ctx
+// allows deferring them (see host.CtxDeferredFDRemaps and
+// pgalloc.CtxDeferredMemoryFiles). This allows starting DecodeFrom before all
+// restore resources are available.
+//
+// Preconditions:
+//   - k is not in use.
+//   - fdnotifier is paused until FinishLoadFrom returns.
+func (k *Kernel) DecodeFrom(ctx context.Context, r io.Reader, timeline *timing.Timeline) error {
+	k.restoreStart = time.Now()
 
 	k.runningTasksCond.L = &k.runningTasksMu
 	k.cpuClockTickerWakeCh = make(chan struct{}, 1)
 	k.cpuClockTickerStopCond.L = &k.runningTasksMu
 	k.taskActivityCh = make(chan struct{})
 
-	initAppCores := k.applicationCores
+	k.restoreInitAppCores = k.applicationCores
 
 	// Load the pre-saved CPUID FeatureSet.
 	//
@@ -1106,10 +1137,6 @@ func (k *Kernel) LoadFrom(ctx context.Context, r io.Reader, asyncMFLoader *Async
 	}
 	timeline.Reached("CPUID checked")
 
-	// Suspend fdnotifier notifications.
-	fdnotifier.Pause()
-	defer fdnotifier.Resume()
-
 	// Load the kernel state.
 	kernelStart := time.Now()
 	stats, err := state.Load(ctx, r, k)
@@ -1119,7 +1146,16 @@ func (k *Kernel) LoadFrom(ctx context.Context, r io.Reader, asyncMFLoader *Async
 	log.Infof("Kernel load stats: %s", stats.String())
 	log.Infof("Kernel load took [%s].", time.Since(kernelStart))
 	timeline.Reached("Kernel loaded")
+	return nil
+}
 
+// FinishLoadFrom is the second part of LoadFrom, after DecodeFrom. ctx must
+// contain all restore resources.
+//
+// Preconditions:
+//   - DecodeFrom succeeded.
+//   - fdnotifier is paused.
+func (k *Kernel) FinishLoadFrom(ctx context.Context, r io.Reader, asyncMFLoader *AsyncMFLoader, timeReady chan struct{}, networkArgs inet.NetworkArgs, clocks sentrytime.Clocks, vfsOpts *vfs.CompleteRestoreOptions, timeline *timing.Timeline) error {
 	if asyncMFLoader == nil {
 		mfStart := time.Now()
 		if err := k.loadMemoryFiles(ctx, r); err != nil {
@@ -1161,7 +1197,7 @@ func (k *Kernel) LoadFrom(ctx context.Context, r io.Reader, asyncMFLoader *Async
 	}
 	timeline.Reached("VFS restored")
 
-	log.Infof("Overall load took [%s] after async work", time.Since(loadStart))
+	log.Infof("Overall load took [%s] after async work", time.Since(k.restoreStart))
 
 	// Applications may size per-cpu structures based on k.applicationCores, so
 	// it can't change across save/restore. When we are virtualizing CPU
@@ -1169,8 +1205,8 @@ func (k *Kernel) LoadFrom(ctx context.Context, r io.Reader, asyncMFLoader *Async
 	// assignments, we can't tolerate an increase in the number of host CPUs,
 	// which could result in getcpu(2) returning CPUs that applications expect
 	// not to exist.
-	if k.useHostCores && initAppCores > k.applicationCores {
-		return fmt.Errorf("UseHostCores enabled: can't increase ApplicationCores from %d to %d after restore", k.applicationCores, initAppCores)
+	if k.useHostCores && k.restoreInitAppCores > k.applicationCores {
+		return fmt.Errorf("UseHostCores enabled: can't increase ApplicationCores from %d to %d after restore", k.applicationCores, k.restoreInitAppCores)
 	}
 
 	return nil
