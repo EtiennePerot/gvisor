@@ -69,6 +69,11 @@ func openNullNetNS(path string) (*os.File, error) {
 // concurrent cold starts using the same shared root directory.)
 func pinNullNetNS(conf *config.Config, pid int) error {
 	path := nullNetNSPath(conf)
+	// Unlike --root, --shared-root is not otherwise created by runsc, and may
+	// point to a directory that doesn't exist yet (e.g. under a fresh /tmp).
+	if err := os.MkdirAll(filepath.Dir(path), 0711); err != nil {
+		return fmt.Errorf("creating shared root directory: %w", err)
+	}
 	f, err := os.OpenFile(path, os.O_RDONLY|os.O_CREATE, 0444)
 	if err != nil {
 		return fmt.Errorf("creating mount point: %w", err)

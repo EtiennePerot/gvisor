@@ -3228,6 +3228,72 @@ func TestGoferExits(t *testing.T) {
 	}
 }
 
+// TestSharedRootNullNetNS checks that gofers of sandboxes using a non-existent
+// --shared-root directory share a single pinned network namespace.
+func TestSharedRootNullNetNS(t *testing.T) {
+	parent, err := os.MkdirTemp(testutil.TmpDir(), "shared-root")
+	if err != nil {
+		t.Fatalf("os.MkdirTemp: %v", err)
+	}
+	sharedRoot := filepath.Join(parent, "does", "not", "exist")
+	t.Cleanup(func() {
+		specutils.UnmountNullNetNS(sharedRoot)
+		os.RemoveAll(parent)
+	})
+
+	netNSIno := func(path string) uint64 {
+		t.Helper()
+		var st unix.Stat_t
+		if err := unix.Stat(path, &st); err != nil {
+			t.Fatalf("stat %q: %v", path, err)
+		}
+		return st.Ino
+	}
+
+	var goferNetNS []uint64
+	for i := 0; i < 2; i++ {
+		spec, conf := sleepSpecConf(t)
+		conf.SharedRootDir = sharedRoot
+		conf.GoferNetworkNamespace = config.GoferNetworkNamespaceNull
+		_, bundleDir, cleanup, err := testutil.SetupContainer(spec, conf)
+		if err != nil {
+			t.Fatalf("error setting up container: %v", err)
+		}
+		defer cleanup()
+		c, err := New(conf, Args{
+			ID:        testutil.RandomContainerID(),
+			Spec:      spec,
+			BundleDir: bundleDir,
+		})
+		if err != nil {
+			t.Fatalf("error creating container: %v", err)
+		}
+		defer c.Destroy()
+		if err := c.Start(conf); err != nil {
+			t.Fatalf("error starting container: %v", err)
+		}
+		goferNetNS = append(goferNetNS, netNSIno(fmt.Sprintf("/proc/%d/ns/net", c.GoferPid.Load())))
+	}
+
+	if fi, err := os.Stat(sharedRoot); err != nil {
+		t.Fatalf("shared root directory: %v", err)
+	} else if mode := fi.Mode().Perm(); mode&^0711 != 0 {
+		t.Errorf("shared root directory mode: got %v, want at most %v", mode, os.FileMode(0711))
+	}
+	nsPath := filepath.Join(sharedRoot, specutils.NullNetNSFilename)
+	f, err := openNullNetNS(nsPath)
+	if err != nil {
+		t.Fatalf("openNullNetNS(%q): %v", nsPath, err)
+	}
+	f.Close()
+	pinned := netNSIno(nsPath)
+	for i, ino := range goferNetNS {
+		if ino != pinned {
+			t.Errorf("gofer %d network namespace inode: got %d, want %d (pinned at %q)", i, ino, pinned, nsPath)
+		}
+	}
+}
+
 func TestRootNotMount(t *testing.T) {
 	appSym, err := testutil.FindFile("test/cmd/test_app/test_app")
 	if err != nil {
