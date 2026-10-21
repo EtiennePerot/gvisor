@@ -24,3 +24,16 @@ type benchStruct struct {
 func (b *benchStruct) afterLoad(context.Context) {
 	// Do nothing, just force scheduling.
 }
+
+// benchFields has fields of the most common kinds in the sentry's state.
+//
+// +stateify savable
+type benchFields struct {
+	// Fields must be exported for gob.
+	Bytes [64]byte
+	U32   uint32
+	U64   uint64
+	I     int
+	S     string
+	B     bool
+}
