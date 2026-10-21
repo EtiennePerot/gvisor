@@ -132,6 +132,23 @@ func (r *SimpleReader) fail(err error) (int, error) {
 	return 0, r.err
 }
 
+// ReadByte implements io.ByteReader.ReadByte.
+func (r *SimpleReader) ReadByte() (byte, error) {
+	if r.h == nil {
+		return r.bin.ReadByte()
+	}
+	if r.err == nil && len(r.pending) > 0 {
+		b := r.pending[0]
+		r.pending = r.pending[1:]
+		return b, nil
+	}
+	var b [1]byte
+	if _, err := io.ReadFull(r, b[:]); err != nil {
+		return 0, err
+	}
+	return b[0], nil
+}
+
 // Read implements io.Reader.Read.
 func (r *SimpleReader) Read(p []byte) (int, error) {
 	if r.h == nil {
