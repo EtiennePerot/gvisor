@@ -59,3 +59,10 @@ go_test(
         "//pkg/sentry/seccheck/points:points_go_proto",
     ],
 )
+
+go_test(
+    name = "lazy_init_test",
+    size = "small",
+    srcs = ["lazy_init_test.go"],
+    embed = [":seccheck"],
+)

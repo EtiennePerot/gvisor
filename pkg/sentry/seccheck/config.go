@@ -88,6 +88,10 @@ type SinkConfig struct {
 // Create reads the session configuration and applies it to the system.
 func Create(conf *SessionConfig, force bool) error {
 	log.Debugf("Creating seccheck: %+v", conf)
+	// Points are only needed to configure a session, so register them lazily
+	// to avoid paying their memory cost in sandboxes that are never traced.
+	Initialize()
+
 	sessionsMu.Lock()
 	defer sessionsMu.Unlock()
 

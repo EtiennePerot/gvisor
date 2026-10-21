@@ -343,7 +343,8 @@ func genericInit() {
 var initOnce sync.Once
 
 // Initialize initializes the Points available in the system.
-// Must be called prior to using any of them.
+// Must be called prior to using any of them. Create calls it, so callers
+// only need to call it to inspect Points directly.
 func Initialize() {
 	initOnce.Do(func() {
 		genericInit()
