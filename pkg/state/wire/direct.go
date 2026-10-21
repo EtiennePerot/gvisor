@@ -51,6 +51,7 @@ const (
 	TagComplex64       = typeComplex64
 	TagComplex128      = typeComplex128
 	TagType            = typeType
+	TagBytes           = typeBytes
 )
 
 // TypeSpec tags, as written by saveTypeSpec.
@@ -281,6 +282,8 @@ func LoadTagged(r *Reader, tag Tag) Object {
 		return ((*Complex128)(nil)).load(r)
 	case typeType:
 		return ((*Type)(nil)).load(r)
+	case typeBytes:
+		return ((*Bytes)(nil)).load(r)
 	default:
 		panic(fmt.Errorf("unknown header: %d", tag))
 	}

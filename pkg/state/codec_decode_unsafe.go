@@ -464,6 +464,18 @@ func DecodeArray[T any](d *Decoder, a []T, tag Tag, elem func(*Decoder, *T, Tag)
 	case wire.TagNil:
 		return
 	case wire.TagArray:
+	case wire.TagBytes:
+		if typeOf[T]().Kind() != reflect.Uint8 {
+			Failf("byte array decoded into array of %v", typeOf[T]())
+		}
+		if n := d.uint(); n != uint64(len(a)) {
+			Failf("mismatching array length expect=%d, actual=%d", len(a), n)
+		}
+		if len(a) > 0 {
+			wire.ReadFull(d.r, unsafe.Slice((*byte)(unsafe.Pointer(&a[0])), len(a)))
+		}
+		d.lastRef = 0
+		return
 	default:
 		Failf("array of %v has tag %d", typeOf[T](), tag)
 	}
