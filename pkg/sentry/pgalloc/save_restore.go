@@ -1383,6 +1383,11 @@ type AsyncPagesFileLoad struct {
 	// maxUnawaitedReads is immutable.
 	maxUnawaitedReads int
 
+	// maxUnawaitedReadBytes is the maximum size of a read of pages without
+	// waiters, which is at most maxReadBytes. maxUnawaitedReadBytes is
+	// immutable.
+	maxUnawaitedReadBytes uint64
+
 	// unawaitedReads is the number of inflight reads of pages without
 	// waiters.
 	unawaitedReads int
@@ -1512,6 +1517,14 @@ type AsyncPagesFileLoadOpts struct {
 	// pages without waiters are in flight at any time. Reads of pages with
 	// waiters are not limited.
 	MaxUnawaitedReads int
+
+	// If MaxUnawaitedReadBytes is positive, each read of pages without
+	// waiters reads at most MaxUnawaitedReadBytes (rounded down to a page
+	// boundary, but at least one page). Since reads of pages with waiters
+	// may have to wait for reads of pages without waiters to complete,
+	// smaller reads reduce the latency of the former, at the cost of more
+	// reads in total. Reads of pages with waiters are not limited.
+	MaxUnawaitedReadBytes uint64
 }
 
 // StartAsyncPagesFileLoad constructs asynchronous loading state for the pages
@@ -1525,16 +1538,20 @@ func StartAsyncPagesFileLoad(ar stateio.AsyncReader, doneCallback func(error), t
 	// Cap maxParallel due to the uint32 range of bitmap.Bitmap.
 	maxParallel := min(ar.MaxParallel(), 1<<30)
 	apfl := &AsyncPagesFileLoad{
-		timeStartWaiters:  math.MaxInt64,
-		timeline:          timeline.Fork("async page loading"),
-		doneCallback:      doneCallback,
-		ar:                ar,
-		maxReadBytes:      maxReadBytes,
-		throttled:         atomicbitops.FromBool(opts.Throttled),
-		qavail:            maxParallel,
-		opsBusy:           bitmap.New(uint32(maxParallel)),
-		ops:               make([]aplOp, maxParallel),
-		maxUnawaitedReads: opts.MaxUnawaitedReads,
+		timeStartWaiters:      math.MaxInt64,
+		timeline:              timeline.Fork("async page loading"),
+		doneCallback:          doneCallback,
+		ar:                    ar,
+		maxReadBytes:          maxReadBytes,
+		throttled:             atomicbitops.FromBool(opts.Throttled),
+		qavail:                maxParallel,
+		opsBusy:               bitmap.New(uint32(maxParallel)),
+		ops:                   make([]aplOp, maxParallel),
+		maxUnawaitedReads:     opts.MaxUnawaitedReads,
+		maxUnawaitedReadBytes: maxReadBytes,
+	}
+	if opts.MaxUnawaitedReadBytes > 0 {
+		apfl.maxUnawaitedReadBytes = min(maxReadBytes, max(hostarch.PageRoundDown(opts.MaxUnawaitedReadBytes), hostarch.PageSize))
 	}
 	// Mark ops in opsBusy that don't actually exist as permanently busy.
 	for i, n := maxParallel, apfl.opsBusy.Size(); i < n; i++ {
@@ -1771,10 +1788,15 @@ func (apfl *AsyncPagesFileLoad) combine(amfl *asyncMemoryFileLoad, fr memmap.Fil
 		}
 	}
 
-	// Apply direct length limits.
+	// Apply direct length limits. If op.total != 0, op.tempRef == tempRef
+	// (checked above), so op.total <= maxReadBytes.
+	maxReadBytes := apfl.maxReadBytes
+	if tempRef {
+		maxReadBytes = apfl.maxUnawaitedReadBytes
+	}
 	n := fr.Length()
-	if op.total+n >= apfl.maxReadBytes {
-		n = apfl.maxReadBytes - op.total
+	if op.total+n >= maxReadBytes {
+		n = maxReadBytes - op.total
 	}
 	if n == 0 {
 		return 0

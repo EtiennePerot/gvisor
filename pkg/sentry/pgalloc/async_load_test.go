@@ -230,22 +230,24 @@ type countingReader struct {
 	mu          sync.Mutex
 	inflight    int
 	maxInflight int
+	sizes       []uint64
 }
 
-func (r *countingReader) add() {
+func (r *countingReader) add(size uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.inflight++
 	r.maxInflight = max(r.maxInflight, r.inflight)
+	r.sizes = append(r.sizes, size)
 }
 
 func (r *countingReader) AddRead(id int, off int64, df stateio.DestinationFile, fr memmap.FileRange, dst []byte) {
-	r.add()
+	r.add(uint64(len(dst)))
 	r.IOReader.AddRead(id, off, df, fr, dst)
 }
 
 func (r *countingReader) AddReadv(id int, off int64, total uint64, df stateio.DestinationFile, frs []memmap.FileRange, dsts []unix.Iovec) {
-	r.add()
+	r.add(total)
 	r.IOReader.AddReadv(id, off, total, df, frs, dsts)
 }
 
@@ -438,6 +440,71 @@ func TestAsyncLoadLimitedAwaitedReads(t *testing.T) {
 		t.Fatalf("async page loading did not complete")
 	}
 	checkLoadedPages(t, dst, fr)
+}
+
+// TestAsyncLoadMaxUnawaitedReadBytes checks that
+// AsyncPagesFileLoadOpts.MaxUnawaitedReadBytes limits the size of reads of
+// pages without waiters, but not of reads of pages with waiters.
+func TestAsyncLoadMaxUnawaitedReadBytes(t *testing.T) {
+	const maxParallel = 4
+	src := newSaveTestMemoryFile(t, false)
+	fr := allocateSaveTestPages(t, src)
+	meta, pages := saveWithPagesFile(t, src, fr)
+	numPages := fr.Length() / hostarch.PageSize
+
+	ra := &steppedReaderAt{r: bytes.NewReader(pages), release: make(chan struct{})}
+	ar := &countingReader{IOReader: stateio.NewIOReader(ra, fr.Length(), 1, maxParallel)}
+	apflDone := make(chan error, 1)
+	apfl, err := StartAsyncPagesFileLoad(ar, func(err error) { apflDone <- err }, nil, AsyncPagesFileLoadOpts{MaxUnawaitedReadBytes: 2*hostarch.PageSize + 1})
+	if err != nil {
+		t.Fatalf("StartAsyncPagesFileLoad: %v", err)
+	}
+	dst := newSaveTestMemoryFile(t, false)
+	if err := dst.LoadFrom(context.Background(), bytes.NewReader(meta), &LoadOpts{PagesFile: apfl}); err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+	apfl.MemoryFilesDone()
+	t.Cleanup(func() { dst.DecRef(fr) })
+
+	// Reads of pages 0-7 are in flight. Wait for pages 8-15, which are read
+	// together after the next read completes.
+	ar.waitInflight(t, maxParallel)
+	awaited := memmap.FileRange{fr.Start + numPages/2*hostarch.PageSize, fr.End}
+	done := make(chan error, 1)
+	go func() {
+		_, err := dst.MapInternal(awaited, hostarch.Read)
+		done <- err
+	}()
+	time.Sleep(100 * time.Millisecond)
+	close(ra.release)
+	if err := <-done; err != nil {
+		t.Fatalf("MapInternal(%v): %v", awaited, err)
+	}
+	select {
+	case err := <-apflDone:
+		if err != nil {
+			t.Fatalf("async page loading failed: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("async page loading did not complete")
+	}
+	checkLoadedPages(t, dst, fr)
+
+	ar.mu.Lock()
+	defer ar.mu.Unlock()
+	sawAwaited := false
+	for _, size := range ar.sizes {
+		switch size {
+		case 2 * hostarch.PageSize:
+		case awaited.Length():
+			sawAwaited = true
+		default:
+			t.Errorf("got read of %d bytes, want %d or %d bytes", size, 2*hostarch.PageSize, awaited.Length())
+		}
+	}
+	if !sawAwaited {
+		t.Errorf("got reads of sizes %v, want one of %d bytes", ar.sizes, awaited.Length())
+	}
 }
 
 // checkLoadedPages checks that the pages of fr in f have the contents written
