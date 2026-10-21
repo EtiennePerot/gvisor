@@ -103,32 +103,46 @@ type GoQueue struct {
 	completions chan Completion
 	shutdown    chan struct{}
 	workers     sync.WaitGroup
-	numWorkers  int
+	extraProcs  int
 }
 
-// NewGoQueue returns a new GoQueue with the given capacity.
+// NewGoQueue returns a new GoQueue with the given capacity, which executes up
+// to cap operations in parallel.
+//
+// NewGoQueue does not increase GOMAXPROCS for the GoQueue's workers, which
+// spend most of their time in syscalls, where they do not need a P. Extra Ps
+// would let the workers' callers and the garbage collector use more CPUs than
+// the sandbox is allowed to, which slows them down when the sandbox's CPU
+// usage is limited. In addition, changing GOMAXPROCS stops the world, and the
+// Go runtime never frees the Ps that it creates when GOMAXPROCS is increased,
+// nor the threads that it starts to run them.
 func NewGoQueue(cap int) *GoQueue {
-	return newGoQueue(cap, cap)
+	return newGoQueue(cap, cap, 0)
 }
 
 // NewSerialGoQueue returns a new GoQueue with the given capacity that executes
 // one operation at a time, in the order in which they are enqueued.
+//
+// Until the GoQueue is destroyed, GOMAXPROCS is increased by 1, so that its
+// worker can run in parallel with the goroutine that enqueues operations.
 func NewSerialGoQueue(cap int) *GoQueue {
-	return newGoQueue(cap, 1)
+	return newGoQueue(cap, 1, 1)
 }
 
-func newGoQueue(cap, workers int) *GoQueue {
+func newGoQueue(cap, workers, extraProcs int) *GoQueue {
 	q := &GoQueue{
 		requests:    make(chan Request, cap),
 		completions: make(chan Completion, cap),
 		shutdown:    make(chan struct{}),
-		numWorkers:  workers,
+		extraProcs:  extraProcs,
 	}
 	q.workers.Add(workers)
 	for range workers {
 		go q.workerMain()
 	}
-	gomaxprocs.Add(workers)
+	if extraProcs != 0 {
+		gomaxprocs.Add(extraProcs)
+	}
 	return q
 }
 
@@ -169,7 +183,9 @@ func (q *GoQueue) workerMain() {
 func (q *GoQueue) Destroy() {
 	close(q.shutdown)
 	q.workers.Wait()
-	gomaxprocs.Add(-q.numWorkers)
+	if q.extraProcs != 0 {
+		gomaxprocs.Add(-q.extraProcs)
+	}
 }
 
 // Cap implements Queue.Cap.

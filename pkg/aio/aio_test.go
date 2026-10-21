@@ -18,10 +18,12 @@ import (
 	"bytes"
 	"io"
 	"os"
+	"runtime"
 	"testing"
 
 	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/bitmap"
+	"gvisor.dev/gvisor/pkg/gomaxprocs"
 	"gvisor.dev/gvisor/pkg/rand"
 )
 
@@ -319,4 +321,28 @@ func TestGoQueue(t *testing.T) {
 		q := NewGoQueue(cap)
 		return q, nil
 	})
+}
+
+func TestGoQueueGOMAXPROCS(t *testing.T) {
+	base := runtime.GOMAXPROCS(0)
+	gomaxprocs.SetBase(base)
+	for _, tc := range []struct {
+		name     string
+		newQueue func(cap int) *GoQueue
+		want     int
+	}{
+		{name: "NewGoQueue", newQueue: NewGoQueue, want: base},
+		{name: "NewSerialGoQueue", newQueue: NewSerialGoQueue, want: base + 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q := tc.newQueue(8)
+			if got := runtime.GOMAXPROCS(0); got != tc.want {
+				t.Errorf("GOMAXPROCS with live GoQueue: got %d, want %d", got, tc.want)
+			}
+			q.Destroy()
+			if got := runtime.GOMAXPROCS(0); got != base {
+				t.Errorf("GOMAXPROCS after GoQueue.Destroy: got %d, want %d", got, base)
+			}
+		})
+	}
 }
