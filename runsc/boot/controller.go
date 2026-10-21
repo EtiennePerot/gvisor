@@ -597,6 +597,7 @@ func (cm *containerManager) onRestoreDone(s sentryapi.Savings) {
 	cm.l.mu.Unlock()
 	cm.l.restoreDone.Broadcast()
 	cm.restorer = nil
+	scheduleStartupHeapRelease()
 }
 
 func (cm *containerManager) RestoreSubcontainer(args *sentryapi.StartArgs, _ *struct{}) (retErr error) {

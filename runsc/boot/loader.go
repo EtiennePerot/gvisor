@@ -21,6 +21,7 @@ import (
 	"maps"
 	"os"
 	"runtime"
+	runtimedebug "runtime/debug"
 	"strconv"
 	"strings"
 	gtime "time"
@@ -1355,6 +1356,27 @@ func (l *Loader) Run() error {
 	return nil
 }
 
+// startupHeapReleaseDelay is how long after the root container starts, or
+// the sandbox finishes restoring, the Sentry returns its free heap memory to
+// the host. It only needs to keep the forced garbage collection off the
+// start/restore critical path and the application's first requests.
+var startupHeapReleaseDelay = 2 * gtime.Second
+
+// freeOSMemory is runtimedebug.FreeOSMemory, overridden in tests.
+var freeOSMemory = runtimedebug.FreeOSMemory
+
+// scheduleStartupHeapRelease returns free heap memory to the host once,
+// startupHeapReleaseDelay from now.
+//
+// Sandbox startup, and in particular state decoding on restore, allocates
+// much more than it retains. The Go runtime keeps the resulting free heap
+// memory resident until the next garbage collection lowers the heap goal and
+// the background scavenger catches up. In an idle sandbox, that collection
+// only happens when the runtime forces one, two minutes later.
+func scheduleStartupHeapRelease() {
+	gtime.AfterFunc(startupHeapReleaseDelay, freeOSMemory)
+}
+
 // +checklocksexclude:l.mu
 func (l *Loader) run() error {
 	if l.root.conf.Network == config.NetworkHost {
@@ -1505,7 +1527,10 @@ func (l *Loader) run() error {
 	switch l.state {
 	case created:
 		l.state = started
+		scheduleStartupHeapRelease()
 	case restoringUnstarted:
+		// Restored sandboxes release their startup heap once the restore
+		// is complete, in containerManager.onRestoreDone.
 		l.state = restoringStarted
 	default:
 		panic(fmt.Sprintf("state=%s in Loader.run() should be impossible", l.state))
