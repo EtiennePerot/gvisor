@@ -177,3 +177,24 @@ func TestStaleCollectionIgnored(t *testing.T) {
 	Resume()
 	check(t, "resumed", 100, math.MaxInt64)
 }
+
+func TestFreeOSMemoryWhileSuspended(t *testing.T) {
+	withSettings(t, 100, math.MaxInt64)
+	Suspend(0)
+	FreeOSMemory()
+	// FreeOSMemory forces a collection, which would abandon the suspension.
+	time.Sleep(100 * time.Millisecond)
+	check(t, "after FreeOSMemory while suspended", -1, math.MaxInt64)
+	Resume()
+	check(t, "resumed", 100, math.MaxInt64)
+}
+
+func TestFreeOSMemory(t *testing.T) {
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	FreeOSMemory()
+	runtime.ReadMemStats(&after)
+	if after.NumGC == before.NumGC {
+		t.Errorf("FreeOSMemory did not collect garbage")
+	}
+}

@@ -140,3 +140,15 @@ func collected(e uint64) {
 	restoreLocked()
 	abandoned = true
 }
+
+// FreeOSMemory forces a garbage collection and returns as much memory as
+// possible to the host (see runtime/debug.FreeOSMemory), unless garbage
+// collection is suspended, in which case it does nothing.
+func FreeOSMemory() {
+	mu.Lock()
+	defer mu.Unlock()
+	if suspensions > 0 && !abandoned {
+		return
+	}
+	debug.FreeOSMemory()
+}
