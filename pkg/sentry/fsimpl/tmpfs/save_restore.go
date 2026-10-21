@@ -40,11 +40,7 @@ func (fs *filesystem) loadMf(ctx goContext.Context, resourceID checkpoint.Resour
 		fs.mf = pgalloc.MemoryFileFromContext(ctx)
 		return
 	}
-	mfmap := pgalloc.MemoryFileMapFromContext(ctx)
-	if mfmap == nil {
-		panic("CtxMemoryFileMap was not provided")
-	}
-	mf, ok := mfmap[resourceID]
+	mf, ok := pgalloc.MemoryFileForRestore(ctx, resourceID)
 	if !ok {
 		panic(fmt.Sprintf("Memory file for %q not found in CtxMemoryFileMap", resourceID))
 	}

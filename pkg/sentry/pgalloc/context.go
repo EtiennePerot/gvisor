@@ -33,6 +33,10 @@ const (
 	// CtxMemoryFileMap is a Context.Value key for mapping
 	// MemoryFileOpts.RestoreID to *MemoryFile. This is used for save/restore.
 	CtxMemoryFileMap
+
+	// CtxDeferredMemoryFiles is a Context.Value key for a
+	// *DeferredMemoryFiles. See MemoryFileForRestore.
+	CtxDeferredMemoryFiles
 )
 
 // MemoryFileFromContext returns the MemoryFile used by ctx, or nil if no such
@@ -60,4 +64,19 @@ func MemoryFileMapFromContext(ctx context.Context) map[checkpoint.ResourceID]*Me
 		return v.(map[checkpoint.ResourceID]*MemoryFile)
 	}
 	return nil
+}
+
+// MemoryFileForRestore returns the MemoryFile with the given resource ID from
+// the restore context ctx. If CtxMemoryFileMap does not contain it and ctx
+// carries a *DeferredMemoryFiles, MemoryFileForRestore returns a placeholder
+// that DeferredMemoryFiles.NewMemoryFile initializes later. Until then, the
+// caller may only store the returned pointer.
+func MemoryFileForRestore(ctx context.Context, resourceID checkpoint.ResourceID) (*MemoryFile, bool) {
+	if mf, ok := MemoryFileMapFromContext(ctx)[resourceID]; ok {
+		return mf, true
+	}
+	if d, ok := ctx.Value(CtxDeferredMemoryFiles).(*DeferredMemoryFiles); ok {
+		return d.placeholder(resourceID), true
+	}
+	return nil, false
 }

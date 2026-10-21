@@ -174,8 +174,7 @@ func (p *pma) loadFile(ctx goContext.Context, resourceID checkpoint.ResourceID) 
 		p.file = pgalloc.MemoryFileFromContext(ctx)
 		return
 	}
-	mfmap := pgalloc.MemoryFileMapFromContext(ctx)
-	mf, ok := mfmap[resourceID]
+	mf, ok := pgalloc.MemoryFileForRestore(ctx, resourceID)
 	if !ok {
 		panic(fmt.Sprintf("can't restore pma because its MemoryFile's resource ID %q was not found in CtxMemoryFileMap", resourceID))
 	}

@@ -428,6 +428,15 @@ const (
 // NewMemoryFile succeeds, ownership of file is transferred to the returned
 // MemoryFile.
 func NewMemoryFile(file *os.File, opts MemoryFileOpts) (*MemoryFile, error) {
+	f := &MemoryFile{}
+	if err := f.init(file, opts); err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
+// init initializes a zero-value MemoryFile f. It implements NewMemoryFile.
+func (f *MemoryFile) init(file *os.File, opts MemoryFileOpts) error {
 	switch opts.DelayedEviction {
 	case DelayedEvictionDefault:
 		opts.DelayedEviction = DelayedEvictionEnabled
@@ -436,17 +445,15 @@ func NewMemoryFile(file *os.File, opts MemoryFileOpts) (*MemoryFile, error) {
 	case DelayedEvictionEnabled:
 		// ok
 	default:
-		return nil, fmt.Errorf("invalid MemoryFileOpts.DelayedEviction: %v", opts.DelayedEviction)
+		return fmt.Errorf("invalid MemoryFileOpts.DelayedEviction: %v", opts.DelayedEviction)
 	}
 
 	// Truncate the file to 0 bytes first to ensure that it's empty.
 	if err := file.Truncate(0); err != nil {
-		return nil, err
+		return err
 	}
-	f := &MemoryFile{
-		opts: opts,
-		file: file,
-	}
+	f.opts = opts
+	f.file = file
 	f.initFields()
 
 	if f.opts.DelayedEviction == DelayedEvictionEnabled && f.opts.UseHostMemcgPressure {
@@ -459,7 +466,7 @@ func NewMemoryFile(file *os.File, opts MemoryFileOpts) (*MemoryFile, error) {
 			}
 		}, "low")
 		if err != nil {
-			return nil, fmt.Errorf("failed to configure memcg pressure level notifications: %v", err)
+			return fmt.Errorf("failed to configure memcg pressure level notifications: %v", err)
 		}
 		f.stopNotifyPressure = stop
 	}
@@ -469,7 +476,57 @@ func NewMemoryFile(file *os.File, opts MemoryFileOpts) (*MemoryFile, error) {
 	if !opts.DisableIMAWorkAround {
 		hostmm.IMAWorkAroundForMemFile(file.Fd())
 	}
-	return f, nil
+	return nil
+}
+
+// DeferredMemoryFiles creates placeholders for private MemoryFiles that a
+// restore needs before they exist. This is the case when the kernel state is
+// decoded before every container has donated its filestore files.
+//
+// DeferredMemoryFiles is not safe for concurrent use: placeholders are
+// created during the decode and initialized after it.
+type DeferredMemoryFiles struct {
+	// placeholders maps resource IDs to MemoryFiles that have not been
+	// initialized yet.
+	placeholders map[checkpoint.ResourceID]*MemoryFile
+}
+
+func (d *DeferredMemoryFiles) placeholder(resourceID checkpoint.ResourceID) *MemoryFile {
+	if mf, ok := d.placeholders[resourceID]; ok {
+		return mf
+	}
+	if d.placeholders == nil {
+		d.placeholders = make(map[checkpoint.ResourceID]*MemoryFile)
+	}
+	mf := &MemoryFile{}
+	d.placeholders[resourceID] = mf
+	return mf
+}
+
+// NewMemoryFile is equivalent to the package-level NewMemoryFile, except that
+// if d has a placeholder for opts.ResourceID, it initializes and returns that
+// placeholder. d may be nil.
+func (d *DeferredMemoryFiles) NewMemoryFile(file *os.File, opts MemoryFileOpts) (*MemoryFile, error) {
+	if d == nil {
+		return NewMemoryFile(file, opts)
+	}
+	mf, ok := d.placeholders[opts.ResourceID]
+	if !ok {
+		return NewMemoryFile(file, opts)
+	}
+	if err := mf.init(file, opts); err != nil {
+		return nil, err
+	}
+	delete(d.placeholders, opts.ResourceID)
+	return mf, nil
+}
+
+// CheckResolved returns an error if a placeholder has not been initialized.
+func (d *DeferredMemoryFiles) CheckResolved() error {
+	for resourceID := range d.placeholders {
+		return fmt.Errorf("no memory file available for %q", resourceID)
+	}
+	return nil
 }
 
 func (f *MemoryFile) initFields() {
