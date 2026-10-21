@@ -1,0 +1,50 @@
+diff --git a/src/runtime/proc.go b/src/runtime/proc.go
+index b8d4d15..da997e7 100644
+--- a/src/runtime/proc.go
++++ b/src/runtime/proc.go
+@@ -6544,10 +6544,15 @@ func sysmon() {
+ 	lasttrace := int64(0)
+ 	idle := 0 // how many cycles in succession we had not wokeup somebody
+ 	delay := uint32(0)
++	// gVisor patch: GODEBUG=sysmonmindelay=N raises the shortest sleep
++	// below from 20us to N us (at most 10ms). Programs whose goroutines
++	// frequently wake up from blocking syscalls otherwise keep sysmon
++	// polling every 20us, at a cost of thousands of wakeups per second.
++	minDelay := uint32(min(max(debug.sysmonmindelay, 20), 10*1000))
+ 
+ 	for {
+ 		if idle == 0 { // start with 20us sleep...
+-			delay = 20
++			delay = minDelay
+ 		} else if idle > 50 { // start doubling the sleep after 1ms...
+ 			delay *= 2
+ 		}
+@@ -6600,7 +6605,7 @@ func sysmon() {
+ 				}
+ 				if syscallWake {
+ 					idle = 0
+-					delay = 20
++					delay = minDelay
+ 				}
+ 			}
+ 			unlock(&sched.lock)
+diff --git a/src/runtime/runtime1.go b/src/runtime/runtime1.go
+index fc26e9b..94c0e7b 100644
+--- a/src/runtime/runtime1.go
++++ b/src/runtime/runtime1.go
+@@ -329,6 +329,7 @@ var debug struct {
+ 	traceCheckStackOwnership int32
+ 	profstackdepth           int32
+ 	dataindependenttiming    int32
++	sysmonmindelay           int32 // gVisor patch
+ 
+ 	// debug.malloc is used as a combined debug check
+ 	// in the malloc function and should be set
+@@ -381,6 +382,7 @@ var dbgvars = []*dbgVar{
+ 	{name: "scavtrace", value: &debug.scavtrace},
+ 	{name: "scheddetail", value: &debug.scheddetail},
+ 	{name: "schedtrace", value: &debug.schedtrace},
++	{name: "sysmonmindelay", value: &debug.sysmonmindelay}, // gVisor patch
+ 	{name: "traceadvanceperiod", value: &debug.traceadvanceperiod},
+ 	{name: "traceallocfree", atomic: &debug.traceallocfree},
+ 	{name: "tracecheckstackownership", value: &debug.traceCheckStackOwnership},
