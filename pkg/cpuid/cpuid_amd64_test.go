@@ -18,9 +18,14 @@
 package cpuid
 
 import (
+	"bytes"
+	"context"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
+
+	"gvisor.dev/gvisor/pkg/state"
 )
 
 // makeFatureSet creates a new FeatureSet.
@@ -366,5 +371,49 @@ func TestUnsetFSGSBASE(t *testing.T) {
 	out := guestFeatures.Query(In{Eax: 7, Ecx: 0})
 	if out.Ebx&1 != 0 {
 		t.Errorf("UnsetFSGSBASE failed: CPUID.(EAX=7, ECX=0).EBX bit 0 (FSGSBASE) should be 0, got %x", out.Ebx)
+	}
+}
+
+func TestStaticMarshal(t *testing.T) {
+	for _, s := range []Static{
+		{},
+		{In{Eax: 7, Ecx: 1}: Out{Eax: 0xffffffff, Ebx: 1, Ecx: 2, Edx: 3}},
+		HostFeatureSet().ToStatic(),
+	} {
+		b := s.marshal()
+		if len(b) != len(s)*staticEntrySize {
+			t.Errorf("marshal of %d entries is %d bytes, want %d", len(s), len(b), len(s)*staticEntrySize)
+		}
+		got, err := unmarshalStatic(b)
+		if err != nil {
+			t.Fatalf("unmarshalStatic failed: %v", err)
+		}
+		if !maps.Equal(got, s) {
+			t.Errorf("unmarshalStatic(marshal(%v)) = %v", s, got)
+		}
+		if !bytes.Equal(s.marshal(), b) {
+			t.Errorf("marshal is not deterministic")
+		}
+	}
+	if _, err := unmarshalStatic(make([]byte, staticEntrySize+1)); err == nil {
+		t.Errorf("unmarshalStatic accepted a bad length")
+	}
+}
+
+func TestFeatureSetSaveLoad(t *testing.T) {
+	fs := HostFeatureSet().Fixed()
+	var buf bytes.Buffer
+	if _, err := state.Save(context.Background(), &buf, &fs); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+	var got FeatureSet
+	if _, err := state.Load(context.Background(), bytes.NewReader(buf.Bytes()), &got); err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if !maps.Equal(got.Function.(Static), fs.Function.(Static)) {
+		t.Errorf("loaded function differs: got %v, want %v", got.Function, fs.Function)
+	}
+	if got.hwCap != fs.hwCap {
+		t.Errorf("loaded hwCap differs: got %v, want %v", got.hwCap, fs.hwCap)
 	}
 }
