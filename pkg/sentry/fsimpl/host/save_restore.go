@@ -85,18 +85,62 @@ func (i *inode) afterLoad(ctx context.Context) {
 	fdmap := vfs.RestoreFilesystemFDMapFromContext(ctx)
 	fd, ok := fdmap[i.restoreKey]
 	if !ok {
+		if d, ok := ctx.Value(CtxDeferredFDRemaps).(*DeferredFDRemaps); ok {
+			i.hostFD = -1
+			d.add(i)
+			return
+		}
 		panic(fmt.Sprintf("no host FD available for %q, map: %#v", i.restoreKey, fdmap))
 	}
+	i.remapHostFD(fd)
+}
+
+// remapHostFD sets the host FD of a restored inode.
+func (i *inode) remapHostFD(fd int) {
 	log.Debugf("Remapping host FD from %d to %d", i.hostFD, fd)
 	i.hostFD = fd
 	i.mmapFile.SetFD(fd)
 
 	if i.epollable {
 		if err := unix.SetNonblock(i.hostFD, true); err != nil {
-			panic(fmt.Sprintf("host.inode.afterLoad: failed to set host FD %d non-blocking: %v", i.hostFD, err))
+			panic(fmt.Sprintf("host.inode.remapHostFD: failed to set host FD %d non-blocking: %v", i.hostFD, err))
 		}
 		if err := fdnotifier.AddFD(int32(i.hostFD), &i.queue); err != nil {
-			panic(fmt.Sprintf("host.inode.afterLoad: fdnotifier.AddFD(%d) failed: %v", i.hostFD, err))
+			panic(fmt.Sprintf("host.inode.remapHostFD: fdnotifier.AddFD(%d) failed: %v", i.hostFD, err))
 		}
 	}
+}
+
+type deferredFDRemapsKey int
+
+// CtxDeferredFDRemaps is a Context.Value key for a *DeferredFDRemaps. When a
+// restore context carries one, host inodes whose FD is missing from
+// vfs.CtxRestoreFilesystemFDMap are added to it instead of panicking, and
+// have no host FD (-1) until DeferredFDRemaps.Apply remaps them.
+const CtxDeferredFDRemaps deferredFDRemapsKey = 0
+
+// DeferredFDRemaps collects host inodes whose host FD was not known when they
+// were restored. This is the case when a restore starts decoding the kernel
+// state before every container's FDs have been donated.
+type DeferredFDRemaps struct {
+	inodes []*inode
+}
+
+func (d *DeferredFDRemaps) add(i *inode) {
+	d.inodes = append(d.inodes, i)
+}
+
+// Apply remaps the host FDs of all deferred inodes using fdmap.
+//
+// Preconditions: The decode that populated d has completed.
+func (d *DeferredFDRemaps) Apply(fdmap map[checkpoint.ResourceID]int) error {
+	for _, i := range d.inodes {
+		fd, ok := fdmap[i.restoreKey]
+		if !ok {
+			return fmt.Errorf("no host FD available for %q", i.restoreKey)
+		}
+		i.remapHostFD(fd)
+	}
+	d.inodes = nil
+	return nil
 }
