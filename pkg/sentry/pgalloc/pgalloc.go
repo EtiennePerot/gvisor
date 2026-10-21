@@ -1481,6 +1481,121 @@ func (f *MemoryFile) forEachMappingSlice(fr memmap.FileRange, fn func([]byte)) {
 	})
 }
 
+// AllocateSparseCopy returns a new allocation, as if by Allocate(src.Length(),
+// opts) with opts.Mode == AllocateUncommitted, whose contents are a copy of
+// src in which only pages that are committed in src are committed: pages that
+// are uncommitted in src read as zeros, and are left uncommitted in the copy.
+//
+// This is cheaper than reading src through MapInternal() into an allocation
+// with opts.Mode == AllocateAndWritePopulate when src is sparsely committed,
+// since that commits all of src (reading an uncommitted page of a shared file
+// mapping commits it) as well as all of the copy.
+//
+// If all of src is committed, if the commitment of src can't be determined,
+// or if copying fails, AllocateSparseCopy returns ok == false with no side effects;
+// the caller should then copy src by other means.
+//
+// opts.Mode and opts.ReaderFunc are ignored.
+//
+// Preconditions:
+//   - src.Length() is valid for Allocate(src.Length(), opts).
+//   - The caller must hold a reference on all pages in src.
+//   - The caller must ensure that no page in src is written, decommitted, or
+//     committed with non-zero contents during the call.
+func (f *MemoryFile) AllocateSparseCopy(src memmap.FileRange, opts AllocOpts) (fr memmap.FileRange, ok bool) {
+	if f.opts.DiskBackedFile {
+		return memmap.FileRange{}, false
+	}
+	// MapInternal waits for asynchronous page loading of src, after which its
+	// uncommitted pages are zero.
+	srcs, err := f.MapInternal(src, hostarch.Read)
+	if err != nil {
+		return memmap.FileRange{}, false
+	}
+	var buf [8]memmap.FileRange
+	committed, ok := f.appendCommittedRanges(buf[:0], src)
+	if !ok || (len(committed) == 1 && committed[0] == src) {
+		return memmap.FileRange{}, false
+	}
+	opts.Mode = AllocateUncommitted
+	opts.ReaderFunc = nil
+	fr, err = f.Allocate(src.Length(), opts)
+	if err != nil {
+		return memmap.FileRange{}, false
+	}
+	for _, cr := range committed {
+		off := cr.Start - src.Start
+		dsts, err := f.MapInternal(memmap.FileRange{fr.Start + off, fr.Start + off + cr.Length()}, hostarch.Write)
+		if err == nil {
+			if canPopulate() {
+				for rem := dsts; !rem.IsEmpty() && tryPopulate(rem.Head()); rem = rem.Tail() {
+				}
+			}
+			_, err = safemem.CopySeq(dsts, srcs.DropFirst64(off).TakeFirst64(cr.Length()))
+		}
+		if err != nil {
+			f.DecRef(fr)
+			return memmap.FileRange{}, false
+		}
+	}
+	return fr, true
+}
+
+// appendCommittedRanges appends the maximal subranges of fr that are committed
+// in the backing file to dst, in increasing order, and returns the extended
+// slice. If commitment can't be determined, it returns ok == false.
+//
+// Preconditions: fr must be page-aligned, and must be within the file's
+// current size.
+func (f *MemoryFile) appendCommittedRanges(dst []memmap.FileRange, fr memmap.FileRange) (_ []memmap.FileRange, ok bool) {
+	var vec [512]byte
+	ok = true
+	f.forEachChunk(fr, func(chunk *chunkInfo, chunkFR memmap.FileRange) bool {
+		for chunkFR.Length() != 0 {
+			sub := memmap.FileRange{chunkFR.Start, min(chunkFR.End, chunkFR.Start+uint64(len(vec))<<hostarch.PageShift)}
+			npages := int(sub.Length() >> hostarch.PageShift)
+			if err := mincore(chunk.sliceAt(sub), vec[:npages]); err != nil {
+				ok = false
+				return false
+			}
+			for i := 0; i < npages; {
+				resident := vec[i]&0x1 != 0
+				j := i + 1
+				for j < npages && (vec[j]&0x1 != 0) == resident {
+					j++
+				}
+				run := memmap.FileRange{sub.Start + uint64(i)<<hostarch.PageShift, sub.Start + uint64(j)<<hostarch.PageShift}
+				i = j
+				if !resident {
+					// mincore() doesn't report pages that are swapped out,
+					// but SEEK_DATA does. Conservatively treat the rest of
+					// the run as committed if any of it is. (SEEK_HOLE isn't
+					// used to find the end of the data since its cost is
+					// proportional to the length of the data extent, which
+					// may be much longer than fr.)
+					data, err := unix.Seek(f.FD(), int64(run.Start), unix.SEEK_DATA)
+					if err == unix.ENXIO || (err == nil && uint64(data) >= run.End) {
+						continue
+					}
+					if err != nil {
+						ok = false
+						return false
+					}
+					run.Start = hostarch.PageRoundDown(uint64(data))
+				}
+				if n := len(dst); n != 0 && dst[n-1].End == run.Start {
+					dst[n-1].End = run.End
+				} else {
+					dst = append(dst, run)
+				}
+			}
+			chunkFR.Start = sub.End
+		}
+		return true
+	})
+	return dst, ok
+}
+
 // MarkEvictable allows f to request memory deallocation by calling
 // user.Evict(er) in the future.
 //

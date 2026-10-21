@@ -17,8 +17,11 @@
 package pgalloc
 
 import (
+	"bytes"
+	"slices"
 	"testing"
 
+	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/hostarch"
 	"gvisor.dev/gvisor/pkg/sentry/memmap"
 )
@@ -583,5 +586,85 @@ func TestFindAllocatable(t *testing.T) {
 				t.Errorf("findAllocatableAndMarkUsed(%+v): got: end=%#x, want: %#x\n%v", alloc, fr.End, wantEnd, f)
 			}
 		})
+	}
+}
+
+func TestAllocateSparseCopy(t *testing.T) {
+	f := newSaveTestMemoryFile(t, false)
+	src := allocateSaveTestPages(t, f)
+	pg := func(n uint64) uint64 { return src.Start + n*page }
+	pwritePage(t, f, src, 2, 1)
+	pwritePage(t, f, src, 3, 2)
+	pwritePage(t, f, src, 9, 3)
+	pwritePage(t, f, src, 12, 0) // committed, but zero-filled
+
+	committed, ok := f.appendCommittedRanges(nil, src)
+	if want := []memmap.FileRange{{pg(2), pg(4)}, {pg(9), pg(10)}, {pg(12), pg(13)}}; !ok || !slices.Equal(committed, want) {
+		t.Fatalf("appendCommittedRanges(%v): got (%v, %v), want (%v, true)", src, committed, ok, want)
+	}
+
+	for _, tc := range []struct {
+		name string
+		src  memmap.FileRange
+		// want is the committed ranges of the copy, relative to its start.
+		want []memmap.FileRange
+	}{
+		{
+			name: "sparse",
+			src:  src,
+			want: []memmap.FileRange{{2 * page, 4 * page}, {9 * page, 10 * page}, {12 * page, 13 * page}},
+		},
+		{
+			name: "subrange",
+			src:  memmap.FileRange{pg(3), pg(11)},
+			want: []memmap.FileRange{{0, page}, {6 * page, 7 * page}},
+		},
+		{
+			name: "uncommitted",
+			src:  memmap.FileRange{pg(4), pg(9)},
+			want: nil,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fr, ok := f.AllocateSparseCopy(tc.src, AllocOpts{})
+			if !ok {
+				t.Fatalf("AllocateSparseCopy(%v): got !ok, want ok", tc.src)
+			}
+			defer f.DecRef(fr)
+			if fr.Length() != tc.src.Length() {
+				t.Fatalf("AllocateSparseCopy(%v): got range %v of length %d, want length %d", tc.src, fr, fr.Length(), tc.src.Length())
+			}
+			got, ok := f.appendCommittedRanges(nil, fr)
+			for i := range got {
+				got[i] = memmap.FileRange{got[i].Start - fr.Start, got[i].End - fr.Start}
+			}
+			if !ok || !slices.Equal(got, tc.want) {
+				t.Errorf("committed ranges of copy: got (%v, %v), want (%v, true)", got, ok, tc.want)
+			}
+			want := make([]byte, tc.src.Length())
+			if _, err := unix.Pread(f.FD(), want, int64(tc.src.Start)); err != nil {
+				t.Fatalf("Pread source: %v", err)
+			}
+			gotData := make([]byte, fr.Length())
+			if _, err := unix.Pread(f.FD(), gotData, int64(fr.Start)); err != nil {
+				t.Fatalf("Pread copy: %v", err)
+			}
+			if !bytes.Equal(gotData, want) {
+				t.Errorf("copy contents differ from source")
+			}
+		})
+	}
+
+	// A fully committed source should be copied by the caller instead.
+	if fr, ok := f.AllocateSparseCopy(memmap.FileRange{pg(2), pg(4)}, AllocOpts{}); ok {
+		f.DecRef(fr)
+		t.Errorf("AllocateSparseCopy of fully committed range: got ok, want !ok")
+	}
+	// Commitment can't be determined for disk-backed files.
+	df := newSaveTestMemoryFile(t, true)
+	dsrc := allocateSaveTestPages(t, df)
+	if fr, ok := df.AllocateSparseCopy(dsrc, AllocOpts{}); ok {
+		df.DecRef(fr)
+		t.Errorf("AllocateSparseCopy on a disk-backed file: got ok, want !ok")
 	}
 }
