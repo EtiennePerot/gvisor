@@ -2887,6 +2887,16 @@ func getNvproxyDriverVersion(conf *config.Config) (string, error) {
 	}
 }
 
+// PrefetchBinaries starts reading the binaries that creating a sandbox runs
+// into the page cache, if they are not there already: runsc itself, which
+// also runs the gofer, and the Sentry. See gvisorbinaries.Prefetch.
+func PrefetchBinaries(conf *config.Config) {
+	gvisorbinaries.Prefetch(specutils.ExePath)
+	if p, err := sentryBinary(conf).Path(); err == nil {
+		gvisorbinaries.Prefetch(p)
+	}
+}
+
 // sentryBinary returns the Sentry sidecar binary that boots the sandbox.
 func sentryBinary(conf *config.Config) *gvisorbinaries.Binary {
 	if conf.Network == config.NetworkPlugin {

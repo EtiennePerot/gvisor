@@ -380,6 +380,10 @@ func New(conf *config.Config, args Args) (*Container, error) {
 func (c *Container) createRoot(conf *config.Config, args Args, sandboxID string) (cgroup.Cgroup, error) {
 	log.Debugf("Creating new sandbox for container, cid: %s", args.ID)
 
+	// Overlap reading the gofer and Sentry binaries, in case they are not in
+	// the page cache, with the setup below.
+	sandbox.PrefetchBinaries(conf)
+
 	if args.Spec.Linux == nil {
 		args.Spec.Linux = &specs.Linux{}
 	}
