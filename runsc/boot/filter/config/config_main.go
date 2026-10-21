@@ -490,3 +490,19 @@ func hostFilesystemFilters() seccomp.SyscallRules {
 		},
 	})
 }
+
+// netstackFilters contains syscall filters used when netstack provides
+// networking.
+func netstackFilters() seccomp.SyscallRules {
+	return seccomp.MakeSyscallRules(map[uintptr]seccomp.SyscallRule{
+		// Used to make host AF_PACKET sockets drop all packets before the
+		// sandbox exits. See boot.Loader.detachPacketSockets.
+		unix.SYS_SETSOCKOPT: seccomp.PerArg{
+			seccomp.NonNegativeFD{},
+			seccomp.EqualTo(unix.SOL_SOCKET),
+			seccomp.EqualTo(unix.SO_ATTACH_FILTER),
+			seccomp.AnyValue{},
+			seccomp.EqualTo(unix.SizeofSockFprog),
+		},
+	})
+}

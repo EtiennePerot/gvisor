@@ -200,6 +200,7 @@ go_test(
         "//pkg/sentry/seccheck",
         "//pkg/sentry/vfs",
         "//pkg/sync",
+        "//pkg/tcpip/link/fdbased",
         "//pkg/unet",
         "//runsc/boot/sentryapi",
         "//runsc/config",

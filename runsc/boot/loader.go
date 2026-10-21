@@ -354,6 +354,12 @@ type Loader struct {
 	// installed.
 	pinRing pinring.PinRing
 
+	// packetFDs are duplicates of the host AF_PACKET sockets used by
+	// netstack. See Loader.detachPacketSockets.
+	//
+	// +checklocks:mu
+	packetFDs []int
+
 	// fsSaveFDs are FDs used for user-triggered filesystem checkpoint saving.
 	//
 	// +checklocks:mu
@@ -392,9 +398,20 @@ func (n *noRootContainer) waitExit() {
 	<-n.exit
 }
 
-// stopIfKilled stops a no-root-container sandbox once its kernel is killed.
+// stopIfKilled is called after control operations that may kill the kernel
+// (e.g. a checkpoint that doesn't resume). If the kernel was killed, it
+// detaches the sandbox's packet sockets and stops a no-root-container sandbox.
+//
+// This runs before the control operation returns, because its caller may
+// SIGKILL the sandbox as soon as it does.
+//
+// +checklocksexclude:l.mu
 func (l *Loader) stopIfKilled() {
-	if l.noRootContainer.enabled && l.k.TaskSet().IsExiting() {
+	if !l.k.TaskSet().IsExiting() {
+		return
+	}
+	l.detachPacketSockets()
+	if l.noRootContainer.enabled {
 		l.noRootContainer.stop()
 	}
 }
@@ -1129,6 +1146,7 @@ func createProcessArgs(id string, spec *specs.Spec, conf *config.Config, creds *
 // +checklocksexclude:l.mu
 // +checklocksexclude:l.k.fsSaveMu
 func (l *Loader) Destroy() {
+	l.detachPacketSockets()
 	l.noRootContainer.stop()
 	if l.stopSignalForwarding != nil {
 		l.stopSignalForwarding()

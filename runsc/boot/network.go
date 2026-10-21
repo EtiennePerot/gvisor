@@ -459,3 +459,49 @@ func ipMaskToAddressMask(ipMask net.IPMask) tcpip.AddressMask {
 	addr := ipToAddress(net.IP(ipMask))
 	return tcpip.MaskFromBytes(addr.AsSlice())
 }
+
+// dropAllFilter is a classic BPF socket filter that drops every packet.
+var dropAllFilter = [...]unix.SockFilter{{Code: unix.BPF_RET | unix.BPF_K, K: 0}}
+
+// detachPacketSockets makes the sandbox's host AF_PACKET sockets stop
+// receiving packets. It is called once the sandbox is done with networking,
+// before it exits.
+//
+// The sockets are pinned into the pin ring (see `//pkg/pinring`), so they are
+// released asynchronously, possibly long after the sandbox has exited: the
+// kernel releases them one at a time, each waiting for an RCU grace period.
+// Until then, they stay bound to the host interface and queue every packet
+// that crosses it. If the network namespace is reused (e.g. by a pool of
+// network namespaces), that is all the traffic of the next sandboxes, and
+// queued packets accumulate faster than the sockets are released.
+//
+// A packet socket that is part of a fanout group can't be unbound with
+// bind(2), and AF_PACKET sockets don't support shutdown(2), so instead attach
+// a filter that drops everything. Socket filters run before packets are
+// cloned or queued.
+//
+// If the sandbox is killed without going through Loader.Destroy or a
+// checkpoint (e.g. SIGKILL), the sockets keep receiving until they are
+// released. Users that reuse network namespaces must then either recreate
+// the network interfaces, or wait for the sandbox's sockets to be released.
+//
+// +checklocksexclude:l.mu
+func (l *Loader) detachPacketSockets() {
+	l.mu.Lock()
+	fds := l.packetFDs
+	l.packetFDs = nil
+	l.mu.Unlock()
+	if len(fds) == 0 {
+		return
+	}
+	prog := unix.SockFprog{Len: uint16(len(dropAllFilter)), Filter: &dropAllFilter[0]}
+	for _, fd := range fds {
+		if err := unix.SetsockoptSockFprog(fd, unix.SOL_SOCKET, unix.SO_ATTACH_FILTER, &prog); err != nil {
+			log.Warningf("Cannot detach packet socket: %v", err)
+		}
+		// This only closes the duplicate; the socket itself is still
+		// referenced by netstack and the pin ring.
+		_ = unix.Close(fd)
+	}
+	log.Debugf("Detached %d packet sockets", len(fds))
+}

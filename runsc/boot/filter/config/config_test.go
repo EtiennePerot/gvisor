@@ -213,3 +213,30 @@ func TestPrecompiledProgramsDeterministic(t *testing.T) {
 		}
 	}
 }
+
+// TestNetstackSetsockopt verifies that netstack sandboxes may only use
+// setsockopt to attach socket filters, and only when netstack is used.
+func TestNetstackSetsockopt(t *testing.T) {
+	platform := (&systrap.Systrap{}).SeccompInfo()
+
+	rules, _ := Rules(Options{Platform: platform})
+	for arg, want := range map[int]seccomp.EqualTo{
+		1: unix.SOL_SOCKET,
+		2: unix.SO_ATTACH_FILTER,
+		4: unix.SizeofSockFprog,
+	} {
+		if err := rules.ForSingleArgument(unix.SYS_SETSOCKOPT, arg, func(v seccomp.ValueMatcher) error {
+			if v != want {
+				return fmt.Errorf("got %v, want %v", v, want)
+			}
+			return nil
+		}); err != nil {
+			t.Errorf("netstack setsockopt argument %d: %v", arg, err)
+		}
+	}
+
+	rules, _ = Rules(Options{Platform: platform, PluginNetwork: true})
+	if rules.Has(unix.SYS_SETSOCKOPT) {
+		t.Errorf("plugin network allows setsockopt: %v", rules.Get(unix.SYS_SETSOCKOPT))
+	}
+}

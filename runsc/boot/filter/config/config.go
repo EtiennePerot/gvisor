@@ -166,6 +166,8 @@ func rules(opt Options, vars precompiledseccomp.Values) (seccomp.SyscallRules, s
 
 	if opt.HostNetwork {
 		s.Merge(hostInetFilters(opt.HostNetworkRawSockets))
+	} else if !opt.PluginNetwork {
+		s.Merge(netstackFilters())
 	}
 	if opt.ProfileEnable {
 		s.Merge(profileFilters())

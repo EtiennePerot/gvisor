@@ -39,6 +39,7 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/seccheck"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
 	"gvisor.dev/gvisor/pkg/sync"
+	"gvisor.dev/gvisor/pkg/tcpip/link/fdbased"
 	"gvisor.dev/gvisor/pkg/unet"
 	"gvisor.dev/gvisor/runsc/boot/sentryapi"
 	"gvisor.dev/gvisor/runsc/config"
@@ -707,5 +708,125 @@ func TestSignalUnkillablePolicyMapping(t *testing.T) {
 		if got := signalUnkillablePolicy(tc.confPolicy); got != tc.kernelPolicy {
 			t.Errorf("signalUnkillablePolicy(%v) = %v, want %v", tc.confPolicy, got, tc.kernelPolicy)
 		}
+	}
+}
+
+// TestDetachPacketSockets checks that detachPacketSockets makes sockets drop
+// all incoming packets. AF_PACKET sockets require CAP_NET_RAW, so the test
+// also uses a datagram socket pair, which handles SO_ATTACH_FILTER the same
+// way.
+func TestDetachPacketSockets(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// open returns a socket to detach, and a function that sends
+		// data that this socket receives.
+		open func(t *testing.T) (int, func())
+	}{
+		{
+			name: "socketpair",
+			open: func(t *testing.T) (int, func()) {
+				fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_DGRAM|unix.SOCK_NONBLOCK|unix.SOCK_CLOEXEC, 0)
+				if err != nil {
+					t.Fatalf("socketpair: %v", err)
+				}
+				t.Cleanup(func() {
+					unix.Close(fds[0])
+					unix.Close(fds[1])
+				})
+				return fds[1], func() {
+					if _, err := unix.Write(fds[0], []byte("data")); err != nil {
+						t.Fatalf("write: %v", err)
+					}
+				}
+			},
+		},
+		{
+			name: "packet",
+			open: func(t *testing.T) (int, func()) {
+				const ethPAll = 0x0300 // htons(ETH_P_ALL).
+				fd, err := unix.Socket(unix.AF_PACKET, unix.SOCK_RAW|unix.SOCK_NONBLOCK|unix.SOCK_CLOEXEC, ethPAll)
+				if err != nil {
+					t.Skipf("cannot create AF_PACKET socket: %v", err)
+				}
+				t.Cleanup(func() { unix.Close(fd) })
+				lo, err := net.InterfaceByName("lo")
+				if err != nil {
+					t.Fatalf("cannot find loopback interface: %v", err)
+				}
+				if err := unix.Bind(fd, &unix.SockaddrLinklayer{Protocol: ethPAll, Ifindex: lo.Index}); err != nil {
+					t.Fatalf("bind: %v", err)
+				}
+				// Like netstack's sockets, join a fanout group, which
+				// prevents unbinding the socket.
+				if _, err := fdbased.CreatePacketFanoutGroup(fd); err != nil {
+					t.Fatalf("CreatePacketFanoutGroup: %v", err)
+				}
+				// Unconnected, so that ICMP errors aren't reported.
+				udp, err := net.ListenPacket("udp", "127.0.0.1:0")
+				if err != nil {
+					t.Fatalf("listen: %v", err)
+				}
+				t.Cleanup(func() { udp.Close() })
+				dst := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9}
+				return fd, func() {
+					if _, err := udp.WriteTo([]byte("data"), dst); err != nil {
+						t.Fatalf("write: %v", err)
+					}
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fd, send := tc.open(t)
+			// received reports whether fd received anything within
+			// timeout, and drains it.
+			received := func(timeout time.Duration) bool {
+				pfd := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+				if n, err := unix.Poll(pfd, int(timeout.Milliseconds())); err != nil {
+					t.Fatalf("poll: %v", err)
+				} else if n == 0 {
+					return false
+				}
+				buf := make([]byte, 65536)
+				for {
+					if _, _, err := unix.Recvfrom(fd, buf, 0); err == unix.EAGAIN {
+						return true
+					} else if err != nil {
+						t.Fatalf("recvfrom: %v", err)
+					}
+				}
+			}
+
+			send()
+			if !received(10 * time.Second) {
+				t.Fatalf("socket received nothing before detaching")
+			}
+
+			dup, err := unix.FcntlInt(uintptr(fd), unix.F_DUPFD_CLOEXEC, 0)
+			if err != nil {
+				t.Fatalf("dup: %v", err)
+			}
+			l := &Loader{}
+			l.mu.Lock()
+			l.packetFDs = []int{dup}
+			l.mu.Unlock()
+			l.detachPacketSockets()
+			l.mu.Lock()
+			remaining := len(l.packetFDs)
+			l.mu.Unlock()
+			if remaining != 0 {
+				t.Errorf("packetFDs has %d entries after detaching, want 0", remaining)
+			}
+			if _, err := unix.FcntlInt(uintptr(dup), unix.F_GETFD, 0); err != unix.EBADF {
+				t.Errorf("duplicate FD still open after detaching: %v", err)
+			}
+			// A second call is a no-op.
+			l.detachPacketSockets()
+
+			send()
+			if received(100 * time.Millisecond) {
+				t.Errorf("socket received data after detaching")
+			}
+		})
 	}
 }

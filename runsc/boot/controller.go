@@ -946,6 +946,12 @@ func (cm *containerManager) SetNetworkArgs(args *sentryapi.CreateLinksAndRoutesA
 	defer c.Clean()
 
 	// Configure FDs before seccomp is installed.
+	var packetFDs []int
+	c.Add(func() {
+		for _, fd := range packetFDs {
+			_ = unix.Close(fd)
+		}
+	})
 	fdIdx := 0
 	for i := range networkArgs.FDBasedLinks {
 		link := &networkArgs.FDBasedLinks[i]
@@ -972,6 +978,12 @@ func (cm *containerManager) SetNetworkArgs(args *sentryapi.CreateLinksAndRoutesA
 			link.IsPacket[ch] = isPacket
 
 			if isPacket {
+				// Keep a reference for Loader.detachPacketSockets.
+				packetFD, dupErr := unix.FcntlInt(uintptr(f.FD()), unix.F_DUPFD_CLOEXEC, 0)
+				if dupErr != nil {
+					return fmt.Errorf("failed to dup packet socket for link %q: %w", link.Name, dupErr)
+				}
+				packetFDs = append(packetFDs, packetFD)
 				if fid < 0 {
 					fid, err = fdbased.CreatePacketFanoutGroup(f.FD())
 				} else {
@@ -995,6 +1007,7 @@ func (cm *containerManager) SetNetworkArgs(args *sentryapi.CreateLinksAndRoutesA
 
 	cm.l.mu.Lock()
 	cm.l.networkArgs = &networkArgs
+	cm.l.packetFDs = append(cm.l.packetFDs, packetFDs...)
 	cm.l.mu.Unlock()
 	return nil
 }
