@@ -367,11 +367,26 @@ func (s *StateFile) SaveLocked(v any) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(s.statePath(), meta, 0640); err != nil {
+	// Write to a temporary file and rename it over the state file, so that the
+	// state file always contains either the old or the new state, even if the
+	// write fails (e.g. ENOSPC) or the process dies. Otherwise the container
+	// could no longer be loaded, nor destroyed. Concurrent writers are
+	// serialized by the lock, so the temporary file name doesn't need to be
+	// unique. Unlocked readers see either the old or the new file.
+	tmpPath := s.tmpStatePath()
+	if err := writeFile(tmpPath, meta, 0640); err != nil {
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("writing json file: %v", err)
+	}
+	if err := os.Rename(tmpPath, s.statePath()); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("renaming json file: %v", err)
 	}
 	return nil
 }
+
+// writeFile is os.WriteFile, overridden by tests to inject write errors.
+var writeFile = os.WriteFile
 
 // Stat returns the result of calling stat() on the state file.
 // Doing so does not require locking.
@@ -423,6 +438,12 @@ func (s *StateFile) statePath() string {
 	return buildPath(s.RootDir, s.ID, stateFileExtension)
 }
 
+// tmpStatePath is the full path to the temporary file used to write the state
+// file. It must not match the state file glob used by listMatch.
+func (s *StateFile) tmpStatePath() string {
+	return buildPath(s.RootDir, s.ID, stateFileExtension+".tmp")
+}
+
 // lockPath is the full path to the lock file.
 func (s *StateFile) lockPath() string {
 	return buildPath(s.RootDir, s.ID, "lock")
@@ -433,6 +454,10 @@ func (s *StateFile) lockPath() string {
 // properly closed after destroy returns.
 func (s *StateFile) Destroy() error {
 	if err := os.Remove(s.statePath()); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	// The temporary state file only exists if a writer died before renaming it.
+	if err := os.Remove(s.tmpStatePath()); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	if err := os.Remove(s.lockPath()); err != nil && !os.IsNotExist(err) {

@@ -124,6 +124,14 @@ go_test(
 )
 
 go_test(
+    name = "state_file_test",
+    size = "small",
+    srcs = ["state_file_test.go"],
+    embed = [":container"],
+    deps = ["@org_golang_x_sys//unix:go_default_library"],
+)
+
+go_test(
     name = "lifecycle_benchmark_test",
     size = "large",
     srcs = ["lifecycle_bench_test.go"],
