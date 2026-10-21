@@ -16,12 +16,15 @@ package sandbox
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"time"
 
 	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/runsc/cgroup"
 	"gvisor.dev/gvisor/runsc/config"
+	"gvisor.dev/gvisor/runsc/specutils"
 )
 
 // Lifecycle CPU boost
@@ -32,7 +35,9 @@ import (
 // slows them down several times. So while runsc performs one of these
 // operations, it raises the limit to at least LifecycleCPUs CPUs (and scales
 // the CPU weight by the same factor), and it restores both when the operation
-// ends. The application never runs with more CPU than its limit.
+// ends. The application never runs with more CPU than its limit, with one
+// exception: after a restore whose memory is loaded in the background, the
+// boost lasts until the loading is done, for at most RestoreCPUBoostTimeout.
 //
 // Several runsc processes can operate on one sandbox at the same time, and any
 // of them can be killed. The boost itself is recorded on the cgroup (see
@@ -42,9 +47,15 @@ import (
 // cgroup may be reused, and so does the next operation in the same cgroup if
 // a killed runsc command left the limit raised.
 
-// LifecycleCPUs is the minimum CPU limit of a sandbox during lifecycle
-// operations.
-const LifecycleCPUs = 4
+const (
+	// LifecycleCPUs is the minimum CPU limit of a sandbox during lifecycle
+	// operations.
+	LifecycleCPUs = 4
+
+	// RestoreCPUBoostTimeout bounds how long the boost lasts after a restore
+	// returns while memory is still being loaded in the background.
+	RestoreCPUBoostTimeout = 10 * time.Second
+)
 
 // CPUBoost is a hold on a sandbox's lifecycle CPU boost.
 type CPUBoost struct {
@@ -88,7 +99,7 @@ func lifecycleCPUs(conf *config.Config) float64 {
 
 // BoostCPU raises the CPU limit of the cgroup cg of sandbox sandboxID for a
 // lifecycle operation, if it is lower than LifecycleCPUs. The caller must call
-// End or Release on the result when the operation is over.
+// End, Release or EndWhenRestored on the result when the operation is over.
 // It returns nil if the limit isn't changed: there is no limit or it is high
 // enough already, or runsc doesn't manage it (see cgroup.BoostCPU). Errors
 // are logged and also leave the limit unchanged, since the boost only affects
@@ -207,4 +218,40 @@ func EndCPUBoost(rootDir, sandboxID string, cg cgroup.Cgroup) {
 	}
 	_ = os.Remove(path)
 	_ = os.Remove(lockPath)
+}
+
+// EndWhenRestored hands the hold over to a new process that ends it once
+// the sandbox has finished restoring, including loading memory in the
+// background, or after RestoreCPUBoostTimeout, whichever comes first. b may
+// be nil.
+func (b *CPUBoost) EndWhenRestored(conf *config.Config) {
+	if b == nil {
+		return
+	}
+	args := append(conf.ToFlags(), "cpu-boost-end", "-wait-restore", RestoreCPUBoostTimeout.String(), b.sandboxID)
+	cmd := exec.Command(specutils.ExePath, args...)
+	// The process inherits the hold: flocks belong to the open file.
+	cmd.ExtraFiles = []*os.File{b.holder}
+	cmd.SysProcAttr = &unix.SysProcAttr{Setsid: true}
+	// It only waits for an RPC and writes two files.
+	cmd.Env = append(os.Environ(), "GOMAXPROCS=1")
+	if err := cmd.Start(); err != nil {
+		log.Warningf("Starting the process that ends the CPU boost of sandbox %q: %v", b.sandboxID, err)
+		b.End()
+		return
+	}
+	_ = cmd.Process.Release()
+	b.Release()
+}
+
+// HeldCPUBoost returns the hold that the current process inherited as file
+// descriptor fd from EndWhenRestored, on the boost of sandbox sandboxID in
+// cgroup cg.
+func HeldCPUBoost(rootDir, sandboxID string, cg cgroup.Cgroup, fd int) *CPUBoost {
+	return &CPUBoost{
+		rootDir:   rootDir,
+		sandboxID: sandboxID,
+		cg:        cg,
+		holder:    os.NewFile(uintptr(fd), "cpuboost"),
+	}
 }

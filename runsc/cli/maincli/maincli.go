@@ -91,7 +91,8 @@ func commands() (map[util.SubCommand]string, []subcommands.Command) {
 		new(cmd.MetricServer):   metricGroup,
 
 		// Internal commands.
-		new(cmd.Gofer): internalGroup,
+		new(cmd.CPUBoostEnd): internalGroup,
+		new(cmd.Gofer):       internalGroup,
 	}
 
 	// Merge alias commands.

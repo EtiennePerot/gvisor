@@ -635,6 +635,11 @@ func (s *Sandbox) Restore(conf *config.Config, spec *specs.Spec, cid string, ima
 		return fmt.Errorf("restoring container %q: %w", cid, err)
 	}
 	s.Restored = true
+	if background {
+		// The application may run before its memory is loaded: keep the
+		// CPU limit raised until it is.
+		BoostCPU(conf, s.CgroupJSON.Cgroup, s.ID).EndWhenRestored(conf)
+	}
 	return nil
 }
 

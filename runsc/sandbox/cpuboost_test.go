@@ -178,6 +178,21 @@ func TestEndCPUBoost(t *testing.T) {
 	EndCPUBoost(c.conf.RootDir, testSandboxID, c.cg)
 }
 
+func TestCPUBoostHandOver(t *testing.T) {
+	c := newCPUBoostTest(t, "25000 100000")
+	b := c.boost()
+	fd, err := unix.Dup(int(b.holder.Fd()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Release()
+	// The duplicate still holds the boost.
+	c.boost().End()
+	c.wantCPUMax("400000 100000")
+	HeldCPUBoost(c.conf.RootDir, testSandboxID, c.cg, fd).End()
+	c.wantCPUMax("25000 100000")
+}
+
 func TestCPUBoostNoop(t *testing.T) {
 	for _, tc := range []struct {
 		name      string

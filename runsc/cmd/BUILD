@@ -11,6 +11,7 @@ go_library(
         "checkpoint.go",
         "cmd.go",
         "cpu_features.go",
+        "cpuboost.go",
         "create.go",
         "debug.go",
         "delete.go",
