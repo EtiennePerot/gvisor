@@ -713,6 +713,20 @@ func (es *encodeState) encodeStruct(obj reflect.Value, dest *wire.Object) {
 // encodeArray encodes an array.
 func (es *encodeState) encodeArray(obj reflect.Value, dest *wire.Object) {
 	l := obj.Len()
+	if obj.Type().Elem().Kind() == reflect.Uint8 {
+		// Byte arrays are encoded in bulk. The copy is required, as the
+		// wire object is only written once the whole graph is encoded.
+		b := make(wire.Bytes, l)
+		if obj.CanAddr() {
+			copy(b, obj.Bytes())
+		} else {
+			for i := range b {
+				b[i] = uint8(obj.Index(i).Uint())
+			}
+		}
+		*dest = &b
+		return
+	}
 	a := &wire.Array{
 		Contents: make([]wire.Object, l),
 	}

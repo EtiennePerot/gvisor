@@ -601,6 +601,15 @@ func EncodeArray[T any](e *Encoder, a []T, m Mode, elem func(*Encoder, *T, Mode)
 		e.nil_()
 		return
 	}
+	if typeOf[T]().Kind() == reflect.Uint8 {
+		// See encodeArray.
+		e.tag(wire.TagBytes, m)
+		e.buf = wire.AppendUint(e.buf, uint64(len(a)))
+		if len(a) > 0 {
+			e.buf = append(e.buf, unsafe.Slice((*byte)(unsafe.Pointer(&a[0])), len(a))...)
+		}
+		return
+	}
 	e.tag(wire.TagArray, m)
 	e.buf = wire.AppendUint(e.buf, uint64(len(a)))
 	for i := range a {
