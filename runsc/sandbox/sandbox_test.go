@@ -28,6 +28,7 @@ import (
 
 	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/runsc/cgroup"
+	"gvisor.dev/gvisor/runsc/config"
 	"gvisor.dev/gvisor/runsc/specutils"
 )
 
@@ -426,6 +427,42 @@ func TestIsGCSRestorePath(t *testing.T) {
 			gotGCS, gotPrefixed := isGCSRestorePath(tc.path)
 			if gotGCS != tc.wantGCS || gotPrefixed != tc.wantPrefixed {
 				t.Errorf("isGCSRestorePath(%q) = (%t, %t), want (%t, %t)", tc.path, gotGCS, gotPrefixed, tc.wantGCS, tc.wantPrefixed)
+			}
+		})
+	}
+}
+
+func TestSandboxGoDebug(t *testing.T) {
+	for _, tc := range []struct {
+		platform string
+		network  config.NetworkType
+		want     string
+	}{
+		{
+			platform: "systrap",
+			network:  config.NetworkSandbox,
+			want:     "containermaxprocs=0,sysmonmindelay=250",
+		},
+		{
+			platform: "ptrace",
+			network:  config.NetworkHost,
+			want:     "containermaxprocs=0,sysmonmindelay=250",
+		},
+		{
+			platform: "kvm",
+			network:  config.NetworkSandbox,
+			want:     "containermaxprocs=0,sysmonmindelay=250,asyncpreemptoff=1",
+		},
+		{
+			platform: "systrap",
+			network:  config.NetworkPlugin,
+			want:     "containermaxprocs=0,sysmonmindelay=250,cgocheck=0",
+		},
+	} {
+		t.Run(fmt.Sprintf("%s/%s", tc.platform, tc.network), func(t *testing.T) {
+			conf := &config.Config{Platform: tc.platform, Network: tc.network}
+			if got := sandboxGoDebug(conf); got != tc.want {
+				t.Errorf("sandboxGoDebug() = %q, want %q", got, tc.want)
 			}
 		})
 	}

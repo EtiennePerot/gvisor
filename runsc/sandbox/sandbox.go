@@ -1220,20 +1220,8 @@ func (s *Sandbox) createSandboxProcess(conf *config.Config, args *Args, startSyn
 		donations.DonateAndClose("device-fd", deviceFile.ReleaseToFile("device file"))
 	}
 
-	// The Go runtime keeps its cgroup's CPU limit file open for the lifetime
-	// of the process to keep GOMAXPROCS in sync with the limit. The sentry
-	// sets GOMAXPROCS itself, so do not hold a host FD that it does not need.
-	godebug := []string{"containermaxprocs=0"}
-	// TODO(b/151157106): syscall tests fail by timeout if asyncpreemptoff
-	// isn't set.
-	if conf.Platform == "kvm" || conf.Platform == "slimvm" {
-		godebug = append(godebug, "asyncpreemptoff=1")
-	}
-	if conf.Network == config.NetworkPlugin {
-		godebug = append(godebug, "cgocheck=0")
-	}
 	// Go only reads the first GODEBUG variable in the environment.
-	cmd.Env = append(cmd.Env, "GODEBUG="+strings.Join(godebug, ","))
+	cmd.Env = append(cmd.Env, "GODEBUG="+sandboxGoDebug(conf))
 
 	// nss is the set of namespaces to join or create before starting the sandbox
 	// process. Mount, IPC and UTS namespaces from the host are not used as they
@@ -1608,6 +1596,35 @@ func spawnFDParking(ring *os.File, pid int) error {
 		}
 	}()
 	return nil
+}
+
+// sandboxGoDebug returns the GODEBUG settings of the sandbox process.
+func sandboxGoDebug(conf *config.Config) string {
+	// The Go runtime keeps its cgroup's CPU limit file open for the lifetime
+	// of the process to keep GOMAXPROCS in sync with the limit. The sentry
+	// sets GOMAXPROCS itself, so do not hold a host FD that it does not need.
+	godebug := []string{"containermaxprocs=0"}
+	// Task goroutines block in host syscalls (e.g. waiting for application
+	// threads) and return from them very frequently. Each return wakes up
+	// the runtime's sysmon thread, which then polls every 20us, costing
+	// hundreds to thousands of host wakeups per second. Raise its shortest
+	// poll interval to 250us. sysmon also retakes Ps from goroutines blocked
+	// in syscalls once they have been there for one or two of these
+	// intervals, which matters when more application threads are running
+	// than GOMAXPROCS (e.g. under a small CPU quota); longer intervals (1ms)
+	// were measured to raise tail syscall latency several-fold in that
+	// case. This needs the Go runtime patch in
+	// tools/go_sysmon_min_delay.patch; unpatched runtimes ignore it.
+	godebug = append(godebug, "sysmonmindelay=250")
+	// TODO(b/151157106): syscall tests fail by timeout if asyncpreemptoff
+	// isn't set.
+	if conf.Platform == "kvm" || conf.Platform == "slimvm" {
+		godebug = append(godebug, "asyncpreemptoff=1")
+	}
+	if conf.Network == config.NetworkPlugin {
+		godebug = append(godebug, "cgocheck=0")
+	}
+	return strings.Join(godebug, ",")
 }
 
 // calculateCPUNum calculates the number of CPUs to configure for the sandbox,

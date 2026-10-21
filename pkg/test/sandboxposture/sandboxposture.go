@@ -363,7 +363,7 @@ var platformGoDebug = map[string]string{
 
 // GoDebug returns the expected GODEBUG for a platform.
 func GoDebug(platform string) string {
-	godebug := "containermaxprocs=0"
+	godebug := "containermaxprocs=0,sysmonmindelay=250"
 	if p := platformGoDebug[platform]; p != "" {
 		godebug += "," + p
 	}
