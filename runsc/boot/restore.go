@@ -360,6 +360,12 @@ func (r *restoreMounts) String() string {
 
 func (r *restorer) restore(l *Loader) error {
 	log.Infof("Starting to restore %d containers", len(r.containers))
+	if r.asyncMFLoader != nil {
+		// Page loading may be throttled until the kernel is restored (see
+		// containerManager.Restore). Don't leave it throttled if restore
+		// fails.
+		defer r.asyncMFLoader.Unthrottle()
+	}
 
 	// Validate the container specs to ensure they did not meaningfully change
 	// between checkpoint and restore.
@@ -561,6 +567,8 @@ func (r *restorer) restore(l *Loader) error {
 				return err
 			}
 			r.timer.Reached("MF metadata loaded")
+			// The kernel is restored; load the remaining pages at full speed.
+			r.asyncMFLoader.Unthrottle()
 		} else {
 			if err := r.asyncMFLoader.Wait(); err != nil {
 				return err

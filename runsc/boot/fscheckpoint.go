@@ -495,7 +495,12 @@ func startFSRestore(optsList []fsRestoreOpts) (*fsRestore, error) {
 				} else if log.IsLogging(log.Debug) {
 					log.Debugf("Finished loading filesystem checkpoint pages")
 				}
-			}, nil)
+			}, nil, pgalloc.AsyncPagesFileLoadOpts{
+				// Filesystem checkpoint pages are loaded before the
+				// application starts, and there is no kernel restore for
+				// these loads to compete with, so don't throttle them.
+				Throttled: false,
+			})
 			opts.PagesFile = nil
 			if err != nil {
 				return fmt.Errorf("failed to start async page loading: %w", err)

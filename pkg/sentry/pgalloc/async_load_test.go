@@ -126,7 +126,7 @@ func TestAsyncLoadFailureWakesSatisfiedWaiters(t *testing.T) {
 	ra := &gatedReaderAt{r: bytes.NewReader(pages), failOff: hostarch.PageSize, unblock: make(chan struct{})}
 	ar := &batchingReader{IOReader: stateio.NewIOReader(ra, hostarch.PageSize, 1, 2)}
 	apflDone := make(chan error, 1)
-	apfl, err := StartAsyncPagesFileLoad(ar, func(err error) { apflDone <- err }, nil)
+	apfl, err := StartAsyncPagesFileLoad(ar, func(err error) { apflDone <- err }, nil, AsyncPagesFileLoadOpts{})
 	if err != nil {
 		t.Fatalf("StartAsyncPagesFileLoad: %v", err)
 	}
@@ -176,7 +176,7 @@ func TestAsyncLoadFinishesWhenUnloadedPagesBecomeWaste(t *testing.T) {
 	// closed: no page of B can be read before all pages of A are.
 	ra := &gatedReaderAt{r: bytes.NewReader(pages), failOff: -1, unblock: make(chan struct{})}
 	apflDone := make(chan error, 1)
-	apfl, err := StartAsyncPagesFileLoad(stateio.NewIOReader(ra, hostarch.PageSize, 1, 1), func(err error) { apflDone <- err }, nil)
+	apfl, err := StartAsyncPagesFileLoad(stateio.NewIOReader(ra, hostarch.PageSize, 1, 1), func(err error) { apflDone <- err }, nil, AsyncPagesFileLoadOpts{})
 	if err != nil {
 		t.Fatalf("StartAsyncPagesFileLoad: %v", err)
 	}
