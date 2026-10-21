@@ -225,6 +225,9 @@ type Source struct {
 //
 // See Sink.Save for an example.
 func (s Source) Load(slot int, objPtr any) {
+	if s.internal.loadPrimitive(slot, objPtr) {
+		return
+	}
 	s.internal.load(slot, reflect.ValueOf(objPtr), false, nil)
 }
 

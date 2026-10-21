@@ -372,6 +372,90 @@ func (od *objectDecoder) load(slot int, objPtr reflect.Value, wait bool, fn func
 	}
 }
 
+// loadPrimitive is a fast path for load, without reflection, for objPtr
+// pointing to an unnamed boolean, integer or string type. It returns false if
+// it did not load the object, in which case load must be used instead.
+//
+// It behaves like decodeObject: wire.Nil leaves the object unchanged, and
+// integer truncation is an error.
+func (od *objectDecoder) loadPrimitive(slot int, objPtr any) bool {
+	encoded := *od.encoded.Field(od.rte.FieldOrder[slot])
+	if _, ok := encoded.(wire.Nil); ok {
+		switch objPtr.(type) {
+		case *bool, *string, *int, *int8, *int16, *int32, *int64, *uint, *uint8, *uint16, *uint32, *uint64, *uintptr:
+			return true
+		default:
+			return false
+		}
+	}
+	switch p := objPtr.(type) {
+	case *bool:
+		x, ok := encoded.(wire.Bool)
+		if ok {
+			*p = bool(x)
+		}
+		return ok
+	case *string:
+		x, ok := encoded.(*wire.String)
+		if ok {
+			*p = string(*x)
+		}
+		return ok
+	case *int:
+		return loadInt(p, encoded)
+	case *int8:
+		return loadInt(p, encoded)
+	case *int16:
+		return loadInt(p, encoded)
+	case *int32:
+		return loadInt(p, encoded)
+	case *int64:
+		return loadInt(p, encoded)
+	case *uint:
+		return loadUint(p, encoded)
+	case *uint8:
+		return loadUint(p, encoded)
+	case *uint16:
+		return loadUint(p, encoded)
+	case *uint32:
+		return loadUint(p, encoded)
+	case *uint64:
+		return loadUint(p, encoded)
+	case *uintptr:
+		return loadUint(p, encoded)
+	default:
+		return false
+	}
+}
+
+// loadInt sets *p to encoded if it is a wire.Int, and returns false if it is
+// not.
+func loadInt[T int | int8 | int16 | int32 | int64](p *T, encoded wire.Object) bool {
+	x, ok := encoded.(wire.Int)
+	if !ok {
+		return false
+	}
+	*p = T(x)
+	if int64(*p) != int64(x) {
+		Failf("signed integer truncated from %v to %v", int64(x), *p)
+	}
+	return true
+}
+
+// loadUint sets *p to encoded if it is a wire.Uint, and returns false if it
+// is not.
+func loadUint[T uint | uint8 | uint16 | uint32 | uint64 | uintptr](p *T, encoded wire.Object) bool {
+	x, ok := encoded.(wire.Uint)
+	if !ok {
+		return false
+	}
+	*p = T(x)
+	if uint64(*p) != uint64(x) {
+		Failf("unsigned integer truncated from %v to %v", uint64(x), *p)
+	}
+	return true
+}
+
 // aterLoad implements Source.AfterLoad.
 func (od *objectDecoder) afterLoad(fn func()) {
 	// Queue the local callback; this will execute when all of the above
