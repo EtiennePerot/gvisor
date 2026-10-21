@@ -72,6 +72,7 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
 	"gvisor.dev/gvisor/pkg/sentry/watchdog"
 	"gvisor.dev/gvisor/pkg/sighandling"
+	pkgstate "gvisor.dev/gvisor/pkg/state"
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/link/ethernet"
@@ -640,6 +641,9 @@ func New(args Args) (*Loader, error) {
 		stopProfilingRuntime()
 		metric.StopProfilingMetrics()
 	}
+
+	// Per-type save/restore timing stats are only logged at debug level.
+	pkgstate.CollectStats = log.IsLogging(log.Debug)
 
 	// Initialize seccheck points.
 	seccheck.Initialize()

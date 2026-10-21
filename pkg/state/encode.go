@@ -536,8 +536,10 @@ func (es *encodeState) encodeStruct(obj reflect.Value, dest *wire.Object) {
 		es:      es,
 		encoded: s,
 	}
-	es.stats.start(te.ID)
-	defer es.stats.done()
+	if es.stats.enabled {
+		es.stats.start(te.ID)
+		defer es.stats.done()
+	}
 	switch value := obj.Addr().Interface().(type) {
 	case SaverLoader:
 		value.StateSave(Sink{internal: oe})
