@@ -491,6 +491,33 @@ func (*Array) load(r *Reader) Object {
 	return &a
 }
 
+// Bytes is an array with a uint8 element kind. It is encoded as its length
+// followed by the raw bytes, rather than as an Array of one Uint per element.
+type Bytes []byte
+
+// loadBytes loads an object of type Bytes.
+func loadBytes(r *Reader) Bytes {
+	l := loadUint(r)
+	p := make([]byte, l)
+	readFull(r, p)
+	return p
+}
+
+// save implements Object.save.
+func (b *Bytes) save(w *Writer) {
+	l := Uint(len(*b))
+	l.save(w)
+	if _, err := w.Write(*b); err != nil { // Must write all bytes.
+		panic(err)
+	}
+}
+
+// load implements Object.load.
+func (*Bytes) load(r *Reader) Object {
+	b := loadBytes(r)
+	return &b
+}
+
 // Map is a map value.
 type Map struct {
 	Keys   []Object
@@ -867,6 +894,7 @@ const (
 	typeComplex64
 	typeComplex128
 	typeType
+	typeBytes
 )
 
 // Save saves the given object.
@@ -930,6 +958,9 @@ func Save(w *Writer, obj Object) {
 	case *Complex128:
 		typeComplex128.save(w)
 		x.save(w)
+	case *Bytes:
+		typeBytes.save(w)
+		x.save(w)
 	default:
 		panic(fmt.Errorf("unknown type: %#v", obj)) // Escapes: error formatting.
 	}
@@ -982,6 +1013,8 @@ func Load(r *Reader) Object {
 		return ((*Complex128)(nil)).load(r) // Escapes.
 	case typeType:
 		return ((*Type)(nil)).load(r) // Escapes.
+	case typeBytes:
+		return ((*Bytes)(nil)).load(r) // Escapes.
 	default:
 		// This is not a valid stream?
 		panic(fmt.Errorf("unknown header: %d", hdr)) // Escapes: error formatting.

@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"slices"
 	"strings"
 
 	"gvisor.dev/gvisor/pkg/state"
@@ -120,6 +121,8 @@ func (p *printer) format(graph uint64, depth int, encoded wire.Object) (string, 
 		return strings.Join(items, tabs), true // No zero value.
 	case *wire.Slice:
 		return fmt.Sprintf("%s{len:%d,cap:%d}", p.formatRef(&x.Ref, graph), x.Length, x.Capacity), x.Capacity != 0
+	case *wire.Bytes:
+		return fmt.Sprintf("bytes[%d]{%x}", len(*x), []byte(*x)), slices.ContainsFunc(*x, func(b byte) bool { return b != 0 })
 	case *wire.Array:
 		if len(x.Contents) == 0 {
 			return "[]", false
