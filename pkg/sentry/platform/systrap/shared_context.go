@@ -250,7 +250,22 @@ const (
 	contextPreemptTimeout = 10 * time.Millisecond
 	contextCheckupTimeout = 5 * time.Second
 	stuckContextTimeout   = 30 * time.Second
+
+	// hostStallThreshold is how much later than its futex timeout a wakeup
+	// in sleepOnStateWithTimeout can return before the delay is attributed
+	// to the host not running the sandbox at all (cgroup freezer, SIGSTOP,
+	// VM suspend or live migration). The stub threads are stopped too
+	// during such a stall, so it must not count towards stuckContextTimeout.
+	// It is well above scheduling delays caused by CPU quota throttling and
+	// well below stuckContextTimeout.
+	hostStallThreshold = time.Second
 )
+
+// sleepOnStateNow returns the current time. Tests replace it to simulate host
+// stalls.
+var sleepOnStateNow = time.Now
+
+var hostStallLogger = log.BasicRateLimitedLogger(time.Minute)
 
 var (
 	errDeadSubprocess        = fmt.Errorf("subprocess died")
@@ -281,12 +296,28 @@ func (sc *sharedContext) sleepOnState(state sysmsg.ContextState) error {
 func (sc *sharedContext) sleepOnStateWithTimeout(state sysmsg.ContextState, stuckTimeout, checkupTimeout time.Duration) error {
 	timeout := unix.NsecToTimespec(contextPreemptTimeout.Nanoseconds())
 	interruptsSent := 0
-	deadline := time.Now().Add(stuckTimeout)
+	deadline := sleepOnStateNow().Add(stuckTimeout)
 	for sc.state() == state {
 		if sc.subprocess.dead.Load() {
 			return errDeadSubprocess
 		}
+		sleepStart := sleepOnStateNow()
 		errno := sc.shared.SleepOnState(state, &timeout)
+		// Check for a stall on every wakeup: after a stall, the futex wait
+		// can also return early because of a signal.
+		now := sleepOnStateNow()
+		if stall := now.Sub(sleepStart) - time.Duration(timeout.Nano()); stall > hostStallThreshold {
+			// This thread ran much later than it asked to, so the host
+			// most likely stopped the whole sandbox, stub threads
+			// included. Don't count the stall against the stub, and give
+			// it a full checkup interval to answer after the sandbox
+			// runs again.
+			hostStallLogger.Infof("Systrap context waited %v longer than expected, likely because the host stopped the sandbox; extending the stuck context deadline", stall)
+			deadline = deadline.Add(stall)
+			if checkupDeadline := now.Add(checkupTimeout); checkupDeadline.After(deadline) {
+				deadline = checkupDeadline
+			}
+		}
 		if errno == 0 {
 			continue
 		}
@@ -296,7 +327,7 @@ func (sc *sharedContext) sleepOnStateWithTimeout(state sysmsg.ContextState, stuc
 		if !sc.subprocess.alive() {
 			return errDeadSubprocess
 		}
-		if interruptsSent > 0 && time.Now().After(deadline) {
+		if interruptsSent > 0 && now.After(deadline) {
 			// The context can recover between the futex timeout and here.
 			if sc.state() != state {
 				return nil
@@ -315,7 +346,7 @@ func (sc *sharedContext) sleepOnStateWithTimeout(state sysmsg.ContextState, stuc
 		if interruptsSent == 0 {
 			// Guarantee a full checkup interval if the first interrupt was
 			// sent close to the deadline.
-			if checkupDeadline := time.Now().Add(checkupTimeout); checkupDeadline.After(deadline) {
+			if checkupDeadline := sleepOnStateNow().Add(checkupTimeout); checkupDeadline.After(deadline) {
 				deadline = checkupDeadline
 			}
 			timeout = unix.NsecToTimespec(checkupTimeout.Nanoseconds())

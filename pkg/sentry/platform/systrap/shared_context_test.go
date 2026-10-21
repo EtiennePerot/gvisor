@@ -122,6 +122,126 @@ func TestSleepOnStateRecoveredContext(t *testing.T) {
 	}
 }
 
+// simulateHostStall makes sleepOnStateNow jump forward by stall during the
+// first sleep after sc's first interrupt, as if the host stopped the whole
+// sandbox during that sleep. The first returned channel is closed when that
+// sleep is about to start, the second one after the clock jumped.
+func simulateHostStall(t *testing.T, sc *sharedContext, stall time.Duration) (<-chan struct{}, <-chan struct{}) {
+	t.Helper()
+	sleeping := make(chan struct{})
+	jumped := make(chan struct{})
+	// After the first interrupt, sleepOnStateWithTimeout reads the clock to
+	// set the checkup deadline, then before the next sleep, then after it.
+	calls := 0
+	sleepOnStateNow = func() time.Time {
+		now := time.Now()
+		if atomic.LoadUint32(&sc.shared.Interrupt) == 0 {
+			return now
+		}
+		calls++
+		switch calls {
+		case 1:
+			return now
+		case 2:
+			close(sleeping)
+			return now
+		case 3:
+			close(jumped)
+		}
+		return now.Add(stall)
+	}
+	t.Cleanup(func() { sleepOnStateNow = time.Now })
+	return sleeping, jumped
+}
+
+func TestSleepOnStateHostStallIsNotStuck(t *testing.T) {
+	sc := newTestSharedContext(t)
+	_, jumped := simulateHostStall(t, sc, time.Minute)
+
+	// The stub answers shortly after the sandbox runs again.
+	go func() {
+		<-jumped
+		time.Sleep(20 * time.Millisecond)
+		sc.setState(sysmsg.ContextStateSyscall)
+	}()
+
+	err := sc.sleepOnStateWithTimeout(sysmsg.ContextStateNone, 200*time.Millisecond, 5*time.Millisecond)
+	if err != nil {
+		t.Fatalf("sleepOnStateWithTimeout got error %v, want nil", err)
+	}
+}
+
+func TestSleepOnStateHostStallGivesCheckupInterval(t *testing.T) {
+	sc := newTestSharedContext(t)
+	_, jumped := simulateHostStall(t, sc, time.Minute)
+
+	// The stall ends after the stuck deadline. The stub must still get a
+	// checkup interval to answer.
+	go func() {
+		<-jumped
+		time.Sleep(10 * time.Millisecond)
+		sc.setState(sysmsg.ContextStateSyscall)
+		futexWakeUint32((*uint32)(&sc.shared.State))
+	}()
+
+	err := sc.sleepOnStateWithTimeout(sysmsg.ContextStateNone, time.Millisecond, 200*time.Millisecond)
+	if err != nil {
+		t.Fatalf("sleepOnStateWithTimeout got error %v, want nil", err)
+	}
+}
+
+func TestSleepOnStateHostStallEndingInEarlyWakeup(t *testing.T) {
+	sc := newTestSharedContext(t)
+	sleeping, jumped := simulateHostStall(t, sc, time.Minute)
+
+	// The stalled sleep returns early without a state change, as it does
+	// when a signal interrupts it. The stub answers only after a few more
+	// checkup intervals.
+	go func() {
+		<-sleeping
+		for giveUp := time.Now().Add(time.Second); time.Now().Before(giveUp); {
+			select {
+			case <-jumped:
+				giveUp = time.Time{}
+			default:
+				futexWakeUint32((*uint32)(&sc.shared.State))
+				time.Sleep(100 * time.Microsecond)
+			}
+		}
+		<-jumped
+		time.Sleep(50 * time.Millisecond)
+		sc.setState(sysmsg.ContextStateSyscall)
+	}()
+
+	err := sc.sleepOnStateWithTimeout(sysmsg.ContextStateNone, 200*time.Millisecond, 10*time.Millisecond)
+	if err != nil {
+		t.Fatalf("sleepOnStateWithTimeout got error %v, want nil", err)
+	}
+}
+
+func TestSleepOnStateStuckAfterHostStall(t *testing.T) {
+	sc := newTestSharedContext(t)
+	_, jumped := simulateHostStall(t, sc, time.Minute)
+
+	// A stub that never answers is still detected after a host stall, once
+	// the time the sandbox actually ran exceeds the stuck timeout.
+	start := time.Now()
+	err := sc.sleepOnStateWithTimeout(sysmsg.ContextStateNone, 100*time.Millisecond, 10*time.Millisecond)
+	if !errors.Is(err, errStuckContext) {
+		t.Fatalf("sleepOnStateWithTimeout got error %v, want %v", err, errStuckContext)
+	}
+	select {
+	case <-jumped:
+	default:
+		t.Fatalf("sleepOnStateWithTimeout returned before the simulated host stall")
+	}
+	// The stall must not use up the time left before the deadline. The
+	// stalled sleep can end early, so allow for one checkup interval less.
+	if elapsed := time.Since(start); elapsed < 90*time.Millisecond || elapsed > 10*time.Second {
+		t.Errorf("stuck context detection took %v, want between 90ms and 10s", elapsed)
+	}
+}
+
 func TestSleepOnStateDeadSubprocess(t *testing.T) {
 	sc := newTestSharedContext(t)
 	sc.subprocess.dead.Store(true)
