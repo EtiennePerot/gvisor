@@ -27,6 +27,9 @@ var _ vfs.FilesystemImplSaveRestoreExtension = (*filesystem)(nil)
 
 // PrepareSave implements vfs.FilesystemImplSaveRestoreExtension.PrepareSave.
 func (fs *filesystem) PrepareSave(ctx context.Context) error {
+	// Cached dentries are recreated on demand after restore, so there is no
+	// need to save them.
+	fs.EvictCachedDentries(ctx)
 	return nil
 }
 

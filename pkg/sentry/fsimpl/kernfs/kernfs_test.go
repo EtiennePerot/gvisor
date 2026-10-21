@@ -598,3 +598,51 @@ func TestProcessDeferredDecRefsClearsSliceForSave(t *testing.T) {
 		t.Fatalf("state.Save(&fs.Filesystem) failed: %v", err)
 	}
 }
+
+func TestEvictCachedDentries(t *testing.T) {
+	var testFS *filesystem
+	sys := newTestSystem(t, func(ctx context.Context, creds *auth.Credentials, fs *filesystem) kernfs.Inode {
+		testFS = fs
+		fs.MaxCachedDentries = 100
+		return fs.newReadonlyDir(ctx, creds, 0755, map[string]kernfs.Inode{
+			"dir1": fs.newReadonlyDir(ctx, creds, 0755, map[string]kernfs.Inode{
+				"file1": fs.newFile(ctx, creds, staticFileContent),
+			}),
+			"dir2": fs.newReadonlyDir(ctx, creds, 0755, nil),
+		})
+	})
+	defer sys.Destroy()
+
+	getDentry := func(path string) vfs.VirtualDentry {
+		return sys.GetDentryOrDie(sys.PathOpAtRoot(path))
+	}
+
+	// After the lookups below, dir1/file1 is only referenced by the dentry
+	// cache and keeps dir1 alive, while dir2 is still in use.
+	file1 := getDentry("dir1/file1")
+	file1.DecRef(sys.Ctx)
+	dir1 := getDentry("dir1")
+	dir1.DecRef(sys.Ctx)
+	dir2 := getDentry("dir2")
+	defer dir2.DecRef(sys.Ctx)
+
+	testFS.EvictCachedDentries(sys.Ctx)
+
+	if !file1.Dentry().IsDead() {
+		t.Errorf("dir1/file1 dentry is alive after EvictCachedDentries")
+	}
+	if dir2.Dentry().IsDead() {
+		t.Errorf("in-use dir2 dentry is dead after EvictCachedDentries")
+	}
+	// dir1 was only kept alive by its child, so evicting the child must evict
+	// it too.
+	if !dir1.Dentry().IsDead() {
+		t.Errorf("dir1 dentry is alive after EvictCachedDentries")
+	}
+	// Evicted files can be looked up again.
+	newFile1 := getDentry("dir1/file1")
+	defer newFile1.DecRef(sys.Ctx)
+	if newFile1.Dentry() == file1.Dentry() {
+		t.Errorf("dir1/file1 lookup returned the evicted dentry")
+	}
+}
