@@ -36,6 +36,7 @@ go_test(
         "bytes_test.go",
         "float_test.go",
         "integer_test.go",
+        "interface_test.go",
         "load_test.go",
         "map_test.go",
         "primitive_test.go",

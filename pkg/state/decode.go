@@ -593,6 +593,17 @@ func (ds *decodeState) decodeInterface(ods *objectDecodeState, obj reflect.Value
 	// We now need to resolve the actual type.
 	typ := ds.findType(encoded.Type)
 
+	// Fast path for pointers, the most common case: assign the pointer
+	// directly. This is equivalent to the general case below.
+	if ref, ok := encoded.Value.(*wire.Ref); ok && typ.Kind() == reflect.Pointer {
+		if ref.Root == 0 {
+			obj.Set(reflect.Zero(typ))
+		} else {
+			obj.Set(reflectValueRWAddr(ds.register(ref, typ.Elem())))
+		}
+		return
+	}
+
 	// We need to imbue type information here, then we can proceed to
 	// decode normally. In order to avoid issues with setting value-types,
 	// we create a new non-interface version of this object. We will then
