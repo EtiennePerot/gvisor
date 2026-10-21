@@ -461,6 +461,17 @@ func (ds *decodeState) decodeArray(ods *objectDecodeState, obj reflect.Value, en
 	}
 }
 
+// decodeBytes decodes a byte array value.
+func (ds *decodeState) decodeBytes(obj reflect.Value, encoded wire.Bytes) {
+	if obj.Kind() != reflect.Array || obj.Type().Elem().Kind() != reflect.Uint8 {
+		Failf("byte array decoded into %v", obj.Type())
+	}
+	if len(encoded) != obj.Len() {
+		Failf("mismatching array length expect=%d, actual=%d", obj.Len(), len(encoded))
+	}
+	copy(reflectValueRWAddr(obj).Elem().Bytes(), encoded)
+}
+
 // findType finds the type for the given wire.TypeSpecs.
 func (ds *decodeState) findType(t wire.TypeSpec) reflect.Type {
 	switch x := t.(type) {
@@ -600,6 +611,8 @@ func (ds *decodeState) decodeObject(ods *objectDecodeState, obj reflect.Value, e
 		obj.Set(reflectValueRWSlice3(v, 0, int(x.Length), int(x.Capacity)))
 	case *wire.Array:
 		ds.decodeArray(ods, obj, x)
+	case *wire.Bytes:
+		ds.decodeBytes(obj, *x)
 	case *wire.Struct:
 		ds.decodeStruct(ods, obj, x)
 	case *wire.Map:

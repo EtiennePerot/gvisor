@@ -464,6 +464,25 @@ func (a *Array) save(w *Writer) {
 	}
 }
 
+// Bytes is an array with a uint8 element kind. It is encoded as its length
+// followed by the raw bytes, rather than as an Array of one Uint per element.
+type Bytes []byte
+
+// loadBytes loads an object of type Bytes.
+func loadBytes(r *Reader) Bytes {
+	l := loadUint(r)
+	p := make([]byte, l)
+	readFull(r, p)
+	return p
+}
+
+// save implements Object.save.
+func (b *Bytes) save(w *Writer) {
+	l := Uint(len(*b))
+	l.save(w)
+	w.write(*b)
+}
+
 // Map is a map value.
 type Map struct {
 	Keys   []Object
@@ -709,6 +728,7 @@ const (
 	typeComplex64
 	typeComplex128
 	typeType
+	typeBytes
 )
 
 // Save saves the given object.
@@ -774,6 +794,9 @@ func Save(w *Writer, obj Object) {
 		x.save(w)
 	case *Raw:
 		x.Tag.save(w)
+		x.save(w)
+	case *Bytes:
+		typeBytes.save(w)
 		x.save(w)
 	default:
 		panic(fmt.Errorf("unknown type: %#v", obj)) // Escapes: error formatting.

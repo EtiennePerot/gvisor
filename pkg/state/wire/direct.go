@@ -51,6 +51,7 @@ const (
 	TagComplex64       = typeComplex64
 	TagComplex128      = typeComplex128
 	TagType            = typeType
+	TagBytes           = typeBytes
 )
 
 // TypeSpec tags, as written by saveTypeSpec.
@@ -219,71 +220,17 @@ func ReadDots(r *Reader, n uint64) []Dot {
 
 // ReadTypeSpecBody reads the rest of a TypeSpec whose header has been read.
 func ReadTypeSpecBody(r *Reader, hdr Uint) TypeSpec {
-	switch hdr {
-	case typeSpecTypeID:
-		return TypeID(loadUint(r))
-	case typeSpecPointer:
-		return &TypeSpecPointer{Type: loadTypeSpec(r)}
-	case typeSpecArray:
-		return &TypeSpecArray{Count: loadUint(r), Type: loadTypeSpec(r)}
-	case typeSpecSlice:
-		return &TypeSpecSlice{Type: loadTypeSpec(r)}
-	case typeSpecMap:
-		return &TypeSpecMap{Key: loadTypeSpec(r), Value: loadTypeSpec(r)}
-	case typeSpecNil:
-		return TypeSpecNil{}
-	default:
-		panic(fmt.Errorf("unknown header: %d", hdr))
-	}
+	return loadTypeBody(r, hdr)
 }
 
 // ReadTypeSpec reads a TypeSpec.
 func ReadTypeSpec(r *Reader) TypeSpec {
-	return loadTypeSpec(r)
+	return loadType(r)
 }
 
 // LoadTagged loads the contents of an Object whose Tag has been read.
 func LoadTagged(r *Reader, tag Tag) Object {
-	switch tag {
-	case typeBool:
-		return loadBool(r)
-	case typeInt:
-		return loadInt(r)
-	case typeUint:
-		return loadUint(r)
-	case typeFloat32:
-		return loadFloat32(r)
-	case typeFloat64:
-		return loadFloat64(r)
-	case typeNil:
-		return loadNil(r)
-	case typeRef:
-		return ((*Ref)(nil)).load(r)
-	case typeString:
-		return ((*String)(nil)).load(r)
-	case typeSlice:
-		return ((*Slice)(nil)).load(r)
-	case typeArray:
-		return ((*Array)(nil)).load(r)
-	case typeMap:
-		return ((*Map)(nil)).load(r)
-	case typeStruct:
-		return ((*Struct)(nil)).load(r)
-	case typeNoObjects:
-		return loadNoObjects(r)
-	case typeMultipleObjects:
-		return ((*multipleObjects)(nil)).load(r)
-	case typeInterface:
-		return ((*Interface)(nil)).load(r)
-	case typeComplex64:
-		return ((*Complex64)(nil)).load(r)
-	case typeComplex128:
-		return ((*Complex128)(nil)).load(r)
-	case typeType:
-		return ((*Type)(nil)).load(r)
-	default:
-		panic(fmt.Errorf("unknown header: %d", tag))
-	}
+	return loadPayload(r, tag)
 }
 
 // LoadStructFields loads the fields of a Struct whose Tag and TypeID have been

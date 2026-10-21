@@ -109,6 +109,9 @@ func loadPayload(r *Reader, tag Uint) Object {
 	case typeInterface:
 		typ := loadType(r)
 		return &Interface{Type: typ, Value: Load(r)} // Escapes: owned interface payload.
+	case typeBytes:
+		value := loadBytes(r) // Escapes: owned byte array payload.
+		return &value
 	case typeType:
 		typ := &Type{Name: string(loadString(r))} // Escapes: owned schema payload.
 		typ.Fields = make([]string, loadUint(r))  // Escapes: owned schema field headers.
@@ -164,7 +167,11 @@ func loadReference(r *Reader) Ref {
 // loadType is the sole TypeSpec grammar. Its tag namespace is independent of
 // data-value tags; full-width IDs and array counts remain intact.
 func loadType(r *Reader) TypeSpec {
-	header := loadUint(r)
+	return loadTypeBody(r, loadUint(r))
+}
+
+// loadTypeBody loads the rest of a TypeSpec whose header has been read.
+func loadTypeBody(r *Reader, header Uint) TypeSpec {
 	switch header {
 	case typeSpecTypeID:
 		return TypeID(loadUint(r)) // Escapes: owned type ID interface.
