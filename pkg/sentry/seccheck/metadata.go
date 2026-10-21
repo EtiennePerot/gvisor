@@ -17,7 +17,7 @@ package seccheck
 import (
 	"fmt"
 	"os"
-	"path"
+	"strconv"
 
 	"gvisor.dev/gvisor/pkg/fd"
 	"gvisor.dev/gvisor/pkg/sync"
@@ -200,24 +200,26 @@ func registerPoint(pt PointDesc) {
 	Points[pt.Name] = pt
 }
 
+// validateFields checks that fields have distinct names and IDs.
+//
+// Field lists are short, so this compares all pairs instead of building
+// maps: it runs for every point (twice per syscall) on every sandbox start.
 func validateFields(fields []FieldDesc) error {
-	ids := make(map[Field]FieldDesc)
-	names := make(map[string]FieldDesc)
-	for _, f := range fields {
-		if other, ok := names[f.Name]; ok {
-			return fmt.Errorf("field %q has repeated name with field %q", f.Name, other.Name)
+	for i, f := range fields {
+		for _, other := range fields[:i] {
+			if f.Name == other.Name {
+				return fmt.Errorf("field %q has repeated name with field %q", f.Name, other.Name)
+			}
+			if f.ID == other.ID {
+				return fmt.Errorf("field %q has repeated ID (%d) with field %q", f.Name, f.ID, other.Name)
+			}
 		}
-		if other, ok := ids[f.ID]; ok {
-			return fmt.Errorf("field %q has repeated ID (%d) with field %q", f.Name, f.ID, other.Name)
-		}
-		names[f.Name] = f
-		ids[f.ID] = f
 	}
 	return nil
 }
 
 func addRawSyscallPoint(sysno uintptr) {
-	addSyscallPointHelper(SyscallRawEnter, sysno, fmt.Sprintf("sysno/%d", sysno), nil)
+	addSyscallPointHelper(SyscallRawEnter, sysno, "sysno/"+strconv.FormatUint(uint64(sysno), 10), nil)
 }
 
 func addSyscallPoint(sysno uintptr, name string, optionalFields []FieldDesc) {
@@ -227,13 +229,13 @@ func addSyscallPoint(sysno uintptr, name string, optionalFields []FieldDesc) {
 func addSyscallPointHelper(typ SyscallType, sysno uintptr, name string, optionalFields []FieldDesc) {
 	registerPoint(PointDesc{
 		ID:             GetPointForSyscall(typ, sysno),
-		Name:           path.Join("syscall", name, "enter"),
+		Name:           "syscall/" + name + "/enter",
 		OptionalFields: optionalFields,
 		ContextFields:  defaultContextFields,
 	})
 	registerPoint(PointDesc{
 		ID:             GetPointForSyscall(typ+1, sysno),
-		Name:           path.Join("syscall", name, "exit"),
+		Name:           "syscall/" + name + "/exit",
 		OptionalFields: optionalFields,
 		ContextFields:  defaultContextFields,
 	})
