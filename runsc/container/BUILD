@@ -114,6 +114,14 @@ go_test(
 )
 
 go_test(
+    name = "gofer_maxprocs_test",
+    size = "small",
+    srcs = ["gofer_maxprocs_test.go"],
+    embed = [":container"],
+    deps = ["//runsc/cgroup"],
+)
+
+go_test(
     name = "serialization_test",
     srcs = ["serialization_test.go"],
     deps = [

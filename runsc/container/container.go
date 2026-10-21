@@ -23,6 +23,7 @@ import (
 	"os/exec"
 	"path"
 	"regexp"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -424,7 +425,7 @@ func (c *Container) createRoot(conf *config.Config, args Args, sandboxID string)
 		)
 		if !args.NoRootContainer {
 			var err error
-			ioFiles, goferFilestores, devIOFile, specFile, err = c.createGoferProcess(conf, mountHints, args.Attached, cloneIntoCgroupFD)
+			ioFiles, goferFilestores, devIOFile, specFile, err = c.createGoferProcess(conf, mountHints, args.Attached, containerCgroup, cloneIntoCgroupFD)
 			if err != nil {
 				return fmt.Errorf("cannot create gofer process: %w", err)
 			}
@@ -536,7 +537,7 @@ func (c *Container) startImpl(conf *config.Config, action string, startRoot func
 		// the start (and all their children processes).
 		if err := cgroup.RunInCgroup(c.Sandbox.CgroupJSON.Cgroup, func(cloneIntoCgroupFD *os.File) error {
 			// Create the gofer process.
-			goferFiles, goferFilestores, devIOFile, mountsFile, err := c.createGoferProcess(conf, c.Sandbox.MountHints, false /* attached */, cloneIntoCgroupFD)
+			goferFiles, goferFilestores, devIOFile, mountsFile, err := c.createGoferProcess(conf, c.Sandbox.MountHints, false /* attached */, c.Sandbox.CgroupJSON.Cgroup, cloneIntoCgroupFD)
 			if err != nil {
 				return err
 			}
@@ -1470,6 +1471,32 @@ func shouldCreateDeviceGofer(spec *specs.Spec, conf *config.Config) bool {
 	return specutils.GPUFunctionalityRequested(spec, conf) || specutils.TPUFunctionalityRequested(spec, conf) || specutils.RDMAEnabled(spec, conf)
 }
 
+// goferMaxProcs is the maximum GOMAXPROCS of a gofer process.
+//
+// The gofer spends almost all of its time in host syscalls, which do not hold
+// a P for long, so it gains little from many Ps. Each P costs ~16KiB of heap
+// that the Go runtime never frees, even if GOMAXPROCS is lowered later.
+const goferMaxProcs = 8
+
+// goferGOMAXPROCS returns the GOMAXPROCS to start a gofer process in cgroup cg
+// (which may be nil) with.
+//
+// The Go runtime sizes GOMAXPROCS from the CPU limit of its leaf cgroup only,
+// so it misses limits set on a parent (e.g. a systemd slice), and it uses all
+// host CPUs when there is no limit at all. Compute the value here instead,
+// like the sandbox does for the sentry, and bound it by goferMaxProcs.
+func goferGOMAXPROCS(cg cgroup.Cgroup) int {
+	procs := runtime.NumCPU()
+	if cg != nil {
+		if n, _, _, err := sandbox.CalculateCPUNum(cg, true /* cpuNumFromQuota */); err != nil {
+			log.Warningf("Cannot get CPU limits of cgroup %q for the gofer: %v", cg.MakePath(""), err)
+		} else {
+			procs = min(procs, n)
+		}
+	}
+	return min(procs, goferMaxProcs)
+}
+
 // shouldSpawnGofer indicates whether the gofer process should be spawned.
 func shouldSpawnGofer(spec *specs.Spec, conf *config.Config, goferConfs []specutils.GoferMountConf) bool {
 	// Lisafs mounts need the gofer.
@@ -1501,7 +1528,7 @@ func createLisafsSocketPair(sandEnds *[]*os.File, donations *donation.Agency) er
 // a gofer endpoint for the mount points using Gofers. The mounts file is the
 // file to read list of mounts after they have been resolved (direct paths,
 // no symlinks), and will be nil if there is no cleaning required for mounts.
-func (c *Container) createGoferProcess(conf *config.Config, mountHints *sentryapi.PodMountHints, attached bool, cloneIntoCgroupFD *os.File) ([]*os.File, []*os.File, *os.File, *os.File, error) {
+func (c *Container) createGoferProcess(conf *config.Config, mountHints *sentryapi.PodMountHints, attached bool, cg cgroup.Cgroup, cloneIntoCgroupFD *os.File) ([]*os.File, []*os.File, *os.File, *os.File, error) {
 	rootfsHint, err := sentryapi.NewRootfsHint(c.Spec)
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("error creating rootfs hint: %w", err)
@@ -1590,6 +1617,9 @@ func (c *Container) createGoferProcess(conf *config.Config, mountHints *sentryap
 	// particular, containerd-shim-runsc-v1 passes GOMAXPROCS=2 in
 	// v1.service.newCommand()).
 	cmd.Env = slices.DeleteFunc(os.Environ(), func(env string) bool { return strings.HasPrefix(env, "GOMAXPROCS=") })
+	// The Go runtime allocates its Ps at startup, so GOMAXPROCS must be set
+	// before the gofer starts rather than by the gofer itself.
+	cmd.Env = append(cmd.Env, "GOMAXPROCS="+strconv.Itoa(goferGOMAXPROCS(cg)))
 	cmd.SysProcAttr = &unix.SysProcAttr{
 		// Detach from session. Otherwise, signals sent to the foreground process
 		// will also be forwarded by this process, resulting in duplicate signals.

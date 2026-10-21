@@ -233,18 +233,18 @@ func TestCalculateCPUNum(t *testing.T) {
 				cpuQuota:  tc.cpuQuota,
 				cpuPeriod: tc.cpuPeriod,
 			}
-			gotNum, gotQuota, gotPeriod, err := calculateCPUNum(cg, tc.cpuNumFromQuota)
+			gotNum, gotQuota, gotPeriod, err := CalculateCPUNum(cg, tc.cpuNumFromQuota)
 			if err != nil {
-				t.Fatalf("calculateCPUNum failed: %v", err)
+				t.Fatalf("CalculateCPUNum failed: %v", err)
 			}
 			if gotNum != tc.want {
-				t.Errorf("calculateCPUNum() got cpuNum = %d, want %d", gotNum, tc.want)
+				t.Errorf("CalculateCPUNum() got cpuNum = %d, want %d", gotNum, tc.want)
 			}
 			if gotQuota != tc.cpuQuota {
-				t.Errorf("calculateCPUNum() got cpuQuota = %d, want %d", gotQuota, tc.cpuQuota)
+				t.Errorf("CalculateCPUNum() got cpuQuota = %d, want %d", gotQuota, tc.cpuQuota)
 			}
 			if gotPeriod != tc.cpuPeriod {
-				t.Errorf("calculateCPUNum() got cpuPeriod = %d, want %d", gotPeriod, tc.cpuPeriod)
+				t.Errorf("CalculateCPUNum() got cpuPeriod = %d, want %d", gotPeriod, tc.cpuPeriod)
 			}
 		})
 	}
