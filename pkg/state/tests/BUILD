@@ -37,6 +37,7 @@ go_test(
         "map_test.go",
         "register_test.go",
         "string_test.go",
+        "stats_test.go",
         "struct_test.go",
     ],
     embed = [":tests"],

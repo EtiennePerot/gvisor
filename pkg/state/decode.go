@@ -172,7 +172,7 @@ func (ds *decodeState) checkComplete(ods *objectDecodeState) bool {
 	}
 
 	// Track stats if relevant.
-	if ods.callbacks != nil && ods.typ != 0 {
+	if ds.stats.enabled && ods.callbacks != nil && ods.typ != 0 {
 		ds.stats.start(ods.typ)
 		defer ds.stats.done()
 	}
@@ -382,8 +382,10 @@ func (ds *decodeState) decodeStruct(ods *objectDecodeState, obj reflect.Value, e
 		rte:     rte,
 		encoded: encoded,
 	}
-	ds.stats.start(ods.typ)
-	defer ds.stats.done()
+	if ds.stats.enabled {
+		ds.stats.start(ods.typ)
+		defer ds.stats.done()
+	}
 	switch value := obj.Addr().Interface().(type) {
 	case SaverLoader:
 		value.StateLoad(ds.ctx, Source{internal: od})
