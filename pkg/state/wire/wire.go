@@ -34,17 +34,34 @@ import (
 	"gvisor.dev/gvisor/pkg/gohacks"
 )
 
-// Reader bundles an io.Reader with a buffer used to implement readByte
+// Reader bundles an io.Reader with what is needed to read single bytes from it
 // efficiently.
 type Reader struct {
 	io.Reader
 
+	// br is Reader as an io.ByteReader (e.g. bufio.Reader), if it implements
+	// it. brInit is true once br has been initialized by readByte.
+	br     io.ByteReader
+	brInit bool
+
+	// buf is used by readByte if Reader does not implement io.ByteReader.
 	buf [1]byte
 }
 
 // readByte reads a single byte from r.Reader without allocation. It panics on
 // error.
 func (r *Reader) readByte() byte {
+	if !r.brInit {
+		r.br, _ = r.Reader.(io.ByteReader)
+		r.brInit = true
+	}
+	if r.br != nil {
+		b, err := r.br.ReadByte()
+		if err != nil {
+			panic(err)
+		}
+		return b
+	}
 	n, err := r.Read(r.buf[:])
 	if n != 1 {
 		panic(err)

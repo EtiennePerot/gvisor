@@ -323,3 +323,75 @@ func TestVerifyGivesReadError(t *testing.T) {
 		})
 	}
 }
+
+// TestReadByte makes sure that ReadByte, mixed with Read, gives the same data
+// as Read, and that keyed streams still verify.
+func TestReadByte(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		key       []byte
+		size      int
+		chunkSize uint32
+	}{
+		{"keyed", integrityKey, 64 * 1024, 1024},
+		{"keyed-oversized-direct-write", integrityKey, 4 * maxVerifiedChunkSize, 1024},
+		{"unkeyed", nil, 64 * 1024, 1024},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := testData(tc.size)
+			var out bytes.Buffer
+			w := NewSimpleWriter(&out, tc.key, tc.chunkSize)
+			if _, err := w.Write(data); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
+			if err := w.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			r := NewSimpleReader(io.NopCloser(bytes.NewReader(out.Bytes())), tc.key)
+			var got []byte
+			buf := make([]byte, 777)
+			for i := 0; ; i++ {
+				if i%2 == 0 {
+					b, err := r.ReadByte()
+					if err == io.EOF {
+						break
+					}
+					if err != nil {
+						t.Fatalf("ReadByte: %v", err)
+					}
+					got = append(got, b)
+					continue
+				}
+				n, err := r.Read(buf)
+				got = append(got, buf[:n]...)
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					t.Fatalf("Read: %v", err)
+				}
+			}
+			if !bytes.Equal(got, data) {
+				t.Fatalf("round-trip mismatch: got %d bytes, want %d", len(got), len(data))
+			}
+			if err := r.Verify(); err != nil {
+				t.Errorf("Verify: %v", err)
+			}
+		})
+	}
+}
+
+// TestReadByteRejectsTamperedStream makes sure that ReadByte gives an error
+// on a chunk with a wrong hash.
+func TestReadByteRejectsTamperedStream(t *testing.T) {
+	r := newReader(frame(testData(100), 100, true))
+	for i := 0; ; i++ {
+		_, err := r.ReadByte()
+		if errors.Is(err, ErrHashMismatch) {
+			return
+		}
+		if err != nil {
+			t.Fatalf("ReadByte: got %v after %d bytes, want %v", err, i, ErrHashMismatch)
+		}
+	}
+}
