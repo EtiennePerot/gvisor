@@ -11,6 +11,7 @@ go_library(
         "cgroup.go",
         "cgroup_v2.go",
         "cgroup_v2_unsafe.go",
+        "prioritize.go",
         "systemd.go",
     ],
     importpath = "gvisor.dev/gvisor/runsc/cgroup",
@@ -34,6 +35,7 @@ go_test(
     srcs = [
         "cgroup_test.go",
         "cgroup_v2_test.go",
+        "prioritize_test.go",
         "systemd_test.go",
     ],
     embed = [":cgroup"],

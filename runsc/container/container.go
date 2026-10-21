@@ -397,6 +397,14 @@ func (c *Container) createRoot(conf *config.Config, args Args, sandboxID string)
 		if err != nil {
 			return nil, fmt.Errorf("cannot set up cgroup for root: %w", err)
 		}
+		if parentCgroup != nil {
+			// Don't let the sandbox delay the runsc commands that manage it.
+			if raised, err := cgroup.PrioritizeOwnCgroup(parentCgroup); err != nil {
+				log.Debugf("Not raising CPU weight of own cgroup: %v", err)
+			} else if raised {
+				log.Infof("Raised CPU weight of own cgroup, a sibling of the sandbox cgroup")
+			}
+		}
 		// Join the child cgroup when using cgroupfs. Joining non leaf-node
 		// cgroups is illegal in cgroupsv2 and will return EBUSY.
 		if subCgroup != nil && !conf.SystemdCgroup && cgroup.IsOnlyV2() {
