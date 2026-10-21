@@ -1293,7 +1293,7 @@ func createMemoryFile(appHugePages bool, hostTHP HostTHP) (*pgalloc.MemoryFile, 
 }
 
 // installSeccompFilters installs sandbox seccomp filters with the host.
-func (l *Loader) installSeccompFilters() error {
+func (l *Loader) installSeccompFilters(p platform.Platform) error {
 	if l.PreSeccompCallback != nil {
 		l.PreSeccompCallback()
 		l.startupTimer.Reached("pre-seccomp callback done")
@@ -1317,7 +1317,7 @@ func (l *Loader) installSeccompFilters() error {
 			}
 		}
 		opts := filter.Options{
-			Platform:              l.k.Platform.SeccompInfo(),
+			Platform:              p.SeccompInfo(),
 			HostNetwork:           hostnet,
 			HostNetworkRawSockets: hostnet && l.root.conf.EnableRaw,
 			HostFilesystem:        l.root.conf.DirectFS,
@@ -1396,7 +1396,7 @@ func (l *Loader) run() error {
 
 		// Finally done with all configuration. Setup filters before user code
 		// is loaded.
-		if err := l.installSeccompFilters(); err != nil {
+		if err := l.installSeccompFilters(l.k.Platform); err != nil {
 			return err
 		}
 		l.startupTimer.Reached("seccomp filters installed")

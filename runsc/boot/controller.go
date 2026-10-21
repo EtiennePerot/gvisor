@@ -582,6 +582,9 @@ func getRestoreReadersForCheckpointGofer(o *sentryapi.RestoreOpts) (io.ReadClose
 }
 
 func (cm *containerManager) onRestoreFailed(err error) {
+	if cm.restorer != nil {
+		cm.restorer.abortEarlyDecode()
+	}
 	cm.l.mu.Lock()
 	cm.l.state = restoreFailed
 	cm.l.restoreErr = err

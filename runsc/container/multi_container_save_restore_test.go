@@ -33,9 +33,11 @@ import (
 	"gvisor.dev/gvisor/pkg/cleanup"
 	"gvisor.dev/gvisor/pkg/sentry/fscheckpoint"
 	fspb "gvisor.dev/gvisor/pkg/sentry/fscheckpoint/fscheckpoint_proto_go_proto"
+	"gvisor.dev/gvisor/pkg/sentry/fsimpl/erofs"
 	"gvisor.dev/gvisor/pkg/sentry/state/checkpointfiles"
 	"gvisor.dev/gvisor/pkg/state/statefile"
 	"gvisor.dev/gvisor/pkg/test/testutil"
+	"gvisor.dev/gvisor/runsc/boot/sentryapi"
 	"gvisor.dev/gvisor/runsc/config"
 	"gvisor.dev/gvisor/runsc/sandbox"
 	"gvisor.dev/gvisor/runsc/specutils"
@@ -114,7 +116,55 @@ func TestMultiContainerCheckpointRestore(t *testing.T) {
 	}
 }
 
+// TestMultiContainerCheckpointRestoreDecodeAtLastContainer is
+// TestMultiContainerCheckpointRestore with the kernel state decoded only once
+// the last container has registered.
+func TestMultiContainerCheckpointRestoreDecodeAtLastContainer(t *testing.T) {
+	for name, conf := range configs(t, true /* noOverlay */) {
+		t.Run(name, func(t *testing.T) {
+			conf.TestOnlyRestoreDecodeStart = config.RestoreDecodeStartLastContainer
+			testMultiContainerCheckpointRestore(t, conf, statefile.CompressionLevelNone)
+		})
+	}
+}
+
+// TestMultiContainerCheckpointRestoreEROFS is
+// TestMultiContainerCheckpointRestore with an EROFS image as the root
+// container's rootfs. When the kernel state is decoded as soon as the first
+// container registers, the image FD is not available yet during the decode.
+func TestMultiContainerCheckpointRestoreEROFS(t *testing.T) {
+	skipIfNotAvailable(t, "mkfs.erofs", "busybox")
+
+	testDir, err := os.MkdirTemp(testutil.TmpDir(), "erofs_multi_container_restore_test_")
+	if err != nil {
+		t.Fatalf("os.MkdirTemp() failed: %v", err)
+	}
+	defer os.RemoveAll(testDir)
+	rootfsDir, rootfsImage, err := createRootfsEROFS(testDir)
+	if err != nil {
+		t.Fatalf("failed to create EROFS rootfs image: %v", err)
+	}
+	for name, conf := range configs(t, true /* noOverlay */) {
+		t.Run(name, func(t *testing.T) {
+			testMultiContainerCheckpointRestoreSpecs(t, conf, statefile.CompressionLevelNone, func(ss []*specs.Spec) {
+				root := ss[0]
+				root.Process.Args = []string{"/busybox", "sleep", "1000"}
+				root.Root = &specs.Root{Path: rootfsDir}
+				root.Annotations[sentryapi.RootfsPrefix+"type"] = erofs.Name
+				root.Annotations[sentryapi.RootfsPrefix+"source"] = rootfsImage
+				root.Annotations[sentryapi.RootfsPrefix+"overlay"] = config.MemoryOverlay.String()
+			})
+		})
+	}
+}
+
 func testMultiContainerCheckpointRestore(t *testing.T, conf *config.Config, compression statefile.CompressionLevel) {
+	testMultiContainerCheckpointRestoreSpecs(t, conf, compression, nil)
+}
+
+// testMultiContainerCheckpointRestoreSpecs is testMultiContainerCheckpointRestore
+// with a hook that modifies the container specs before they are started.
+func testMultiContainerCheckpointRestoreSpecs(t *testing.T, conf *config.Config, compression statefile.CompressionLevel, modifySpecs func([]*specs.Spec)) {
 	rootDir, cleanup, err := testutil.SetupRootDir()
 	if err != nil {
 		t.Fatalf("error creating root dir: %v", err)
@@ -147,6 +197,9 @@ func testMultiContainerCheckpointRestore(t *testing.T, conf *config.Config, comp
 		[]string{"bash", "-c", script},
 		sleepCmd,
 	)
+	if modifySpecs != nil {
+		modifySpecs(testSpecs)
+	}
 
 	conts, cleanup, err := startContainers(conf, testSpecs, ids)
 	if err != nil {

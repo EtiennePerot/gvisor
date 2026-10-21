@@ -443,6 +443,10 @@ type Config struct {
 	// TestOnlyAutosaveResume indicates save resume for syscall tests.
 	TestOnlyAutosaveResume bool `flag:"TESTONLY-autosave-resume"`
 
+	// TestOnlyRestoreDecodeStart overrides when a multi-container restore
+	// starts decoding the kernel state.
+	TestOnlyRestoreDecodeStart RestoreDecodeStart `flag:"TESTONLY-restore-decode-start"`
+
 	// RestoreSpecValidation indicates the level of spec validation to be
 	// performed during restore.
 	RestoreSpecValidation RestoreSpecValidationPolicy `flag:"restore-spec-validation"`
@@ -1590,6 +1594,59 @@ func (p RestoreSpecValidationPolicy) String() string {
 		return "enforce"
 	default:
 		panic(fmt.Sprintf("invalid restore spec validation policy %d", p))
+	}
+}
+
+// RestoreDecodeStart dictates when a multi-container restore starts decoding
+// the kernel state.
+type RestoreDecodeStart int
+
+// RestoreDecodeStart values.
+const (
+	// RestoreDecodeStartAuto starts decoding when the first container
+	// registers, unless the decode may need resources that only later
+	// containers provide, in which case it starts when the last container
+	// registers.
+	RestoreDecodeStartAuto RestoreDecodeStart = iota
+
+	// RestoreDecodeStartLastContainer always starts decoding when the last
+	// container registers.
+	RestoreDecodeStartLastContainer
+)
+
+// Set implements flag.Value. Set(String()) should be idempotent.
+func (s *RestoreDecodeStart) Set(v string) error {
+	switch v {
+	case "auto":
+		*s = RestoreDecodeStartAuto
+	case "last-container":
+		*s = RestoreDecodeStartLastContainer
+	default:
+		return fmt.Errorf("invalid restore decode start %q", v)
+	}
+	return nil
+}
+
+// Ptr returns a pointer to `s`.
+// Useful in flag declaration line.
+func (s RestoreDecodeStart) Ptr() *RestoreDecodeStart {
+	return &s
+}
+
+// Get implements flag.Get.
+func (s *RestoreDecodeStart) Get() any {
+	return *s
+}
+
+// String implements flag.String.
+func (s RestoreDecodeStart) String() string {
+	switch s {
+	case RestoreDecodeStartAuto:
+		return "auto"
+	case RestoreDecodeStartLastContainer:
+		return "last-container"
+	default:
+		panic(fmt.Sprintf("invalid restore decode start %d", s))
 	}
 }
 

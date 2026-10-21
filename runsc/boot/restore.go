@@ -31,6 +31,7 @@ import (
 	"gvisor.dev/gvisor/pkg/devutil"
 	"gvisor.dev/gvisor/pkg/errors/linuxerr"
 	"gvisor.dev/gvisor/pkg/fd"
+	"gvisor.dev/gvisor/pkg/fdnotifier"
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/sentry/checkpoint"
 	"gvisor.dev/gvisor/pkg/sentry/control"
@@ -266,6 +267,10 @@ type restorer struct {
 
 	// rootFsOutputTar is the file to write the rootfs upper layer tar archive to.
 	rootFsOutputTar *os.File
+
+	// early is set if the kernel state started to be decoded when the first
+	// container registered. See earlyDecode.
+	early *earlyDecode
 }
 
 // restoreSubcontainer restores a subcontainer.
@@ -338,6 +343,12 @@ func (r *restorer) restoreContainerInfo(l *Loader, info *containerInfo) error {
 
 	// Non-container-specific restore work:
 
+	if len(r.containers) == 1 && r.earlyDecodeAllowed(l) {
+		// Overlap decoding the kernel state with the creation of the other
+		// containers.
+		r.startEarlyDecode(l)
+	}
+
 	if len(r.containers) == r.totalContainers {
 		// Trigger the restore if this is the last container.
 		if err := r.restore(l); err != nil {
@@ -352,14 +363,268 @@ type restoreMounts struct {
 	mfmap             map[checkpoint.ResourceID]*pgalloc.MemoryFile
 	sharedMfs         map[string]bool
 	fsCheckpointedMfs map[checkpoint.ResourceID]struct{}
+
+	// deferredMFs, if not nil, holds placeholders for private memory files
+	// that were needed before they were created (see earlyDecode).
+	deferredMFs *pgalloc.DeferredMemoryFiles
+}
+
+func newRestoreMounts() restoreMounts {
+	return restoreMounts{
+		fdmap:             make(map[checkpoint.ResourceID]int),
+		mfmap:             make(map[checkpoint.ResourceID]*pgalloc.MemoryFile),
+		sharedMfs:         make(map[string]bool),
+		fsCheckpointedMfs: make(map[checkpoint.ResourceID]struct{}),
+	}
 }
 
 func (r *restoreMounts) String() string {
 	return fmt.Sprintf("fdmap: %#v, mfmap: %v, fsCheckpointedMfs: %v", r.fdmap, r.mfmap, r.fsCheckpointedMfs)
 }
 
+// earlyDecode is a decode of the kernel state that started when the first of
+// several containers registered, so that it overlaps with the creation of the
+// other containers (in particular, their runsc invocations and gofers).
+//
+// The decode cannot use restore resources that later containers provide.
+// They are resolved once all containers have registered:
+//   - host FDs, by host.DeferredFDRemaps;
+//   - private (filestore-backed) memory files, by
+//     pgalloc.DeferredMemoryFiles;
+//   - gofer and EROFS image FDs, by vfs.CompleteRestore in
+//     Kernel.FinishLoadFrom.
+//
+// The kernel being decoded only replaces Loader.k in restorer.restore(), so
+// that control RPCs keep seeing the old, paused kernel until then.
+type earlyDecode struct {
+	// restoreMnts is used by the decode and only populated by
+	// restorer.restore() once the decode is done.
+	restoreMnts restoreMounts
+	deferredFDs *host.DeferredFDRemaps
+	timeline    *timing.Timeline
+
+	// done is closed when the decode goroutine is finished. The following
+	// fields are set by that goroutine and must only be accessed after done
+	// is closed:
+	//   - err is the decode error.
+	//   - k is the kernel that was decoded.
+	//   - ctx is the restore context, which refers to restoreMnts.
+	//   - closeFiles closes files opened before installing seccomp filters.
+	done       chan struct{}
+	err        error
+	k          *kernel.Kernel
+	ctx        context.Context
+	closeFiles func()
+
+	finishOnce sync.Once
+}
+
+// finish ends the work started by startEarlyDecode, once the kernel has been
+// restored or the restore has failed.
+//
+// Preconditions: e.done is closed.
+func (e *earlyDecode) finish() {
+	e.finishOnce.Do(func() {
+		e.timeline.End()
+		e.closeFiles()
+		fdnotifier.Resume()
+	})
+}
+
+// earlyDecodeAllowed returns true if the kernel state can be decoded when the
+// first container registers, i.e. if the decode cannot need restore resources
+// that only later containers provide and earlyDecode cannot defer.
+func (r *restorer) earlyDecodeAllowed(l *Loader) bool {
+	conf := l.root.conf
+	switch {
+	case conf.TestOnlyRestoreDecodeStart == config.RestoreDecodeStartLastContainer:
+		return false
+	case r.totalContainers < 2:
+		// Nothing to overlap with.
+		return false
+	case r.extractRootFsMode:
+		// This uses Kernel.ExtractRootfsUpperLayer instead of LoadFrom.
+		return false
+	case l.fsRestore != nil:
+		// Memory files restored from filesystem checkpoints are loaded with
+		// their container.
+		return false
+	case specutils.NVProxyEnabled(l.root.spec, conf), specutils.TPUProxyEnabled(l.root.spec, conf):
+		// Device proxies restore their state using each container's device
+		// gofer connection.
+		return false
+	case l.cpuQuota > 0 && l.cpuQuota < l.cpuPeriod:
+		// The decode is CPU-bound and single-threaded. With a CPU quota of
+		// less than one CPU, it exhausts the quota of every CFS period by
+		// itself, and the sandbox work that registers the other containers is
+		// throttled until the next period. This delays the restore by more
+		// than the overlap saves.
+		return false
+	}
+	return true
+}
+
+// newRestoreKernel creates the platform and the kernel to restore into.
+func (r *restorer) newRestoreKernel(l *Loader, timer *timing.Timer) (*kernel.Kernel, error) {
+	tscOffset, willJumpBackwards := r.computeTSCOffset()
+	p, err := createPlatform(l.root.conf, l.root.applicationCores, r.deviceFile, l.sandboxID, timer, &l.pinRing, tscOffset)
+	if err != nil {
+		return nil, fmt.Errorf("creating platform: %v", err)
+	}
+	if _, ok := p.(platform.TSCAdjustablePlatform); !ok && willJumpBackwards {
+		log.Warningf("Platform %q does not support TSC offsetting; host TSC is behind snapshot base cycle, timestamps will go backwards", l.root.conf.Platform)
+	}
+
+	// Start the old watchdog before replacing it with a new one in restore().
+	l.watchdog.Start()
+
+	k := &kernel.Kernel{
+		Platform: p,
+	}
+	k.SetMemoryFile(r.mainMF)
+	return k, nil
+}
+
+// installRestoreKernel releases the current kernel and replaces it with k. It
+// returns the NVIDIA driver version of the released kernel.
+func installRestoreKernel(l *Loader, k *kernel.Kernel) nvconf.DriverVersion {
+	var oldNvidiaDriverVersion nvconf.DriverVersion
+	if l.k != nil {
+		oldNvidiaDriverVersion = l.k.NvidiaDriverVersion
+		l.k.Release()
+	}
+	l.k = k
+	return oldNvidiaDriverVersion
+}
+
+// installRestoreSeccompFilters installs seccomp filters for restoring into a
+// kernel using platform p, after opening the files that cannot be opened
+// under them. The returned function closes these files; it must be called
+// once the kernel is restored.
+func installRestoreSeccompFilters(l *Loader, p platform.Platform) (func(), error) {
+	if l.root.conf.ProfileEnable {
+		// pprof.Initialize opens /proc/self/maps, so has to be called before
+		// installing seccomp filters.
+		pprof.Initialize()
+	}
+
+	closeFiles := func() {}
+	if l.root.conf.Network == config.NetworkHost {
+		devFile, err := os.Open("/proc/net/dev")
+		if err != nil {
+			log.Warningf("Failed to open /proc/net/dev during restore: %v", err)
+		} else {
+			l.hostinetNetDevFile = devFile
+		}
+		snmpFile, err := os.Open("/proc/net/snmp")
+		if err != nil {
+			log.Warningf("Failed to open /proc/net/snmp during restore: %v", err)
+		} else {
+			l.hostinetNetSNMPFile = snmpFile
+		}
+		closeFiles = func() {
+			if l.hostinetNetDevFile != nil {
+				l.hostinetNetDevFile.Close()
+				l.hostinetNetDevFile = nil
+			}
+			if l.hostinetNetSNMPFile != nil {
+				l.hostinetNetSNMPFile.Close()
+				l.hostinetNetSNMPFile = nil
+			}
+		}
+	}
+
+	if err := l.pinRing.Finalize(); err != nil {
+		log.Warningf("Cannot pin files to the pin ring: %v. This slows down gVisor sandbox teardown.", err)
+	}
+
+	// Seccomp filters have to be applied before vfs restore and before parsing
+	// the state file.
+	if err := l.installSeccompFilters(p); err != nil {
+		closeFiles()
+		return func() {}, err
+	}
+	return closeFiles, nil
+}
+
+// startEarlyDecode starts decoding the kernel state in the background. See
+// earlyDecode.
+//
+// Preconditions: r.mu is locked.
+func (r *restorer) startEarlyDecode(l *Loader) {
+	e := &earlyDecode{
+		restoreMnts: newRestoreMounts(),
+		deferredFDs: &host.DeferredFDRemaps{},
+		timeline:    r.timer.Fork("kernel load"),
+		closeFiles:  func() {},
+		done:        make(chan struct{}),
+	}
+	e.restoreMnts.deferredMFs = &pgalloc.DeferredMemoryFiles{}
+	r.early = e
+	r.timer.Reached("early decode started")
+
+	// Kernel.FinishLoadFrom requires fdnotifier to stay paused until it
+	// returns; e.finish resumes it.
+	fdnotifier.Pause()
+	go func() {
+		defer close(e.done)
+		e.err = r.runEarlyDecode(l, e)
+		if e.err != nil {
+			log.Warningf("Early decode of the kernel state failed: %v", e.err)
+		}
+	}()
+}
+
+// runEarlyDecode is the background part of startEarlyDecode.
+func (r *restorer) runEarlyDecode(l *Loader, e *earlyDecode) error {
+	// r.timer belongs to the goroutine handling container registrations.
+	k, err := r.newRestoreKernel(l, nil /* timer */)
+	if err != nil {
+		return err
+	}
+	closeFiles, err := installRestoreSeccompFilters(l, k.Platform)
+	if err != nil {
+		return err
+	}
+	e.closeFiles = closeFiles
+	e.timeline.Reached("kernel created")
+	e.k = k
+	e.ctx = context.WithValues(k.SupervisorContext(), map[any]any{
+		vfs.CtxRestoreFilesystemFDMap:     e.restoreMnts.fdmap,
+		pgalloc.CtxMemoryFileMap:          e.restoreMnts.mfmap,
+		devutil.CtxDevGoferClientProvider: k,
+		host.CtxDeferredFDRemaps:          e.deferredFDs,
+		pgalloc.CtxDeferredMemoryFiles:    e.restoreMnts.deferredMFs,
+	})
+	return k.DecodeFrom(e.ctx, r.stateFile, e.timeline)
+}
+
+// abortEarlyDecode cleans up after an early decode once it is done, if the
+// restore fails before restorer.restore() finishes it.
+func (r *restorer) abortEarlyDecode() {
+	r.mu.Lock()
+	e := r.early
+	r.mu.Unlock()
+	if e != nil {
+		go func() {
+			<-e.done
+			e.finish()
+		}()
+	}
+}
+
 func (r *restorer) restore(l *Loader) error {
 	log.Infof("Starting to restore %d containers", len(r.containers))
+
+	e := r.early
+	if e != nil {
+		// Whatever happens, wait for the decode to finish: until then, it uses
+		// e.restoreMnts and the state file.
+		defer func() {
+			<-e.done
+			e.finish()
+		}()
+	}
 
 	// Validate the container specs to ensure they did not meaningfully change
 	// between checkpoint and restore.
@@ -380,68 +645,30 @@ func (r *restorer) restore(l *Loader) error {
 	}
 	r.timer.Reached("specs validated")
 
-	tscOffset, willJumpBackwards := r.computeTSCOffset()
-	p, err := createPlatform(l.root.conf, l.root.applicationCores, r.deviceFile, l.sandboxID, r.timer, &l.pinRing, tscOffset)
-	if err != nil {
-		return fmt.Errorf("creating platform: %v", err)
-	}
-	if _, ok := p.(platform.TSCAdjustablePlatform); !ok && willJumpBackwards {
-		log.Warningf("Platform %q does not support TSC offsetting; host TSC is behind snapshot base cycle, timestamps will go backwards", l.root.conf.Platform)
-	}
-
-	// Start the old watchdog before replacing it with a new one below.
-	l.watchdog.Start()
-
-	// Release the kernel and replace it with a new one that will be restored into.
-	var oldNvidiaDriverVersion nvconf.DriverVersion
-	if l.k != nil {
-		oldNvidiaDriverVersion = l.k.NvidiaDriverVersion
-		l.k.Release()
-	}
-	l.k = &kernel.Kernel{
-		Platform: p,
-	}
-	l.k.SetMemoryFile(r.mainMF)
-
-	if l.root.conf.ProfileEnable {
-		// pprof.Initialize opens /proc/self/maps, so has to be called before
-		// installing seccomp filters.
-		pprof.Initialize()
-	}
-
-	if l.root.conf.Network == config.NetworkHost {
-		devFile, err := os.Open("/proc/net/dev")
-		if err != nil {
-			log.Warningf("Failed to open /proc/net/dev during restore: %v", err)
-		} else {
-			l.hostinetNetDevFile = devFile
+	var (
+		oldNvidiaDriverVersion nvconf.DriverVersion
+		restoreMnts            restoreMounts
+	)
+	if e != nil {
+		<-e.done
+		r.timer.Reached("early decode done")
+		if e.err != nil {
+			return fmt.Errorf("failed to load kernel: %w", e.err)
 		}
-		snmpFile, err := os.Open("/proc/net/snmp")
+		oldNvidiaDriverVersion = installRestoreKernel(l, e.k)
+		restoreMnts = e.restoreMnts
+	} else {
+		k, err := r.newRestoreKernel(l, r.timer)
 		if err != nil {
-			log.Warningf("Failed to open /proc/net/snmp during restore: %v", err)
-		} else {
-			l.hostinetNetSNMPFile = snmpFile
+			return err
 		}
-		defer func() {
-			if l.hostinetNetDevFile != nil {
-				l.hostinetNetDevFile.Close()
-				l.hostinetNetDevFile = nil
-			}
-			if l.hostinetNetSNMPFile != nil {
-				l.hostinetNetSNMPFile.Close()
-				l.hostinetNetSNMPFile = nil
-			}
-		}()
-	}
-
-	if err := l.pinRing.Finalize(); err != nil {
-		log.Warningf("Cannot pin files to the pin ring: %v. This slows down gVisor sandbox teardown.", err)
-	}
-
-	// Seccomp filters have to be applied before vfs restore and before parsing
-	// the state file.
-	if err := l.installSeccompFilters(); err != nil {
-		return err
+		oldNvidiaDriverVersion = installRestoreKernel(l, k)
+		closeFiles, err := installRestoreSeccompFilters(l, k.Platform)
+		defer closeFiles()
+		if err != nil {
+			return err
+		}
+		restoreMnts = newRestoreMounts()
 	}
 
 	l.mu.Lock()
@@ -450,12 +677,6 @@ func (r *restorer) restore(l *Loader) error {
 	})
 	defer cu.Clean()
 
-	restoreMnts := restoreMounts{
-		fdmap:             make(map[checkpoint.ResourceID]int),
-		mfmap:             make(map[checkpoint.ResourceID]*pgalloc.MemoryFile),
-		sharedMfs:         make(map[string]bool),
-		fsCheckpointedMfs: make(map[checkpoint.ResourceID]struct{}),
-	}
 	cleanMnts := cleanup.Make(func() {
 		cleanedMFs := make(map[*pgalloc.MemoryFile]struct{})
 		for _, mf := range restoreMnts.mfmap {
@@ -484,6 +705,7 @@ func (r *restorer) restore(l *Loader) error {
 	})
 	defer cleanMnts.Clean()
 
+	var err error
 	for _, cont := range r.containers {
 		// The sandbox has no filesystem or stdios to restore.
 		if l.noRootContainer.enabled && cont.cid == l.root.cid {
@@ -506,15 +728,24 @@ func (r *restorer) restore(l *Loader) error {
 	}
 
 	log.Debugf("Restore using mounts: %v", &restoreMnts)
-	ctx := l.k.SupervisorContext()
-	ctxValues := map[any]any{
-		vfs.CtxRestoreFilesystemFDMap:     restoreMnts.fdmap,
-		pgalloc.CtxMemoryFileMap:          restoreMnts.mfmap,
-		devutil.CtxDevGoferClientProvider: l.k,
-	}
-	ctx = context.WithValues(ctx, ctxValues)
-	if l.fsRestore != nil {
-		ctx = kernel.WithFSRestore(ctx, restoreMnts.fsCheckpointedMfs)
+	var ctx context.Context
+	if e != nil {
+		if err := e.deferredFDs.Apply(restoreMnts.fdmap); err != nil {
+			return fmt.Errorf("failed to remap host FDs: %w", err)
+		}
+		if err := restoreMnts.deferredMFs.CheckResolved(); err != nil {
+			return err
+		}
+		ctx = e.ctx
+	} else {
+		ctx = context.WithValues(l.k.SupervisorContext(), map[any]any{
+			vfs.CtxRestoreFilesystemFDMap:     restoreMnts.fdmap,
+			pgalloc.CtxMemoryFileMap:          restoreMnts.mfmap,
+			devutil.CtxDevGoferClientProvider: l.k,
+		})
+		if l.fsRestore != nil {
+			ctx = kernel.WithFSRestore(ctx, restoreMnts.fsCheckpointedMfs)
+		}
 	}
 
 	if r.asyncMFLoader != nil {
@@ -543,7 +774,13 @@ func (r *restorer) restore(l *Loader) error {
 		r.timer.Reached("rootfs upper layer extracted")
 		return nil
 	}
-	if err := l.k.LoadFrom(ctx, r.stateFile, r.asyncMFLoader, nil, l, clocks, &vfs.CompleteRestoreOptions{}, r.timer.Fork("kernel load")); err != nil {
+	if e != nil {
+		err := l.k.FinishLoadFrom(ctx, r.stateFile, r.asyncMFLoader, nil, l, clocks, &vfs.CompleteRestoreOptions{}, e.timeline)
+		e.finish()
+		if err != nil {
+			return fmt.Errorf("failed to load kernel: %w", err)
+		}
+	} else if err := l.k.LoadFrom(ctx, r.stateFile, r.asyncMFLoader, nil, l, clocks, &vfs.CompleteRestoreOptions{}, r.timer.Fork("kernel load")); err != nil {
 		return fmt.Errorf("failed to load kernel: %w", err)
 	}
 	// Stop the restore if a hash does not cover all of the statefile data.

@@ -51,6 +51,7 @@ go_library(
         "//pkg/errors/linuxerr",
         "//pkg/eventchannel",
         "//pkg/fd",
+        "//pkg/fdnotifier",
         "//pkg/flipcall",
         "//pkg/fspath",
         "//pkg/gomaxprocs",
