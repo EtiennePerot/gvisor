@@ -49,6 +49,7 @@ go_test(
     srcs = [
         "console_test.go",
         "container_save_restore_test.go",
+        "cpuboost_test.go",
         "container_test.go",
         "metric_server_test.go",
         "multi_container_save_restore_test.go",

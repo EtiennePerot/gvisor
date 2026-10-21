@@ -17,6 +17,7 @@ package container
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -406,6 +407,10 @@ func (c *Container) createRoot(conf *config.Config, args Args, sandboxID string)
 		}
 	}
 	c.CompatCgroup = cgroup.CgroupJSON{Cgroup: subCgroup}
+	// Raise the CPU limit while the sandbox is created, starting with its
+	// gofer.
+	boost := sandbox.BoostCPU(conf, containerCgroup, sandboxID)
+	defer boost.End()
 	mountHints, err := sentryapi.NewPodMountHints(args.Spec)
 	if err != nil {
 		return parentCgroup, fmt.Errorf("error creating pod mount hints: %w", err)
@@ -452,6 +457,7 @@ func (c *Container) createRoot(conf *config.Config, args Args, sandboxID string)
 			FSRestoreImagePaths: args.FSRestoreImagePaths,
 			FSRestoreDirect:     args.FSRestoreDirect,
 			NoRootContainer:     args.NoRootContainer,
+			CPUBoost:            boost,
 		}
 		sand, err := sandbox.New(conf, sandArgs)
 		if err != nil {
@@ -511,6 +517,9 @@ func (c *Container) Restore(conf *config.Config, imagePath string, direct, backg
 }
 
 func (c *Container) startImpl(conf *config.Config, action string, startRoot func(conf *config.Config, spec *specs.Spec) error, startSub func(spec *specs.Spec, conf *config.Config, cid string, stdios, goferFiles, goferFilestores []*os.File, devIOFile *os.File, goferConfs []specutils.GoferMountConf) error) error {
+	endBoost := cleanup.Make(c.boostCPUForStart(conf, action).End)
+	defer endBoost.Clean()
+
 	if err := c.Saver.lock(BlockAcquire); err != nil {
 		return err
 	}
@@ -575,6 +584,8 @@ func (c *Container) startImpl(conf *config.Config, action string, startRoot func
 			return err
 		}
 	}
+	// The container runs: end the boost.
+	endBoost.Clean()
 
 	// "If any poststart hook fails, the runtime MUST generate an error,
 	// stop the container, and continue the lifecycle at step 12" - OCI spec.
@@ -600,6 +611,48 @@ func (c *Container) startImpl(conf *config.Config, action string, startRoot func
 	// Set container's oom_score_adj to the gofer since it is dedicated to
 	// the container, in case the gofer uses up too much memory.
 	return c.adjustGoferOOMScoreAdj()
+}
+
+// boostCPUForStart raises the sandbox's CPU limit to start or restore c (see
+// sandbox.BoostCPU). It doesn't for a start if an application container
+// already runs in the sandbox, since the boost must not give that container
+// more CPU than its limit. A restore always happens before any container
+// runs.
+func (c *Container) boostCPUForStart(conf *config.Config, action string) *sandbox.CPUBoost {
+	if action == "start" && !specutils.IsRootContainer(c.Spec) && c.otherAppRunning() {
+		return nil
+	}
+	return sandbox.BoostCPU(conf, c.Sandbox.CgroupJSON.Cgroup, c.Sandbox.ID)
+}
+
+// otherAppRunning returns true if an application container of c's sandbox
+// other than c (i.e. not a CRI sandbox container) is running. It reads the
+// containers' state files without locking them, so that it doesn't wait for
+// commands operating on them, and errs on the side of true if it can't read
+// one (e.g. a torn read of a file being written).
+func (c *Container) otherAppRunning() bool {
+	ids, err := listMatch(c.Saver.RootDir, FullID{SandboxID: c.Sandbox.ID})
+	if err != nil {
+		return true
+	}
+	for _, id := range ids {
+		if id.SandboxID != c.Sandbox.ID || id.ContainerID == c.ID {
+			continue
+		}
+		state := StateFile{RootDir: c.Saver.RootDir, ID: id}
+		data, err := os.ReadFile(state.statePath())
+		if os.IsNotExist(err) {
+			continue
+		}
+		var other Container
+		if err != nil || json.Unmarshal(data, &other) != nil {
+			return true
+		}
+		if other.Status == Running && specutils.SpecContainerType(other.Spec) != specutils.ContainerTypeSandbox {
+			return true
+		}
+	}
+	return false
 }
 
 // Run is a helper that calls Create + Start + Wait.
@@ -941,7 +994,19 @@ func (c *Container) Checkpoint(conf *config.Config, imagePath string, opts sandb
 	if err := c.requireStatus("checkpoint", Created, Running, Paused); err != nil {
 		return err
 	}
-	return c.Sandbox.Checkpoint(conf, c.ID, imagePath, opts)
+	boost := sandbox.BoostCPU(conf, c.Sandbox.CgroupJSON.Cgroup, c.Sandbox.ID)
+	if err := c.Sandbox.Checkpoint(conf, c.ID, imagePath, opts); err != nil {
+		boost.End()
+		return err
+	}
+	if !opts.Resume {
+		// The sandbox exits: let it do so with the boost, which ends when
+		// it is destroyed.
+		boost.Release()
+		return nil
+	}
+	boost.End()
+	return nil
 }
 
 // FSSave sends the filesystem checkpointing call to the container.
@@ -1397,6 +1462,8 @@ func (c *Container) stop() error {
 		// Only uninstall parentCgroup for sandbox stop.
 		if c.Sandbox.IsRootContainer(c.ID) {
 			parentCgroup = c.Sandbox.CgroupJSON.Cgroup
+			// The cgroup may outlive the sandbox: don't leave it boosted.
+			sandbox.EndCPUBoost(c.Saver.RootDir, c.Sandbox.ID, parentCgroup)
 		}
 		// Only set sandbox to nil after it has been told to destroy the container.
 		c.Sandbox = nil

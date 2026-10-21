@@ -8,6 +8,7 @@ package(
 go_library(
     name = "sandbox",
     srcs = [
+        "cpuboost.go",
         "network.go",
         "network_unsafe.go",
         "no_xdp.go",
@@ -68,6 +69,7 @@ go_test(
     name = "sandbox_test",
     size = "small",
     srcs = [
+        "cpuboost_test.go",
         "metrics_test.go",
         "network_test.go",
         "sandbox_test.go",

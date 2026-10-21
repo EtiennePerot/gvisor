@@ -233,7 +233,7 @@ func TestCalculateCPUNum(t *testing.T) {
 				cpuQuota:  tc.cpuQuota,
 				cpuPeriod: tc.cpuPeriod,
 			}
-			gotNum, gotQuota, gotPeriod, err := calculateCPUNum(cg, tc.cpuNumFromQuota)
+			gotNum, gotQuota, gotPeriod, err := calculateCPUNum(cg, nil /* boost */, tc.cpuNumFromQuota)
 			if err != nil {
 				t.Fatalf("calculateCPUNum failed: %v", err)
 			}

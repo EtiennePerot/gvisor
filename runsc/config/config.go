@@ -443,6 +443,12 @@ type Config struct {
 	// TestOnlyAutosaveResume indicates save resume for syscall tests.
 	TestOnlyAutosaveResume bool `flag:"TESTONLY-autosave-resume"`
 
+	// TestOnlyLifecycleCPUBoostMilliCPUs overrides the minimum CPU limit of a
+	// sandbox during lifecycle operations, in thousandths of a CPU. 0 disables
+	// the boost, and a negative value selects the default (see
+	// sandbox.BoostCPU).
+	TestOnlyLifecycleCPUBoostMilliCPUs int `flag:"TESTONLY-lifecycle-cpu-boost-millicpus"`
+
 	// RestoreSpecValidation indicates the level of spec validation to be
 	// performed during restore.
 	RestoreSpecValidation RestoreSpecValidationPolicy `flag:"restore-spec-validation"`

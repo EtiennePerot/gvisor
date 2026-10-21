@@ -346,6 +346,10 @@ type Args struct {
 	// NoRootContainer boots without a root container: no gofer FDs, no root
 	// process. See container.Args.NoRootContainer.
 	NoRootContainer bool
+
+	// CPUBoost is the lifecycle CPU boost held while the sandbox is created,
+	// if any. The sandbox is sized from the CPU limit before the boost.
+	CPUBoost *CPUBoost
 }
 
 // New creates the sandbox process. The caller must call Destroy() on the
@@ -1474,7 +1478,7 @@ func (s *Sandbox) createSandboxProcess(conf *config.Config, args *Args, startSyn
 
 	mem := totalSysMem
 	if s.CgroupJSON.Cgroup != nil {
-		cpuNum, cpuQuota, cpuPeriod, err := calculateCPUNum(s.CgroupJSON.Cgroup, conf.CPUNumFromQuota)
+		cpuNum, cpuQuota, cpuPeriod, err := calculateCPUNum(s.CgroupJSON.Cgroup, args.CPUBoost, conf.CPUNumFromQuota)
 		if err != nil {
 			return err
 		}
@@ -1611,20 +1615,26 @@ func spawnFDParking(ring *os.File, pid int) error {
 }
 
 // calculateCPUNum calculates the number of CPUs to configure for the sandbox,
-// along with the cgroup CPU quota and period.
-func calculateCPUNum(cg cgroup.Cgroup, cpuNumFromQuota bool) (int, int64, int64, error) {
+// along with the cgroup CPU quota and period. If boost is not nil, the CPU
+// quota and period are the ones before the boost.
+func calculateCPUNum(cg cgroup.Cgroup, boost *CPUBoost, cpuNumFromQuota bool) (int, int64, int64, error) {
 	cpuNum, err := cg.NumCPU()
 	if err != nil {
 		log.Warningf("Failed to get cpu count from cgroups: %v. Falling back to runtime.NumCPU()", err)
 		cpuNum = runtime.NumCPU()
 	}
-	cpuQuota, err := cg.CPUQuota()
-	if err != nil {
-		return 0, 0, 0, fmt.Errorf("getting raw cpu quota from cgroups: %v", err)
-	}
-	cpuPeriod, err := cg.CPUPeriod()
-	if err != nil {
-		return 0, 0, 0, fmt.Errorf("getting raw cpu period from cgroups: %v", err)
+	var cpuQuota, cpuPeriod int64
+	if boost != nil {
+		if cpuQuota, cpuPeriod, err = boost.Quota(); err != nil {
+			return 0, 0, 0, fmt.Errorf("getting cpu quota before boost: %w", err)
+		}
+	} else {
+		if cpuQuota, err = cg.CPUQuota(); err != nil {
+			return 0, 0, 0, fmt.Errorf("getting raw cpu quota from cgroups: %v", err)
+		}
+		if cpuPeriod, err = cg.CPUPeriod(); err != nil {
+			return 0, 0, 0, fmt.Errorf("getting raw cpu period from cgroups: %v", err)
+		}
 	}
 	if cpuNumFromQuota && cpuQuota > 0 && cpuPeriod > 0 {
 		// Dropping below 2 CPUs can trigger application to disable
