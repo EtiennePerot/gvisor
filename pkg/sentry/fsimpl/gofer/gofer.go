@@ -208,6 +208,16 @@ type filesystem struct {
 	// is immutable.
 	client *lisafs.Client `state:"nosave"`
 
+	// serverReleased is set by ReleaseServers once client has been closed,
+	// before the server is expected to exit. It is never reset; restore
+	// creates a new client. Writes are serialized by renameMu.
+	serverReleased atomicbitops.Bool `state:"nosave"`
+
+	// releasedRoot holds host FDs to the root, if it is a regular file, that
+	// were opened before client was closed. It is immutable after
+	// serverReleased is set.
+	releasedRoot *releasedFileRoot `state:"nosave"`
+
 	// clock is a realtime clock used to set timestamps in file operations.
 	clock ktime.Clock
 
@@ -462,6 +472,12 @@ type InternalFilesystemOptions struct {
 	// TODO(b/354724938): Remove this option once there are no callers who
 	// rely on this behavior.
 	OpenSocketsByConnecting bool
+
+	// If AllowServerRelease is true, ReleaseServers may close the connection
+	// to the server even if the filesystem's root is a directory. It must only
+	// be set if the filesystem can't be modified through its mount; see
+	// ReleaseServers.
+	AllowServerRelease bool
 }
 
 // _V9FS_DEFUID and _V9FS_DEFGID (from Linux's fs/9p/v9fs.h) are the default
@@ -821,12 +837,13 @@ func (fs *filesystem) Release(ctx context.Context) {
 		fs.root.DecRef(ctx)
 	}
 
-	if !fs.iopts.LeakConnection {
+	if !fs.iopts.LeakConnection && !fs.serverReleased.Load() {
 		// Close the connection to the server. This implicitly closes all FDs.
 		if fs.client != nil {
 			fs.client.Close()
 		}
 	}
+	fs.releasedRoot.close()
 
 	fs.vfsfs.VirtualFilesystem().PutAnonBlockDevMinor(fs.devMinor)
 }

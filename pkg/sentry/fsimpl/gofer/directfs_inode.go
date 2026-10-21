@@ -233,6 +233,9 @@ func (fs *filesystem) newDirectfsDentry(controlFD int) (*dentry, error) {
 // Precondition: fs.renameMu is locked.
 func (i *directfsInode) openHandle(ctx context.Context, flags uint32, d *dentry) (handle, error) {
 	parent := d.parent.Load()
+	if parent == nil && i.fs.serverReleased.Load() {
+		return i.openReleasedRoot(flags)
+	}
 	if parent == nil {
 		// This is a mount point. We don't have parent. Fallback to using lisafs.
 		if !i.controlFDLisa.Ok() {
@@ -286,6 +289,9 @@ func (i *directfsInode) openHandle(ctx context.Context, flags uint32, d *dentry)
 
 // Precondition: fs.renameMu is locked.
 func (i *directfsInode) ensureLisafsControlFD(ctx context.Context, d *dentry) error {
+	if i.fs.serverReleased.Load() {
+		return unix.EIO
+	}
 	i.handleMu.Lock()
 	defer d.inode.handleMu.Unlock()
 	if i.controlFDLisa.Ok() {
@@ -579,7 +585,7 @@ func (i *directfsInode) destroy(ctx context.Context) {
 		_ = unix.Close(i.controlFD)
 		i.controlFD = -1
 	}
-	if i.controlFDLisa.Ok() {
+	if i.controlFDLisa.Ok() && !i.fs.serverReleased.Load() {
 		i.controlFDLisa.Close(ctx, true /* flush */)
 	}
 }
@@ -605,6 +611,9 @@ func (i *directfsInode) getXattr(ctx context.Context, name string, size uint64, 
 	if ftype := d.inode.fileType(); ftype == linux.S_IFSOCK || ftype == linux.S_IFLNK {
 		// Sockets and symlinks use O_PATH control FDs. However, fgetxattr(2) fails
 		// with EBADF for O_PATH FDs. Fallback to lisafs.
+		if i.fs.serverReleased.Load() {
+			return "", unix.ENODATA // See ReleaseServers.
+		}
 		if err := i.ensureLisafsControlFD(ctx, d); err != nil {
 			return "", err
 		}
@@ -631,6 +640,9 @@ func (i *directfsInode) setXattr(ctx context.Context, opts *vfs.SetXattrOptions,
 	if ftype := d.inode.fileType(); ftype == linux.S_IFSOCK || ftype == linux.S_IFLNK {
 		// Sockets and symlinks use O_PATH control FDs. However, fsetxattr(2) fails
 		// with EBADF for O_PATH FDs. Fallback to lisafs.
+		if i.fs.serverReleased.Load() {
+			return unix.EOPNOTSUPP // See ReleaseServers.
+		}
 		if err := i.ensureLisafsControlFD(ctx, d); err != nil {
 			return err
 		}
@@ -643,6 +655,9 @@ func (i *directfsInode) listXattr(ctx context.Context, size uint64, d *dentry) (
 	if ftype := d.inode.fileType(); ftype == linux.S_IFSOCK || ftype == linux.S_IFLNK {
 		// Sockets and symlinks use O_PATH control FDs. However, flistxattr(2) fails
 		// with EBADF for O_PATH FDs. Fallback to lisafs.
+		if i.fs.serverReleased.Load() {
+			return nil, nil // See ReleaseServers.
+		}
 		if err := i.ensureLisafsControlFD(ctx, d); err != nil {
 			return nil, err
 		}
@@ -679,6 +694,9 @@ func (i *directfsInode) removeXattr(ctx context.Context, name string, d *dentry)
 	if ftype := d.inode.fileType(); ftype == linux.S_IFSOCK || ftype == linux.S_IFLNK {
 		// Sockets and symlinks use O_PATH control FDs. However, fremovexattr(2) fails
 		// with EBADF for O_PATH FDs. Fallback to lisafs.
+		if i.fs.serverReleased.Load() {
+			return unix.EOPNOTSUPP // See ReleaseServers.
+		}
 		if err := i.ensureLisafsControlFD(ctx, d); err != nil {
 			return err
 		}
@@ -762,6 +780,9 @@ func (i *directfsInode) mknod(ctx context.Context, name string, creds *auth.Cred
 func (i *directfsInode) bindAt(ctx context.Context, name string, creds *auth.Credentials, opts *vfs.MknodOptions, d *dentry) (*dentry, error) {
 	// There are no filesystems mounted in the sandbox process's mount namespace.
 	// So we can't perform absolute path traversals. So fallback to using lisafs.
+	if i.fs.serverReleased.Load() {
+		return nil, unix.EPERM // See ReleaseServers.
+	}
 	if err := i.ensureLisafsControlFD(ctx, d); err != nil {
 		return nil, err
 	}
@@ -861,6 +882,9 @@ func (i *directfsInode) getDirentsLocked(recordDirent func(name string, key inoK
 func (i *directfsInode) connect(ctx context.Context, sockType linux.SockType, euid lisafs.UID, egid lisafs.GID, d *dentry) (int, error) {
 	// There are no filesystems mounted in the sandbox process's mount namespace.
 	// So we can't perform absolute path traversals. So fallback to using lisafs.
+	if i.fs.serverReleased.Load() {
+		return -1, unix.EPERM // See ReleaseServers.
+	}
 	if err := i.ensureLisafsControlFD(ctx, d); err != nil {
 		return -1, err
 	}

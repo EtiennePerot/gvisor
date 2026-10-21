@@ -79,6 +79,7 @@ go_library(
         "inode_refs.go",
         "lisafs_inode.go",
         "regular_file.go",
+        "release.go",
         "revalidate.go",
         "save_restore.go",
         "socket.go",
