@@ -17,7 +17,13 @@
 
 package cpuid
 
-import "context"
+import (
+	"cmp"
+	"context"
+	"encoding/binary"
+	"fmt"
+	"slices"
+)
 
 // Static is a static CPUID function.
 //
@@ -140,4 +146,47 @@ func (s Static) Set(in In, out Out) {
 func (s Static) Query(in In) Out {
 	in.normalize()
 	return s[in]
+}
+
+// staticEntrySize is the size of a Static entry in the form of
+// Static.marshal.
+const staticEntrySize = 6 * 4
+
+// marshal returns s as In.Eax, In.Ecx, Out.Eax, Out.Ebx, Out.Ecx and Out.Edx
+// little-endian uint32s for each entry, sorted by input.
+//
+// This is how FeatureSet saves Static functions: encoding and decoding the map
+// itself (two structs per entry) is much more expensive.
+func (s Static) marshal() []byte {
+	ins := make([]In, 0, len(s))
+	for in := range s {
+		ins = append(ins, in)
+	}
+	slices.SortFunc(ins, func(a, b In) int {
+		return cmp.Or(cmp.Compare(a.Eax, b.Eax), cmp.Compare(a.Ecx, b.Ecx))
+	})
+	b := make([]byte, 0, len(ins)*staticEntrySize)
+	for _, in := range ins {
+		out := s[in]
+		for _, v := range [...]uint32{in.Eax, in.Ecx, out.Eax, out.Ebx, out.Ecx, out.Edx} {
+			b = binary.LittleEndian.AppendUint32(b, v)
+		}
+	}
+	return b
+}
+
+// unmarshalStatic is the inverse of Static.marshal.
+func unmarshalStatic(b []byte) (Static, error) {
+	if len(b)%staticEntrySize != 0 {
+		return nil, fmt.Errorf("invalid static CPUID function length %d", len(b))
+	}
+	s := make(Static, len(b)/staticEntrySize)
+	for ; len(b) > 0; b = b[staticEntrySize:] {
+		var v [6]uint32
+		for i := range v {
+			v[i] = binary.LittleEndian.Uint32(b[4*i:])
+		}
+		s[In{Eax: v[0], Ecx: v[1]}] = Out{Eax: v[2], Ebx: v[3], Ecx: v[4], Edx: v[5]}
+	}
+	return s, nil
 }

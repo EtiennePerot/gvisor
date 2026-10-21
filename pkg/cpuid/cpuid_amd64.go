@@ -43,21 +43,27 @@ type FeatureSet struct {
 	//
 	// This is exported to allow direct calls of the underlying CPUID
 	// function, where required.
-	Function `state:".(Static)"`
+	Function `state:".([]byte)"`
 	// hwCap stores HWCAP1/2 exposed from the elf auxiliary vector.
 	hwCap hwCap
 }
 
-// saveFunction saves the function as a static query.
-func (fs *FeatureSet) saveFunction() Static {
-	if s, ok := fs.Function.(Static); ok {
-		return s
+// saveFunction saves the function as a static query, in the compact form of
+// Static.marshal.
+func (fs *FeatureSet) saveFunction() []byte {
+	s, ok := fs.Function.(Static)
+	if !ok {
+		s = fs.ToStatic()
 	}
-	return fs.ToStatic()
+	return s.marshal()
 }
 
-// loadFunction saves the function as a static query.
-func (fs *FeatureSet) loadFunction(_ context.Context, s Static) {
+// loadFunction loads the function saved by saveFunction.
+func (fs *FeatureSet) loadFunction(_ context.Context, b []byte) {
+	s, err := unmarshalStatic(b)
+	if err != nil {
+		panic(err)
+	}
 	fs.Function = s
 }
 
