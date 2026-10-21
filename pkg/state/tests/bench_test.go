@@ -54,6 +54,25 @@ func buildSliceObject(n int) any {
 	return &s
 }
 
+// buildFieldsObject builds a benchmark object.
+func buildFieldsObject(n int) any {
+	s := make([]*benchFields, 0, n)
+	for i := 0; i < n; i++ {
+		f := &benchFields{
+			U32: uint32(i),
+			U64: uint64(i) << 32,
+			I:   -i,
+			S:   "benchmark",
+			B:   i%2 == 0,
+		}
+		for j := range f.Bytes {
+			f.Bytes[j] = byte(i + j)
+		}
+		s = append(s, f)
+	}
+	return &s
+}
+
 var allObjects = map[string]struct {
 	New func(int) any
 }{
@@ -65,6 +84,9 @@ var allObjects = map[string]struct {
 	},
 	"slice": {
 		New: buildSliceObject,
+	},
+	"fields": {
+		New: buildFieldsObject,
 	},
 }
 
