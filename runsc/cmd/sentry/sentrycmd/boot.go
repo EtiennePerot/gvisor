@@ -34,6 +34,7 @@ import (
 	"gvisor.dev/gvisor/pkg/coretag"
 	"gvisor.dev/gvisor/pkg/cpuid"
 	"gvisor.dev/gvisor/pkg/fd"
+	"gvisor.dev/gvisor/pkg/garbage"
 	"gvisor.dev/gvisor/pkg/hostarch"
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/metric"
@@ -348,6 +349,16 @@ func (b *Boot) willReexec() bool {
 	return false
 }
 
+// startupMemoryLimit bounds the memory that the sandbox may use before its
+// container runs without collecting garbage, so that unexpectedly large
+// startups or restores degrade to normal garbage collection rather than use
+// unbounded memory.
+const startupMemoryLimit = 256 << 20
+
+// startupGCResumeDelay is how long after the container starts garbage
+// collection resumes.
+const startupGCResumeDelay = 500 * time.Millisecond
+
 // Execute implements subcommands.Command.Execute.  It starts a sandbox in a
 // waiting state.
 func (b *Boot) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcommands.ExitStatus {
@@ -361,6 +372,14 @@ func (b *Boot) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcomma
 	timer := starttime.Timer("runsc boot")
 	timer.ReachedAt("Go code running", starttime.GoStartTime())
 	timer.Reached("boot subcommand dispatched")
+
+	// Until the container runs, nearly all memory allocated by the sandbox
+	// (the kernel, or the restored kernel state) stays live, so garbage
+	// collection would find little to free. But the Go runtime would still
+	// collect every time the heap doubles, starting from a few MiB, on the
+	// critical path of the sandbox startup or restore. Suspend collection
+	// until the container runs.
+	garbage.Suspend(startupMemoryLimit)
 
 	if hostPageSize := unix.Getpagesize(); hostPageSize != hostarch.PageSize {
 		util.Fatalf("host page size (%d) does not match compiled page size (%d)", hostPageSize, hostarch.PageSize)
@@ -819,6 +838,14 @@ func (b *Boot) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcomma
 		l.Destroy()
 		util.Fatalf("running sandbox: %v", err)
 	}
+	// Resume garbage collection a little later, so that collecting the
+	// garbage left by startup doesn't compete with the application's first
+	// requests for CPU time. Return that garbage to the host right away:
+	// otherwise, a mostly idle sandbox could keep it for its whole lifetime.
+	time.AfterFunc(startupGCResumeDelay, func() {
+		garbage.Resume()
+		garbage.FreeOSMemory()
+	})
 
 	timer.Log()
 
