@@ -21,8 +21,10 @@
 package garbage
 
 import (
+	"runtime"
 	"runtime/debug"
 
+	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/sync"
 )
 
@@ -41,15 +43,31 @@ var (
 	prevPercent int
 	// +checklocks:mu
 	prevLimit int64
+
+	// abandoned is true if the previous settings were restored early, because
+	// the runtime collected garbage despite the current suspensions.
+	//
+	// +checklocks:mu
+	abandoned bool
+
+	// epoch identifies the current period of suspensions.
+	//
+	// +checklocks:mu
+	epoch uint64
 )
 
 // Suspend disables garbage collection until a matching call to Resume.
 //
 // If memoryLimit is positive, the soft memory limit (see
 // runtime/debug.SetMemoryLimit) is lowered to memoryLimit, if it isn't already
-// lower, until all suspensions are released; past this limit, the runtime
-// collects garbage despite the suspension. Callers should provide a limit
+// lower, until all suspensions are released. Callers should provide a limit
 // unless the suspension is known to be short and to allocate little.
+//
+// Past this limit, the runtime collects garbage despite the suspension. If it
+// does, most of the memory is live and suspending collection no longer saves
+// any work, while collecting near the limit could happen very often. So the
+// previous settings are then restored right away, and further suspensions have
+// no effect until all suspensions are released.
 func Suspend(memoryLimit int64) {
 	mu.Lock()
 	defer mu.Unlock()
@@ -57,6 +75,11 @@ func Suspend(memoryLimit int64) {
 		// SetMemoryLimit with a negative value only returns the current
 		// limit.
 		prevLimit = debug.SetMemoryLimit(-1)
+		abandoned = false
+	}
+	if abandoned {
+		suspensions++
+		return
 	}
 	if memoryLimit > 0 {
 		// Lower the limit before disabling the GC, so that the GC is
@@ -67,6 +90,10 @@ func Suspend(memoryLimit int64) {
 	}
 	if suspensions == 0 {
 		prevPercent = debug.SetGCPercent(-1)
+		// The sentinel is unreachable, so the first collection from now
+		// on calls collected.
+		epoch++
+		runtime.AddCleanup(new(sentinel), collected, epoch)
 	}
 	suspensions++
 }
@@ -81,9 +108,35 @@ func Resume() {
 		panic("garbage.Resume without a matching Suspend")
 	}
 	suspensions--
-	if suspensions == 0 {
-		// Re-enable the GC before lifting the limit; see Suspend.
-		debug.SetGCPercent(prevPercent)
-		debug.SetMemoryLimit(prevLimit)
+	if suspensions == 0 && !abandoned {
+		restoreLocked()
 	}
+}
+
+// +checklocks:mu
+func restoreLocked() {
+	// Re-enable the GC before lifting the limit; see Suspend.
+	debug.SetGCPercent(prevPercent)
+	debug.SetMemoryLimit(prevLimit)
+}
+
+// sentinel contains a pointer so that it isn't allocated by the tiny
+// allocator, whose objects may never be cleaned up.
+type sentinel struct {
+	_ *byte
+}
+
+// collected is called after the first collection following the start of the
+// given epoch.
+func collected(e uint64) {
+	mu.Lock()
+	defer mu.Unlock()
+	if e != epoch || suspensions == 0 || abandoned {
+		return
+	}
+	// Periodic collections don't happen while the GC percent is negative,
+	// so this collection was forced by the memory limit (or runtime.GC).
+	log.Infof("Garbage collection ran while suspended; resuming it early")
+	restoreLocked()
+	abandoned = true
 }

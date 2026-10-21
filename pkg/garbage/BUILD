@@ -9,7 +9,10 @@ go_library(
     name = "garbage",
     srcs = ["garbage.go"],
     visibility = ["//:sandbox"],
-    deps = ["//pkg/sync"],
+    deps = [
+        "//pkg/log",
+        "//pkg/sync",
+    ],
 )
 
 go_test(
