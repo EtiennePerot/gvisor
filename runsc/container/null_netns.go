@@ -61,18 +61,30 @@ func openNullNetNS(path string) (*os.File, error) {
 // future gofers can join it. The process must have been started in a new,
 // empty network namespace, and must not have exited yet.
 //
-// Pinning is not serialized across invocations, so concurrent invocations
-// may stack bind mounts on top of each other.
-// This is OK: all of them pin valid empty network namespaces, and future
-// invocations join whichever one is mounted on top.
-// (Expected to happen very infrequently in practice, as it requires multiple
-// concurrent cold starts using the same shared root directory.)
+// If another invocation has pinned a namespace in the meantime (concurrent
+// cold starts), this is a no-op: the process keeps its own namespace, and
+// future gofers join the already pinned one.
 func pinNullNetNS(conf *config.Config, pid int) error {
 	path := nullNetNSPath(conf)
+	dir := filepath.Dir(path)
 	// Unlike --root, --shared-root is not otherwise created by runsc, and may
 	// point to a directory that doesn't exist yet (e.g. under a fresh /tmp).
-	if err := os.MkdirAll(filepath.Dir(path), 0711); err != nil {
+	if err := os.MkdirAll(dir, 0711); err != nil {
 		return fmt.Errorf("creating shared root directory: %w", err)
+	}
+	// Serialize pinning across invocations, so that concurrent cold starts
+	// don't stack bind mounts, each holding an extra namespace forever.
+	d, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("opening shared root directory: %w", err)
+	}
+	defer d.Close()
+	if err := unix.Flock(int(d.Fd()), unix.LOCK_EX); err != nil {
+		return fmt.Errorf("locking shared root directory: %w", err)
+	}
+	if nsFile, err := openNullNetNS(path); err == nil {
+		_ = nsFile.Close()
+		return nil
 	}
 	f, err := os.OpenFile(path, os.O_RDONLY|os.O_CREATE, 0444)
 	if err != nil {

@@ -315,8 +315,8 @@ const NullNetNSFilename = "null-netns"
 // Must be called before removing a shared root (or runtime root) directory,
 // which would otherwise fail with `EBUSY`.
 func UnmountNullNetNS(sharedRootDir string) {
-	// Namespace creation isn't serialized across invocations, so concurrent
-	// creations may stack bind mounts on the same path.
+	// Older runsc versions didn't serialize pinning across invocations, so
+	// concurrent cold starts may have stacked bind mounts on the same path.
 	// So loop until none are left.
 	path := filepath.Join(sharedRootDir, NullNetNSFilename)
 	for unix.Unmount(path, unix.MNT_DETACH) == nil {

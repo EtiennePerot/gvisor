@@ -3294,6 +3294,82 @@ func TestSharedRootNullNetNS(t *testing.T) {
 	}
 }
 
+// TestSharedRootNullNetNSConcurrent checks that concurrent cold starts using
+// the same --shared-root pin a single network namespace.
+func TestSharedRootNullNetNSConcurrent(t *testing.T) {
+	sharedRoot, err := os.MkdirTemp(testutil.TmpDir(), "shared-root")
+	if err != nil {
+		t.Fatalf("os.MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() {
+		specutils.UnmountNullNetNS(sharedRoot)
+		os.RemoveAll(sharedRoot)
+	})
+
+	const n = 8
+	var (
+		wg         sync.WaitGroup
+		mu         sync.Mutex
+		containers []*Container
+	)
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		spec, conf := sleepSpecConf(t)
+		conf.SharedRootDir = sharedRoot
+		conf.GoferNetworkNamespace = config.GoferNetworkNamespaceNull
+		_, bundleDir, cleanup, err := testutil.SetupContainer(spec, conf)
+		if err != nil {
+			t.Fatalf("error setting up container: %v", err)
+		}
+		defer cleanup()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c, err := New(conf, Args{
+				ID:        testutil.RandomContainerID(),
+				Spec:      spec,
+				BundleDir: bundleDir,
+			})
+			if err != nil {
+				errs <- fmt.Errorf("error creating container: %v", err)
+				return
+			}
+			mu.Lock()
+			containers = append(containers, c)
+			mu.Unlock()
+			if err := c.Start(conf); err != nil {
+				errs <- fmt.Errorf("error starting container: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	// Destroy containers before their root directories are cleaned up.
+	defer func() {
+		for _, c := range containers {
+			c.Destroy()
+		}
+	}()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+
+	// Exactly one namespace must be pinned: after unmounting it, nothing
+	// else may be mounted at the null netns path. (Counting entries in
+	// mountinfo would be fooled by mount propagation.)
+	nsPath := filepath.Join(sharedRoot, specutils.NullNetNSFilename)
+	if err := unix.Unmount(nsPath, unix.MNT_DETACH); err != nil {
+		t.Fatalf("unmounting %q: %v", nsPath, err)
+	}
+	var st unix.Statfs_t
+	if err := unix.Statfs(nsPath, &st); err != nil {
+		t.Fatalf("statfs %q: %v", nsPath, err)
+	}
+	if st.Type == unix.NSFS_MAGIC {
+		t.Errorf("more than one network namespace pinned at %q", nsPath)
+	}
+}
+
 func TestRootNotMount(t *testing.T) {
 	appSym, err := testutil.FindFile("test/cmd/test_app/test_app")
 	if err != nil {
