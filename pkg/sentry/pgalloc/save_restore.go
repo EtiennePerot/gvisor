@@ -16,12 +16,14 @@ package pgalloc
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"math"
 	"runtime"
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -182,6 +184,17 @@ type SaveOpts struct {
 	// but may instead improve SaveTo() and LoadFrom() time, and checkpoint
 	// size, if the application has many committed zero pages.
 	ExcludeCommittedZeroPages bool
+
+	// If ReleaseAfterWrite is true and PagesFile is not nil, pages are
+	// decommitted as soon as they have been written to PagesFile. This bounds
+	// memory usage during saving to the subset of pages that have not yet
+	// been written, rather than all of the MemoryFile's committed pages plus
+	// any page cache used by PagesFile, and moves the cost of releasing
+	// memory from MemoryFile destruction (typically at sandbox exit) to
+	// saving. ReleaseAfterWrite may only be set if the MemoryFile's contents
+	// will never be used again after SaveTo, e.g. because the sandbox exits
+	// after saving.
+	ReleaseAfterWrite bool
 }
 
 // SaveTo writes f's state to the given stream.
@@ -218,9 +231,10 @@ func (f *MemoryFile) SaveTo(ctx context.Context, w io.Writer, opts *SaveOpts) er
 			}
 		}
 		amfs = &asyncMemoryFileSave{
-			f:  f,
-			pf: opts.PagesFile,
-			sf: sf,
+			f:                 f,
+			pf:                opts.PagesFile,
+			sf:                sf,
+			releaseAfterWrite: opts.ReleaseAfterWrite,
 		}
 	}
 
@@ -676,6 +690,14 @@ type AsyncPagesFileSave struct {
 	// ops stores all apsOps.
 	ops []apsOp
 
+	// releasable contains MemoryFile ranges that have been written and should
+	// be released (see SaveOpts.ReleaseAfterWrite). releasableBytes is the
+	// total length of ranges added to releasable since the last call to
+	// releaseWritten. retained is scratch space for releaseWritten.
+	releasable      []apsRange
+	releasableBytes uint64
+	retained        []apsRange
+
 	// If err is not nil, it is the error that has terminated async page
 	// saving. Note that unlike AsyncPagesFileLoad.err(),
 	// AsyncPagesFileSave.err is never returned to application syscalls and
@@ -696,6 +718,11 @@ type asyncMemoryFileSave struct {
 	f  *MemoryFile
 	pf *AsyncPagesFileSave
 	sf stateio.SourceFile
+
+	// releaseAfterWrite is initially SaveOpts.ReleaseAfterWrite, and is reset
+	// if releasing pages fails. releaseAfterWrite is exclusive to the async
+	// page saver goroutine.
+	releaseAfterWrite bool
 }
 
 type apsRange struct {
@@ -1003,7 +1030,9 @@ func (apfs *AsyncPagesFileSave) main() {
 		}
 
 		if apfs.qavail == maxParallel {
-			// We are out of work to do.
+			// We are out of work to do. Don't hold on to releasable pages
+			// while waiting for more.
+			apfs.releaseWritten(false /* all */)
 			ev := apfs.stStatus.Wait()
 			if ev&apsSTPending != 0 {
 				// We may have raced with MemoryFile.SaveTo() inserting into
@@ -1016,6 +1045,7 @@ func (apfs *AsyncPagesFileSave) main() {
 					// Enqueue and complete the final write before finalizing.
 					continue
 				}
+				apfs.releaseWritten(true /* all */)
 				if err := apfs.aw.Finalize(); err != nil {
 					apfs.err = fmt.Errorf("stateio.AsyncWriter.Finalize failed: %w", err)
 					return
@@ -1069,8 +1099,81 @@ func (apfs *AsyncPagesFileSave) main() {
 			if full {
 				apfs.bytesFull += op.total
 			}
+			if op.amfs.releaseAfterWrite {
+				for _, fr := range op.frs {
+					apfs.releasable = append(apfs.releasable, apsRange{amfs: op.amfs, FileRange: fr})
+					apfs.releasableBytes += fr.Length()
+				}
+			}
 		}
 		apfs.mu.Unlock()
+		if apfs.releasableBytes >= apsReleaseBatchBytes {
+			apfs.releaseWritten(false /* all */)
+		}
+	}
+}
+
+// apsReleaseBatchBytes is the number of bytes of written MemoryFile ranges
+// that async page saving accumulates before releasing them. Releasing pages in
+// batches allows more ranges to be merged, reducing the number of host
+// syscalls (and corresponding TLB shootdowns) at the cost of a small delay.
+const apsReleaseBatchBytes = 8 << 20
+
+// releaseWritten releases ranges in apfs.releasable. If all is false, parts of
+// ranges that do not span entire huge pages are retained in apfs.releasable
+// for MemoryFiles that expect huge pages, since decommitting part of a huge
+// page requires the host to split it, which is more expensive than freeing it
+// whole. Such ranges are usually merged with adjacent ranges that are written
+// later.
+func (apfs *AsyncPagesFileSave) releaseWritten(all bool) {
+	apfs.releasableBytes = 0
+	if len(apfs.releasable) == 0 {
+		return
+	}
+	// Writes may complete out of order, so sort ranges to merge them.
+	slices.SortFunc(apfs.releasable, func(a, b apsRange) int {
+		return cmp.Compare(a.Start, b.Start)
+	})
+	pending := apfs.releasable[0]
+	for _, r := range apfs.releasable[1:] {
+		if r.amfs == pending.amfs && r.Start == pending.End {
+			pending.End = r.End
+			continue
+		}
+		apfs.release(pending, all)
+		pending = r
+	}
+	apfs.release(pending, all)
+	apfs.releasable, apfs.retained = apfs.retained, apfs.releasable[:0]
+}
+
+// release decommits r's pages, possibly retaining parts of huge pages in
+// apfs.retained as described by releaseWritten.
+func (apfs *AsyncPagesFileSave) release(r apsRange, all bool) {
+	if !r.amfs.releaseAfterWrite {
+		return
+	}
+	if !all && r.amfs.f.opts.ExpectHugepages {
+		start := hostarch.MustHugePageRoundUp(r.Start)
+		end := hostarch.HugePageRoundDown(r.End)
+		if start >= end {
+			apfs.retained = append(apfs.retained, r)
+			return
+		}
+		if r.Start < start {
+			apfs.retained = append(apfs.retained, apsRange{amfs: r.amfs, FileRange: memmap.FileRange{r.Start, start}})
+		}
+		if end < r.End {
+			apfs.retained = append(apfs.retained, apsRange{amfs: r.amfs, FileRange: memmap.FileRange{end, r.End}})
+		}
+		r.FileRange = memmap.FileRange{start, end}
+	}
+	if err := r.amfs.f.decommitFile(r.FileRange); err != nil {
+		// The pages have already been saved, so this only means that memory
+		// is released later, when the MemoryFile is destroyed. Don't retry
+		// for subsequent writes, since they will most likely fail as well.
+		log.Warningf("Async page saving: decommitting MemoryFile(%p) pages %v after write failed, no longer releasing pages after write: %v", r.amfs.f, r.FileRange, err)
+		r.amfs.releaseAfterWrite = false
 	}
 }
 
