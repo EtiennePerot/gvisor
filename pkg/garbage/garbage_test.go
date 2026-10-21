@@ -16,8 +16,10 @@ package garbage
 
 import (
 	"math"
+	"runtime"
 	"runtime/debug"
 	"testing"
+	"time"
 )
 
 func gcPercent() int {
@@ -124,4 +126,54 @@ func TestUnmatchedResumePanics(t *testing.T) {
 		}
 	}()
 	Resume()
+}
+
+// waitForResume forces collections until the GC percent is want.
+func waitForResume(t *testing.T, want int) {
+	t.Helper()
+	for deadline := time.Now().Add(10 * time.Second); gcPercent() != want; {
+		if time.Now().After(deadline) {
+			t.Fatalf("GC percent still %d after collections, want %d", gcPercent(), want)
+		}
+		// Stands in for a collection forced by the memory limit.
+		runtime.GC()
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestCollectionAbandonsSuspension(t *testing.T) {
+	withSettings(t, 50, 1<<40)
+	Suspend(1 << 39)
+	Suspend(0)
+	waitForResume(t, 50)
+	check(t, "after a collection", 50, 1<<40)
+
+	// Suspensions are counted, but have no effect until all are released.
+	Suspend(1 << 38)
+	check(t, "suspended after abandoning", 50, 1<<40)
+	Resume()
+	Resume()
+	debug.SetGCPercent(60)
+	Resume()
+	check(t, "all released", 60, 1<<40)
+
+	// A new suspension after all were released starts afresh.
+	Suspend(1 << 39)
+	check(t, "suspended again", -1, 1<<39)
+	Resume()
+	check(t, "released again", 60, 1<<40)
+}
+
+func TestStaleCollectionIgnored(t *testing.T) {
+	withSettings(t, 100, math.MaxInt64)
+	Suspend(0)
+	Resume()
+	Suspend(0)
+	mu.Lock()
+	stale := epoch - 1
+	mu.Unlock()
+	collected(stale)
+	check(t, "after a collection from an earlier epoch", -1, math.MaxInt64)
+	Resume()
+	check(t, "resumed", 100, math.MaxInt64)
 }
