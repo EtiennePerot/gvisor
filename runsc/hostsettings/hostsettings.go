@@ -310,6 +310,7 @@ func check(conf *config.Config) ([]*Delta, []error) {
 				return "1", true, nil
 			},
 		},
+		cpuGovernorSetting{dir: cpufreqDir},
 	}
 	var deltas []*Delta
 	var errs []error
