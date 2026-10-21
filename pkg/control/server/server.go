@@ -151,6 +151,9 @@ func Create(addr string) (*Server, error) {
 // CreateSocket creates a socket that can be used with control server,
 // but doesn't start control server.  'addr' must be a valid and unique
 // abstract socket name.  Returns socket's FD, -1 in case of error.
+//
+// The socket is already listening, so clients can connect before the control
+// server is started: their connections are queued until it serves them.
 func CreateSocket(addr string) (int, error) {
 	if addr[0] != 0 && len(addr) >= linux.UnixPathMax {
 		// This is not an abstract socket path. It is a filesystem path.
@@ -168,7 +171,7 @@ func CreateSocket(addr string) (int, error) {
 			return -1, fmt.Errorf("socket name %q is too long, use a shorter name", name)
 		}
 	}
-	socket, err := unet.Bind(addr, false)
+	socket, err := unet.BindAndListen(addr, false)
 	if err != nil {
 		return -1, err
 	}
