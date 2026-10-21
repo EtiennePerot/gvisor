@@ -1216,14 +1216,7 @@ func (f *MemoryFile) LoadFrom(ctx context.Context, r io.Reader, opts *LoadOpts) 
 				// empty (async page loading for this MemoryFile finished
 				// before we got here, possibly because the MemoryFile was
 				// empty), we have to do so instead.
-				amfl.minUnloaded.Store(math.MaxUint64)
-				amfl.pf.amfls.Remove(amfl)
-				amfl.f.asyncPageLoad.Store(nil)
-				amfl.timeline.End()
-				if amfl.doneCallback != nil {
-					amfl.doneCallback(nil)
-					amfl.doneCallback = nil
-				}
+				amfl.finishLocked()
 			}
 		}()
 	}
@@ -1935,9 +1928,18 @@ func (apfl *AsyncPagesFileLoad) main() {
 			// likely to be more sensitive to elevated memory latency due to
 			// awaited loads vs. elevated disk latency.
 		amflsLoop:
-			for amfl := apfl.amfls.Front(); amfl != nil; amfl = amfl.Next() {
+			for amfl, next := apfl.amfls.Front(), (*asyncMemoryFileLoad)(nil); amfl != nil; amfl = next {
+				next = amfl.Next()
 				amfl.f.mu.Lock()
 				apfl.mu.Lock()
+				if amfl.lfDone && amfl.unloaded.IsEmpty() {
+					// All remaining unloaded pages became waste, so no read
+					// completion will finish amfl.
+					amfl.finishLocked()
+					apfl.mu.Unlock()
+					amfl.f.mu.Unlock()
+					continue
+				}
 				ulseg := amfl.unloaded.LowerBoundSegment(amfl.minUnstarted)
 				for ulseg.Ok() {
 					ul := ulseg.ValuePtr()
@@ -2082,14 +2084,7 @@ func (apfl *AsyncPagesFileLoad) main() {
 			// accurately if insertions into amfl.unloaded are complete.
 			if amfl.lfDone {
 				if amfl.unloaded.IsEmpty() {
-					amfl.minUnloaded.Store(math.MaxUint64)
-					apfl.amfls.Remove(amfl)
-					amfl.f.asyncPageLoad.Store(nil)
-					amfl.timeline.End()
-					if amfl.doneCallback != nil {
-						amfl.doneCallback(nil)
-						amfl.doneCallback = nil
-					}
+					amfl.finishLocked()
 				} else {
 					amfl.minUnloaded.Store(amfl.unloaded.FirstSegment().Start())
 				}
@@ -2129,6 +2124,29 @@ func (amfl *asyncMemoryFileLoad) cancelWasteLoad(fr memmap.FileRange) {
 			panic(fmt.Sprintf("pages %v becoming waste with %d async load waiters", ulseg.Range(), n))
 		}
 	})
+	if amfl.lfDone && amfl.unloaded.IsEmpty() {
+		// Ask the async page loader goroutine to finish amfl, since there
+		// may be no read completion that would cause it to do so. We can't
+		// do so here since amfl.pf.amflsMu precedes f.mu in lock order.
+		amfl.pf.lfStatus.Notify(aplLFPending)
+	}
+}
+
+// finishLocked marks async page loading for amfl as complete.
+//
+// Preconditions:
+// - amfl.pf.amflsMu and amfl.pf.mu must be locked.
+// - amfl.lfDone == true.
+// - amfl.unloaded.IsEmpty().
+func (amfl *asyncMemoryFileLoad) finishLocked() {
+	amfl.minUnloaded.Store(math.MaxUint64)
+	amfl.pf.amfls.Remove(amfl)
+	amfl.f.asyncPageLoad.Store(nil)
+	amfl.timeline.End()
+	if amfl.doneCallback != nil {
+		amfl.doneCallback(nil)
+		amfl.doneCallback = nil
+	}
 }
 
 type aplUnloadedSetFunctions struct{}

@@ -35,18 +35,30 @@ import (
 // fr is at offset i*PageSize in the pages file.
 func saveWithPagesFile(t *testing.T, f *MemoryFile, fr memmap.FileRange) (meta, pages []byte) {
 	t.Helper()
-	for i := 0; i < int(fr.Length()/hostarch.PageSize); i++ {
-		pwritePage(t, f, fr, i, byte(i+1))
-	}
+	metas, pages := saveAllWithPagesFile(t, []*MemoryFile{f}, []memmap.FileRange{fr})
+	return metas[0], pages
+}
+
+// saveAllWithPagesFile is like saveWithPagesFile, but saves fs[i] (with pages
+// frs[i]) to a single pages file, in order.
+func saveAllWithPagesFile(t *testing.T, fs []*MemoryFile, frs []memmap.FileRange) (metas [][]byte, pages []byte) {
+	t.Helper()
 	var pagesBuf bytes.Buffer
 	saveDone := make(chan error, 1)
 	apfs, err := StartAsyncPagesFileSave(stateio.NewIOWriter(&pagesBuf, 1<<20, 1, 1), func(err error) { saveDone <- err })
 	if err != nil {
 		t.Fatalf("StartAsyncPagesFileSave: %v", err)
 	}
-	var metaBuf bytes.Buffer
-	if err := f.SaveTo(context.Background(), &metaBuf, &SaveOpts{PagesFile: apfs}); err != nil {
-		t.Fatalf("SaveTo: %v", err)
+	for i, f := range fs {
+		fr := frs[i]
+		for i := 0; i < int(fr.Length()/hostarch.PageSize); i++ {
+			pwritePage(t, f, fr, i, byte(i+1))
+		}
+		var metaBuf bytes.Buffer
+		if err := f.SaveTo(context.Background(), &metaBuf, &SaveOpts{PagesFile: apfs}); err != nil {
+			t.Fatalf("SaveTo: %v", err)
+		}
+		metas = append(metas, metaBuf.Bytes())
 	}
 	apfs.MemoryFilesDone()
 	select {
@@ -57,7 +69,7 @@ func saveWithPagesFile(t *testing.T, f *MemoryFile, fr memmap.FileRange) (meta, 
 	case <-time.After(10 * time.Second):
 		t.Fatalf("async pages file save did not complete")
 	}
-	return metaBuf.Bytes(), pagesBuf.Bytes()
+	return metas, pagesBuf.Bytes()
 }
 
 // gatedReaderAt blocks all reads until unblock is closed, then fails reads at
@@ -147,5 +159,54 @@ func TestAsyncLoadFailureWakesSatisfiedWaiters(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatalf("async page loading did not shut down after a failed read")
+	}
+}
+
+// TestAsyncLoadFinishesWhenUnloadedPagesBecomeWaste checks that async page
+// loading for a MemoryFile completes when its remaining unloaded pages become
+// waste while no read for that MemoryFile is in flight.
+func TestAsyncLoadFinishesWhenUnloadedPagesBecomeWaste(t *testing.T) {
+	srcA := newSaveTestMemoryFile(t, false)
+	frA := allocateSaveTestPages(t, srcA)
+	srcB := newSaveTestMemoryFile(t, false)
+	frB := allocateSaveTestPages(t, srcB)
+	metas, pages := saveAllWithPagesFile(t, []*MemoryFile{srcA, srcB}, []memmap.FileRange{frA, frB})
+
+	// One page per read and one read in flight, blocked until unblock is
+	// closed: no page of B can be read before all pages of A are.
+	ra := &gatedReaderAt{r: bytes.NewReader(pages), failOff: -1, unblock: make(chan struct{})}
+	apflDone := make(chan error, 1)
+	apfl, err := StartAsyncPagesFileLoad(stateio.NewIOReader(ra, hostarch.PageSize, 1, 1), func(err error) { apflDone <- err }, nil)
+	if err != nil {
+		t.Fatalf("StartAsyncPagesFileLoad: %v", err)
+	}
+	dstA := newSaveTestMemoryFile(t, false)
+	dstB := newSaveTestMemoryFile(t, false)
+	opts := LoadOpts{PagesFile: apfl}
+	if err := dstA.LoadFrom(context.Background(), bytes.NewReader(metas[0]), &opts); err != nil {
+		t.Fatalf("LoadFrom(A): %v", err)
+	}
+	t.Cleanup(func() { dstA.DecRef(frA) })
+	if err := dstB.LoadFrom(context.Background(), bytes.NewReader(metas[1]), &opts); err != nil {
+		t.Fatalf("LoadFrom(B): %v", err)
+	}
+	apfl.MemoryFilesDone()
+
+	// All of B's pages become waste before any of them is read.
+	dstB.DecRef(frB)
+	close(ra.unblock)
+	select {
+	case err := <-apflDone:
+		if err != nil {
+			t.Fatalf("async page loading failed: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("async page loading did not complete")
+	}
+	if dstA.IsAsyncLoading() {
+		t.Errorf("A: IsAsyncLoading() = true after async page loading completed")
+	}
+	if dstB.IsAsyncLoading() {
+		t.Errorf("B: IsAsyncLoading() = true after async page loading completed")
 	}
 }
