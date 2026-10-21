@@ -233,6 +233,14 @@ func ClockNanosleep(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (
 		return 0, nil, clockNanosleepUntil(t, c, ktime.FromTimespec(req), 0, false)
 	}
 
+	// As in Linux, relative CLOCK_REALTIME sleeps measure elapsed time, so
+	// they are not affected by discontinuous changes to the realtime clock
+	// such as the jump that occurs on restore. This matters in practice since
+	// glibc implements nanosleep(3) with clock_nanosleep(CLOCK_REALTIME).
+	if clockID == linux.CLOCK_REALTIME {
+		c = t.Kernel().MonotonicClock()
+	}
+
 	dur := time.Duration(req.ToNsecCapped()) * time.Nanosecond
 	return 0, nil, clockNanosleepUntil(t, c, c.Now().Add(dur), rem, true)
 }
