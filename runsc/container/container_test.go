@@ -3228,6 +3228,141 @@ func TestGoferExits(t *testing.T) {
 	}
 }
 
+// goferReleaseSpec returns a spec running args whose mounts allow the sandbox
+// to release the container's gofer: the root and the test directory are
+// read-only, and file is bind-mounted read-write at the same path.
+func goferReleaseSpec(file string, args ...string) *specs.Spec {
+	spec := testutil.NewSpecWithArgs(args...)
+	for i := range spec.Mounts {
+		if spec.Mounts[i].Destination == testutil.TmpDir() {
+			spec.Mounts[i].Options = append(spec.Mounts[i].Options, "ro")
+		}
+	}
+	spec.Mounts = append(spec.Mounts, specs.Mount{
+		Type:        "bind",
+		Source:      file,
+		Destination: file,
+	})
+	return spec
+}
+
+// waitForGoferExit waits for c's gofer to exit.
+func waitForGoferExit(t *testing.T, c *Container) {
+	t.Helper()
+	exited := make(chan error, 1)
+	go func() { exited <- blockUntilWaitable(c.GoferPid.Load()) }()
+	select {
+	case err := <-exited:
+		if err != nil && err != unix.ECHILD {
+			t.Fatalf("error waiting for gofer to exit: %v", err)
+		}
+	case <-time.After(pollTimeout):
+		t.Fatalf("gofer still running after %v", pollTimeout)
+	}
+}
+
+// goferRunning returns true if the process pid is running (not a zombie).
+func goferRunning(pid int) bool {
+	status, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	return err == nil && !strings.Contains(string(status), "State:\tZ")
+}
+
+// TestGoferRelease checks that the sandbox releases the gofer of a container
+// whose mounts don't need it after it has started, and that the container can
+// still access its mounts afterwards.
+func TestGoferRelease(t *testing.T) {
+	dir, err := os.MkdirTemp(testutil.TmpDir(), "gofer-release")
+	if err != nil {
+		t.Fatalf("os.MkdirTemp failed: %v", err)
+	}
+	defer os.RemoveAll(dir)
+	file := filepath.Join(dir, "file")
+	if err := os.WriteFile(file, []byte("old\n"), 0666); err != nil {
+		t.Fatalf("os.WriteFile failed: %v", err)
+	}
+	if err := os.Chmod(file, 0666); err != nil {
+		t.Fatalf("os.Chmod failed: %v", err)
+	}
+
+	spec := goferReleaseSpec(file, "sleep", "1000")
+	conf := testutil.TestConfig(t)
+	conf.TestOnlyGoferReleaseDelay = 10 * time.Millisecond
+	_, bundleDir, cleanup, err := testutil.SetupContainer(spec, conf)
+	if err != nil {
+		t.Fatalf("error setting up container: %v", err)
+	}
+	defer cleanup()
+	c, err := New(conf, Args{
+		ID:        testutil.RandomContainerID(),
+		Spec:      spec,
+		BundleDir: bundleDir,
+	})
+	if err != nil {
+		t.Fatalf("error creating container: %v", err)
+	}
+	defer c.Destroy()
+	if err := c.Start(conf); err != nil {
+		t.Fatalf("error starting container: %v", err)
+	}
+	waitForGoferExit(t, c)
+
+	// The mounts, including files that weren't opened before the release, are
+	// still accessible.
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{args: []string{"/bin/ls", "/", "/bin"}, want: "sleep"},
+		{args: []string{"/bin/cat", file}, want: "old"},
+		// The redirection truncates the file at the root of the mount.
+		{args: []string{"/bin/sh", "-c", fmt.Sprintf("echo new > %q; /bin/cat %q", file, file)}, want: "new"},
+		{args: []string{"/bin/sh", "-c", fmt.Sprintf("echo more >> %q; /bin/cat %q", file, file)}, want: "new\nmore"},
+	} {
+		out, err := executeCombinedOutput(conf, c, nil, tc.args[0], tc.args[1:]...)
+		if err != nil {
+			t.Fatalf("exec %v after gofer release: %v, output: %s", tc.args, err, out)
+		}
+		if !strings.Contains(string(out), tc.want) {
+			t.Errorf("exec %v after gofer release = %q, want it to contain %q", tc.args, out, tc.want)
+		}
+	}
+	if got, err := os.ReadFile(file); err != nil || string(got) != "new\nmore\n" {
+		t.Errorf("host file contents = %q, %v, want %q", got, err, "new\nmore\n")
+	}
+}
+
+// TestGoferReleaseWritableMount checks that the sandbox keeps the gofer of a
+// container with a writable directory mount, which may need it.
+func TestGoferReleaseWritableMount(t *testing.T) {
+	spec, conf := sleepSpecConf(t)
+	conf.TestOnlyGoferReleaseDelay = 10 * time.Millisecond
+	_, bundleDir, cleanup, err := testutil.SetupContainer(spec, conf)
+	if err != nil {
+		t.Fatalf("error setting up container: %v", err)
+	}
+	defer cleanup()
+	c, err := New(conf, Args{
+		ID:        testutil.RandomContainerID(),
+		Spec:      spec,
+		BundleDir: bundleDir,
+	})
+	if err != nil {
+		t.Fatalf("error creating container: %v", err)
+	}
+	defer c.Destroy()
+	if err := c.Start(conf); err != nil {
+		t.Fatalf("error starting container: %v", err)
+	}
+
+	time.Sleep(time.Second)
+	if pid := c.GoferPid.Load(); !goferRunning(pid) {
+		t.Fatalf("gofer (PID %d) exited", pid)
+	}
+	if out, err := executeCombinedOutput(conf, c, nil, "/bin/ls", testutil.TmpDir()); err != nil {
+		t.Fatalf("exec ls: %v, output: %s", err, out)
+	}
+}
+
 func TestRootNotMount(t *testing.T) {
 	appSym, err := testutil.FindFile("test/cmd/test_app/test_app")
 	if err != nil {

@@ -611,6 +611,7 @@ func (c *containerMounter) createMountNamespace(ctx context.Context, spec *specs
 						ContainerName: c.containerName,
 						Path:          "/",
 					},
+					AllowServerRelease: rootfsConf.AllowGoferRelease(c.root.Readonly),
 				},
 			},
 		}
@@ -1128,6 +1129,7 @@ func getMountNameAndOptions(spec *specs.Spec, conf *config.Config, m *mountInfo,
 				ContainerName: containerName,
 				Path:          m.mount.Destination,
 			},
+			AllowServerRelease: m.goferMountConf.AllowGoferRelease(slices.Contains(m.mount.Options, "ro")),
 		}
 
 	case cgroupfs.Name:

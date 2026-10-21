@@ -721,6 +721,13 @@ func (r *restorer) postRestore(k *kernel.Kernel, timeline *timing.Timeline, time
 	r.cm.onRestoreDone(s)
 	timeline.Reached("kernel notified")
 	log.Infof("Restore successful")
+
+	// r.containers is no longer modified once the restore has started.
+	r.cm.l.mu.Lock()
+	for _, info := range r.containers {
+		r.cm.l.scheduleGoferReleaseLocked(info)
+	}
+	r.cm.l.mu.Unlock()
 }
 
 // Calculate the CPU time saved for restore.

@@ -51,6 +51,7 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/devices/rdmaproxy/genericproxy"
 	"gvisor.dev/gvisor/pkg/sentry/fdimport"
 	cgroup2fs "gvisor.dev/gvisor/pkg/sentry/fsimpl/cgroup2fs"
+	"gvisor.dev/gvisor/pkg/sentry/fsimpl/gofer"
 	"gvisor.dev/gvisor/pkg/sentry/fsimpl/host"
 	"gvisor.dev/gvisor/pkg/sentry/fsimpl/tmpfs"
 	"gvisor.dev/gvisor/pkg/sentry/fsimpl/user"
@@ -161,6 +162,11 @@ type containerInfo struct {
 
 	// useCPUNums indicates whether to use platform assigned CPU numbers as CPU numbers in the sentry.
 	useCPUNums bool
+
+	// goferReleased is set once the sandbox has closed its connections to the
+	// container's gofer, so that the gofer is expected to exit. It is
+	// protected by Loader.mu.
+	goferReleased bool
 }
 
 type loaderState int
@@ -1505,6 +1511,9 @@ func (l *Loader) run() error {
 	switch l.state {
 	case created:
 		l.state = started
+		if !l.noRootContainer.enabled {
+			l.scheduleGoferReleaseLocked(&l.root)
+		}
 	case restoringUnstarted:
 		l.state = restoringStarted
 	default:
@@ -1661,7 +1670,35 @@ func (l *Loader) startSubcontainer(spec *specs.Spec, conf *config.Config, cid st
 	l.k.StartProcess(ep.tg)
 	// No more failures from this point on.
 	cu.Release()
+	l.scheduleGoferReleaseLocked(info)
 	return nil
+}
+
+// scheduleGoferReleaseLocked arranges for the sandbox to close its connections
+// to the container's gofer once the container has run for a while, if it can
+// operate without them (see gofer.ReleaseServers), so that the gofer process
+// exits and frees its memory. The delay keeps this off the critical path of
+// container start and restore.
+//
+// +checklocks:l.mu
+func (l *Loader) scheduleGoferReleaseLocked(info *containerInfo) {
+	if !specutils.GoferReleaseEnabled(info.conf) || info.devGoferFD != nil {
+		// The device gofer connection keeps the gofer process alive.
+		return
+	}
+	eid := execID{cid: info.cid}
+	ep := l.processes[eid]
+	gtime.AfterFunc(info.conf.TestOnlyGoferReleaseDelay, func() {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		if ep == nil || l.processes[eid] != ep {
+			return // The container has been destroyed.
+		}
+		if gofer.ReleaseServers(l.k.SupervisorContext(), l.k.VFS(), info.containerName) {
+			info.goferReleased = true
+			log.Infof("Closed the gofer connections of container %q", info.cid)
+		}
+	})
 }
 
 // +checklocks:l.mu
@@ -1811,6 +1848,16 @@ func (l *Loader) startGoferMonitor(info *containerInfo) {
 		})
 		if err != nil {
 			panic(fmt.Sprintf("Error monitoring gofer FDs: %s", err))
+		}
+
+		// The connection may have been closed by the sandbox itself. If so,
+		// this happened while l.mu was held.
+		l.mu.Lock()
+		released := info.goferReleased
+		l.mu.Unlock()
+		if released {
+			log.Infof("Gofer connection of container %q closed after release", info.cid)
+			return
 		}
 
 		tg, _ := l.threadGroupFromID(execID{cid: info.cid})

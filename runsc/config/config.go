@@ -420,6 +420,12 @@ type Config struct {
 	// called. This is useful for tests exercising gVisor panic-reporting.
 	TestOnlyAFSSyscallPanic bool `flag:"TESTONLY-afs-syscall-panic"`
 
+	// TestOnlyGoferReleaseDelay should only be used in tests. It is how long
+	// after a container starts or is restored the sandbox closes its
+	// connections to the container's gofer, if it can operate without them
+	// (see gofer.ReleaseServers), so that the gofer exits. 0 disables this.
+	TestOnlyGoferReleaseDelay time.Duration `flag:"TESTONLY-gofer-release-delay"`
+
 	// explicitlySet contains whether a flag was explicitly set on the command-line from which this
 	// Config was constructed. Nil when the Config was not initialized from a FlagSet.
 	explicitlySet map[string]struct{}

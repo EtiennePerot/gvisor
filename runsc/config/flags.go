@@ -195,6 +195,7 @@ func RegisterFlags(flagSet *flag.FlagSet) {
 	flagSet.Bool("TESTONLY-unsafe-nonroot", false, "TEST ONLY; do not ever use! This skips many security measures that isolate the host from the sandbox.")
 	flagSet.String("TESTONLY-test-name-env", "", "TEST ONLY; do not ever use! Used for automated tests to improve logging.")
 	flagSet.Bool("TESTONLY-afs-syscall-panic", false, "TEST ONLY; do not ever use! Used for tests exercising gVisor panic reporting.")
+	flagSet.Duration("TESTONLY-gofer-release-delay", time.Second, "TEST ONLY; how long after a container starts or is restored the sandbox lets the container's gofer exit, if the sandbox no longer needs it. 0 disables this.")
 	flagSet.String("TESTONLY-autosave-image-path", "", "TEST ONLY; enable auto save for syscall tests and set path for state file.")
 	flagSet.Bool("TESTONLY-autosave-resume", false, "TEST ONLY; enable auto save and resume for syscall tests and set path for state file.")
 

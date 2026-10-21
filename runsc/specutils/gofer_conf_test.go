@@ -16,6 +16,9 @@ package specutils
 
 import (
 	"testing"
+	"time"
+
+	"gvisor.dev/gvisor/runsc/config"
 )
 
 func TestGoferConf(t *testing.T) {
@@ -199,4 +202,69 @@ func TestGoferMountConfSetGet(t *testing.T) {
 			t.Fatalf("Expected lisafs:anon:size=1719, got %s", s)
 		}
 	})
+}
+
+func TestGoferReleaseEnabled(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		conf config.Config
+		want bool
+	}{
+		{
+			name: "default",
+			conf: config.Config{DirectFS: true, TestOnlyGoferReleaseDelay: time.Second},
+			want: true,
+		},
+		{
+			name: "no delay",
+			conf: config.Config{DirectFS: true},
+			want: false,
+		},
+		{
+			name: "no directfs",
+			conf: config.Config{TestOnlyGoferReleaseDelay: time.Second},
+			want: false,
+		},
+		{
+			name: "host UDS open",
+			conf: config.Config{DirectFS: true, TestOnlyGoferReleaseDelay: time.Second, HostUDS: config.HostUDSOpen},
+			want: false,
+		},
+		{
+			name: "host UDS create",
+			conf: config.Config{DirectFS: true, TestOnlyGoferReleaseDelay: time.Second, HostUDS: config.HostUDSCreate},
+			want: false,
+		},
+		{
+			name: "deprecated host UDS flag",
+			conf: config.Config{DirectFS: true, TestOnlyGoferReleaseDelay: time.Second, FSGoferHostUDS: true},
+			want: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := GoferReleaseEnabled(&tc.conf); got != tc.want {
+				t.Errorf("GoferReleaseEnabled(%+v) = %t, want %t", tc.conf, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAllowGoferRelease(t *testing.T) {
+	for _, tc := range []struct {
+		mount    GoferMountConf
+		readOnly bool
+		want     bool
+	}{
+		{mount: GoferMountConf{Lower: Lisafs, Upper: NoOverlay}, readOnly: false, want: false},
+		{mount: GoferMountConf{Lower: Lisafs, Upper: NoOverlay}, readOnly: true, want: true},
+		{mount: GoferMountConf{Lower: Lisafs, Upper: MemoryOverlay}, readOnly: false, want: true},
+		{mount: GoferMountConf{Lower: Lisafs, Upper: SelfOverlay}, readOnly: false, want: true},
+		{mount: GoferMountConf{Lower: Lisafs, Upper: AnonOverlay}, readOnly: false, want: true},
+		{mount: GoferMountConf{Lower: Erofs, Upper: NoOverlay}, readOnly: true, want: false},
+		{mount: GoferMountConf{Lower: NoneLower, Upper: MemoryOverlay}, readOnly: true, want: false},
+	} {
+		if got := tc.mount.AllowGoferRelease(tc.readOnly); got != tc.want {
+			t.Errorf("%+v.AllowGoferRelease(readOnly=%t) = %t, want %t", tc.mount, tc.readOnly, got, tc.want)
+		}
+	}
 }

@@ -386,6 +386,109 @@ func TestCheckpointRestore(t *testing.T) {
 	}
 }
 
+// TestCheckpointRestoreGoferRelease checkpoints a container after the sandbox
+// released its gofer, and checks that the restored container releases its new
+// gofer while the application keeps writing to a file mount.
+func TestCheckpointRestoreGoferRelease(t *testing.T) {
+	conf := testutil.TestConfig(t)
+	conf.TestOnlyGoferReleaseDelay = 10 * time.Millisecond
+
+	dir, err := os.MkdirTemp(testutil.TmpDir(), "checkpoint-test")
+	if err != nil {
+		t.Fatalf("os.MkdirTemp failed: %v", err)
+	}
+	defer os.RemoveAll(dir)
+	if err := os.Chmod(dir, 0777); err != nil {
+		t.Fatalf("error chmoding file: %q, %v", dir, err)
+	}
+	outputPath := filepath.Join(dir, "output")
+	outputFile, err := createWriteableOutputFile(outputPath)
+	if err != nil {
+		t.Fatalf("error creating output file: %v", err)
+	}
+	defer outputFile.Close()
+
+	script := fmt.Sprintf("i=0; while true; do echo $i >> %q; sleep 1; i=$((i+1)); done", outputPath)
+	spec := goferReleaseSpec(outputPath, "bash", "-c", script)
+	_, bundleDir, cleanup, err := testutil.SetupContainer(spec, conf)
+	if err != nil {
+		t.Fatalf("error setting up container: %v", err)
+	}
+	defer cleanup()
+
+	cont, err := New(conf, Args{
+		ID:        testutil.RandomContainerID(),
+		Spec:      spec,
+		BundleDir: bundleDir,
+	})
+	if err != nil {
+		t.Fatalf("error creating container: %v", err)
+	}
+	defer cont.Destroy()
+	if err := cont.Start(conf); err != nil {
+		t.Fatalf("error starting container: %v", err)
+	}
+	waitForGoferExit(t, cont)
+	if err := waitForFileNotEmpty(outputFile); err != nil {
+		t.Fatalf("Failed to wait for output file: %v", err)
+	}
+
+	if err := cont.Checkpoint(conf, dir, sandbox.CheckpointOpts{}); err != nil {
+		t.Fatalf("error checkpointing container: %v", err)
+	}
+	lastNum, err := readOutputNum(outputPath, -1)
+	if err != nil {
+		t.Fatalf("error with outputFile: %v", err)
+	}
+	cont.Destroy()
+	cont = nil
+
+	if err := os.Remove(outputPath); err != nil {
+		t.Fatalf("error removing file")
+	}
+	outputFile2, err := createWriteableOutputFile(outputPath)
+	if err != nil {
+		t.Fatalf("error creating output file: %v", err)
+	}
+	defer outputFile2.Close()
+
+	cont2, err := New(conf, Args{
+		ID:        testutil.RandomContainerID(),
+		Spec:      spec,
+		BundleDir: bundleDir,
+	})
+	if err != nil {
+		t.Fatalf("error creating container: %v", err)
+	}
+	defer cont2.Destroy()
+	if err := cont2.Restore(conf, dir, false /* direct */, false /* background */, nil /* networkArgs */); err != nil {
+		t.Fatalf("error restoring container: %v", err)
+	}
+	waitForGoferExit(t, cont2)
+
+	// The application picks up from where it left off and keeps writing after
+	// the release.
+	firstNum, err := readOutputNum(outputPath, 0)
+	if err != nil {
+		t.Fatalf("error with outputFile: %v", err)
+	}
+	if lastNum+1 != firstNum {
+		t.Errorf("error numbers not in order, previous: %d, next: %d", lastNum, firstNum)
+	}
+	if err := testutil.Poll(func() error {
+		num, err := readOutputNum(outputPath, -1)
+		if err != nil {
+			return err
+		}
+		if num < firstNum+2 {
+			return fmt.Errorf("last number %d, want at least %d", num, firstNum+2)
+		}
+		return nil
+	}, 30*time.Second); err != nil {
+		t.Errorf("application stopped writing after gofer release: %v", err)
+	}
+}
+
 // TestCheckpointRestoreHostname verifies that hostname is updated on restore
 // if it was not changed inside the container, and is NOT updated if it was changed.
 func TestCheckpointRestoreHostname(t *testing.T) {

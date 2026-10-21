@@ -17,6 +17,8 @@ package specutils
 import (
 	"fmt"
 	"strings"
+
+	"gvisor.dev/gvisor/runsc/config"
 )
 
 // GoferMountConfUpperType describes how upper layer is configured for the gofer mount.
@@ -192,6 +194,30 @@ func (g GoferMountConf) ShouldUseLisafs() bool {
 // ShouldUseErofs returns true if an EROFS should be applied.
 func (g GoferMountConf) ShouldUseErofs() bool {
 	return g.Lower == Erofs
+}
+
+// GoferReleaseEnabled returns true if the sandbox may close its connections
+// to a container's gofer once the container has started, if it can operate
+// without them (see gofer.ReleaseServers in the sentry), so that the gofer
+// exits. Whether it can also depends on the container's mounts, see
+// AllowGoferRelease.
+//
+// With directfs, the sentry only needs the gofer to open mount roots, to
+// bind(2), connect(2) and chmod(2) host sockets, and for extended attributes
+// of host sockets and symlinks. When host sockets are disabled, the gofer
+// refuses to bind or connect them, which the sentry can do alone.
+func GoferReleaseEnabled(conf *config.Config) bool {
+	return conf.TestOnlyGoferReleaseDelay > 0 && conf.DirectFS && conf.GetHostUDS() == config.HostUDSNone
+}
+
+// AllowGoferRelease returns true if the sandbox may close its connection to
+// the gofer for this mount if its root is a directory (see
+// GoferReleaseEnabled). readOnly is true if the mount is read-only. Mounts
+// whose root is a regular file can always be released.
+func (g GoferMountConf) AllowGoferRelease(readOnly bool) bool {
+	// chmod(2) of host sockets needs the gofer, but can't reach a mount that is
+	// read-only or the lower layer of an overlay.
+	return g.ShouldUseLisafs() && (readOnly || g.ShouldUseOverlayfs())
 }
 
 // valid returns true if this is a valid gofer mount config.

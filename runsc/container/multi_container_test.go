@@ -2624,6 +2624,65 @@ func TestMultiContainerMultiRootCanHandleFDs(t *testing.T) {
 	})
 }
 
+// TestMultiContainerGoferRelease checks that the sandbox releases the gofer
+// of each container of a pod independently, and that the gofer monitor keeps
+// watching the gofers that were not released.
+func TestMultiContainerGoferRelease(t *testing.T) {
+	rootDir, cleanup, err := testutil.SetupRootDir()
+	if err != nil {
+		t.Fatalf("error creating root dir: %v", err)
+	}
+	defer cleanup()
+	conf := testutil.TestConfig(t)
+	conf.RootDir = rootDir
+	conf.TestOnlyGoferReleaseDelay = 10 * time.Millisecond
+
+	specs, ids := createSpecs(sleepCmd, sleepCmd, sleepCmd)
+	// Containers 0 and 2 have no writable directory mount, so their gofers can
+	// be released. Container 1 keeps its writable test directory.
+	for _, i := range []int{0, 2} {
+		for j := range specs[i].Mounts {
+			if specs[i].Mounts[j].Destination == testutil.TmpDir() {
+				specs[i].Mounts[j].Options = append(specs[i].Mounts[j].Options, "ro")
+			}
+		}
+	}
+	containers, cleanup, err := startContainers(conf, specs, ids)
+	if err != nil {
+		t.Fatalf("error starting containers: %v", err)
+	}
+	defer cleanup()
+
+	waitForGoferExit(t, containers[0])
+	waitForGoferExit(t, containers[2])
+	time.Sleep(time.Second)
+	if pid := containers[1].GoferPid.Load(); !goferRunning(pid) {
+		t.Fatalf("gofer of container 1 (PID %d) exited", pid)
+	}
+	for i, c := range containers {
+		if out, err := executeCombinedOutput(conf, c, nil, "/bin/ls", testutil.TmpDir()); err != nil {
+			t.Fatalf("exec ls in container %d: %v, output: %s", i, err, out)
+		}
+	}
+
+	// Killing the gofer that wasn't released still stops its container, and
+	// only that container.
+	if err := unix.Kill(containers[1].GoferPid.Load(), unix.SIGKILL); err != nil {
+		t.Fatalf("unix.Kill(%d, SIGKILL)=%v", containers[1].GoferPid.Load(), err)
+	}
+	if err := waitForProcessList(containers[1], nil); err != nil {
+		t.Errorf("Container %q was not stopped after gofer death: %v", containers[1].ID, err)
+	}
+	for _, i := range []int{0, 2} {
+		pl := []*controlapi.Process{
+			newProcessBuilder().PID(int32(i + 1)).Cmd("sleep").Process(),
+		}
+		if err := waitForProcessList(containers[i], pl); err != nil {
+			t.Errorf("Container %q was affected by another container: %v", containers[i].ID, err)
+		}
+	}
+}
+
 // Test that container is destroyed when Gofer is killed.
 func TestMultiContainerGoferKilled(t *testing.T) {
 	rootDir, cleanup, err := testutil.SetupRootDir()
