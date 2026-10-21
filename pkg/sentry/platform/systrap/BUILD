@@ -112,6 +112,7 @@ go_test(
     size = "small",
     srcs = [
         "context_queue_test.go",
+        "metrics_test.go",
         "shared_context_test.go",
         "systrap_test.go",
     ],

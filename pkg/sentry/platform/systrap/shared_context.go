@@ -379,10 +379,10 @@ var (
 	handshakeTimeout uint64
 )
 
-// initSleepTimeouts converts deepSleepTimeoutNS and handshakeTimeoutNS from
-// wall-clock durations into cputicks() units using the measured frequency of
-// the cputicks() counter. It must be called once before any stub thread is
-// created.
+// initSleepTimeouts converts deepSleepTimeoutNS, handshakeTimeoutNS and
+// recordingPeriod from wall-clock durations into cputicks() units using the
+// measured frequency of the cputicks() counter. It must be called once before
+// any stub thread is created.
 func initSleepTimeouts() {
 	// cputicksFreq() always returns a non-zero, arch-appropriate frequency:
 	// there is no meaningful cross-platform default, so each architecture is
@@ -391,6 +391,7 @@ func initSleepTimeouts() {
 	const nsPerSec = uint64(1000000000)
 	deepSleepTimeout = max(1, freq*deepSleepTimeoutNS/nsPerSec)
 	handshakeTimeout = max(1, freq*handshakeTimeoutNS/nsPerSec)
+	recordingPeriodTicks = max(1, int64(freq*uint64(recordingPeriod.Nanoseconds())/nsPerSec))
 }
 
 // loop is processing contexts in the queue. Only one instance of it can be
