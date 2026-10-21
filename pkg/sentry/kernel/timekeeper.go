@@ -92,14 +92,6 @@ type Timekeeper struct {
 	// monotonicOffset.
 	saveMonotonic int64
 
-	// saveRealtime is the value of the realtime clock at the time of save.
-	//
-	// It is only valid if restored is non-nil.
-	//
-	// It is only used in SetClocks after restore to compute the new
-	// monotonicOffset.
-	saveRealtime int64
-
 	// mu protects destruction with stop and wg.
 	mu sync.Mutex `state:"nosave"`
 
@@ -214,37 +206,32 @@ func (t *Timekeeper) SetClocks(c sentrytime.Clocks, params *VDSOParamPage) {
 	//
 	// In a fresh (not restored) sentry, monotonic time starts at zero.
 	//
-	// In a restored sentry, monotonic time jumps forward by approximately
-	// the same amount as real time. There are no guarantees here, we are
-	// just making a best-effort attempt to make it appear that the app
-	// was simply not scheduled for a long period, rather than that the
-	// real time clock was changed.
-	//
-	// If real time went backwards, it remains the same.
+	// In a restored sentry, monotonic time continues from its value at
+	// save time: the time spent checkpointed is not counted, just as
+	// CLOCK_MONOTONIC does not count the time a Linux system spends
+	// suspended, and as CRIU restores it using time namespace offsets.
+	// Otherwise, every application timer pending at save time would
+	// expire at once on restore, regardless of how long it had left to
+	// run. Real time, and thus CLOCK_REALTIME-based timers, still reflect
+	// the time spent checkpointed.
 	wantMonotonic := int64(0)
+	if t.restored != nil {
+		wantMonotonic = t.saveMonotonic
+	}
 
 	nowMonotonic, err := t.clocks.GetTime(sentrytime.Monotonic)
 	if err != nil {
 		panic("Unable to get current monotonic time: " + err.Error())
 	}
 
-	nowRealtime, err := t.clocks.GetTime(sentrytime.Realtime)
-	if err != nil {
-		panic("Unable to get current realtime: " + err.Error())
-	}
-
-	if t.restored != nil {
-		wantMonotonic = t.saveMonotonic
-		elapsed := nowRealtime - t.saveRealtime
-		if elapsed > 0 {
-			wantMonotonic += elapsed
-		}
-	}
-
 	t.monotonicOffset = wantMonotonic - nowMonotonic
 
 	if t.restored == nil {
 		// Hold on to the initial "boot" time.
+		nowRealtime, err := t.clocks.GetTime(sentrytime.Realtime)
+		if err != nil {
+			panic("Unable to get current realtime: " + err.Error())
+		}
 		t.bootTime = ktime.FromNanoseconds(nowRealtime)
 	}
 

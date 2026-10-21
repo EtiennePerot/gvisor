@@ -37,10 +37,6 @@ func (t *Timekeeper) beforeSave() {
 	if t.saveMonotonic, err = t.GetTime(time.Monotonic); err != nil {
 		panic("unable to get current monotonic time: " + err.Error())
 	}
-
-	if t.saveRealtime, err = t.GetTime(time.Realtime); err != nil {
-		panic("unable to get current realtime: " + err.Error())
-	}
 }
 
 // afterLoad is invoked by stateify.

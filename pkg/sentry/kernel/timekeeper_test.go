@@ -123,60 +123,73 @@ func TestTimekeeperMonotonicZero(t *testing.T) {
 	}
 }
 
-// TestTimekeeperMonotonicJumpForward tests that monotonic time jumps forward
-// after restore.
-func TestTimekeeperMonotonicForward(t *testing.T) {
-	c := &mockClocks{
-		monotonic: 900000,
-		realtime:  600000,
-	}
+// TestTimekeeperMonotonicRestore tests that monotonic time continues from its
+// save-time value after restore, regardless of how far the host clocks moved.
+func TestTimekeeperMonotonicRestore(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		monotonic int64
+		realtime  int64
+	}{
+		{
+			name:      "time passed",
+			monotonic: 900000,
+			realtime:  600000,
+		},
+		{
+			name:      "host monotonic went backwards",
+			monotonic: 50000,
+			realtime:  600000,
+		},
+		{
+			name:      "realtime went backwards",
+			monotonic: 900000,
+			realtime:  100000,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			c := &mockClocks{
+				monotonic: test.monotonic,
+				realtime:  test.realtime,
+			}
 
-	tk, params := stateTestClocklessTimekeeper(t)
-	tk.restored = make(chan struct{})
-	tk.saveMonotonic = 100000
-	tk.saveRealtime = 400000
-	tk.SetClocks(c, params)
-	defer tk.Destroy()
+			tk, params := stateTestClocklessTimekeeper(t)
+			tk.restored = make(chan struct{})
+			tk.saveMonotonic = 100000
+			tk.SetClocks(c, params)
+			defer tk.Destroy()
 
-	// The monotonic clock should jump ahead by 200000 to 300000.
-	//
-	// The new system monotonic time (900000) is irrelevant to what the app
-	// sees.
-	now, err := tk.GetTime(sentrytime.Monotonic)
-	if err != nil {
-		t.Errorf("GetTime err got %v want nil", err)
-	}
-	if now != 300000 {
-		t.Errorf("GetTime got %d want 300000", now)
-	}
-}
+			// The time spent checkpointed is not visible to the app, and
+			// neither is the new system monotonic time.
+			now, err := tk.GetTime(sentrytime.Monotonic)
+			if err != nil {
+				t.Errorf("GetTime err got %v want nil", err)
+			}
+			if now != 100000 {
+				t.Errorf("GetTime got %d want 100000", now)
+			}
 
-// TestTimekeeperMonotonicJumpBackwards tests that monotonic time does not jump
-// backwards when realtime goes backwards.
-func TestTimekeeperMonotonicJumpBackwards(t *testing.T) {
-	c := &mockClocks{
-		monotonic: 900000,
-		realtime:  400000,
-	}
+			// Monotonic time advances normally from there.
+			c.mu.Lock()
+			c.monotonic += 10
+			c.mu.Unlock()
+			now, err = tk.GetTime(sentrytime.Monotonic)
+			if err != nil {
+				t.Errorf("GetTime err got %v want nil", err)
+			}
+			if now != 100010 {
+				t.Errorf("GetTime got %d want 100010", now)
+			}
 
-	tk, params := stateTestClocklessTimekeeper(t)
-	tk.restored = make(chan struct{})
-	tk.saveMonotonic = 100000
-	tk.saveRealtime = 600000
-	tk.SetClocks(c, params)
-	defer tk.Destroy()
-
-	// The monotonic clock should remain at 100000.
-	//
-	// The new system monotonic time (900000) is irrelevant to what the app
-	// sees and we don't want to jump the monotonic clock backwards like
-	// realtime did.
-	now, err := tk.GetTime(sentrytime.Monotonic)
-	if err != nil {
-		t.Errorf("GetTime err got %v want nil", err)
-	}
-	if now != 100000 {
-		t.Errorf("GetTime got %d want 100000", now)
+			// Realtime is not offset.
+			now, err = tk.GetTime(sentrytime.Realtime)
+			if err != nil {
+				t.Errorf("GetTime err got %v want nil", err)
+			}
+			if now != test.realtime {
+				t.Errorf("GetTime got %d want %d", now, test.realtime)
+			}
+		})
 	}
 }
 

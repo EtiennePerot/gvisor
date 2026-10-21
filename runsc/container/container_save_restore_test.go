@@ -386,6 +386,101 @@ func TestCheckpointRestore(t *testing.T) {
 	}
 }
 
+// TestCheckpointRestoreMonotonicClock verifies that CLOCK_MONOTONIC does not
+// count the time spent checkpointed, so that a timer pending at checkpoint
+// time keeps its remaining time instead of expiring immediately on restore,
+// while CLOCK_REALTIME does count it.
+func TestCheckpointRestoreMonotonicClock(t *testing.T) {
+	const (
+		sleepSecs        = 8
+		checkpointedSecs = 10
+	)
+	// Skip overlay because test requires writing to host file.
+	for name, conf := range configs(t, true /* noOverlay */) {
+		t.Run(name, func(t *testing.T) {
+			dir, err := os.MkdirTemp(testutil.TmpDir(), "checkpoint-test")
+			if err != nil {
+				t.Fatalf("os.MkdirTemp failed: %v", err)
+			}
+			defer os.RemoveAll(dir)
+			if err := os.Chmod(dir, 0777); err != nil {
+				t.Fatalf("error chmoding file: %q, %v", dir, err)
+			}
+			startedPath := filepath.Join(dir, "started")
+			donePath := filepath.Join(dir, "done")
+
+			// sleep(1) waits on CLOCK_MONOTONIC. Write the files with a
+			// rename so that they are never observed partially written.
+			script := fmt.Sprintf("date +%%s > %[1]q.tmp && mv %[1]q.tmp %[1]q && sleep %[3]d && date +%%s > %[2]q.tmp && mv %[2]q.tmp %[2]q", startedPath, donePath, sleepSecs)
+			spec := testutil.NewSpecWithArgs("bash", "-c", script)
+			_, bundleDir, cleanup, err := testutil.SetupContainer(spec, conf)
+			if err != nil {
+				t.Fatalf("error setting up container: %v", err)
+			}
+			defer cleanup()
+
+			args := Args{
+				ID:        testutil.RandomContainerID(),
+				Spec:      spec,
+				BundleDir: bundleDir,
+			}
+			cont, err := New(conf, args)
+			if err != nil {
+				t.Fatalf("error creating container: %v", err)
+			}
+			defer cont.Destroy()
+			if err := cont.Start(conf); err != nil {
+				t.Fatalf("error starting container: %v", err)
+			}
+			if err := waitForFileExist(startedPath); err != nil {
+				t.Fatalf("error waiting for %q: %v", startedPath, err)
+			}
+			if err := cont.Checkpoint(conf, dir, sandbox.CheckpointOpts{}); err != nil {
+				t.Fatalf("error checkpointing container: %v", err)
+			}
+			if _, err := os.Stat(donePath); err == nil {
+				t.Fatalf("sleep %d finished before checkpoint", sleepSecs)
+			}
+			cont.Destroy()
+
+			// Stay checkpointed for longer than the sleep.
+			time.Sleep(checkpointedSecs * time.Second)
+
+			cont2, err := New(conf, args)
+			if err != nil {
+				t.Fatalf("error creating container: %v", err)
+			}
+			defer cont2.Destroy()
+			if err := cont2.Restore(conf, dir, false /* direct */, false /* background */, nil /* networkArgs */); err != nil {
+				t.Fatalf("error restoring container: %v", err)
+			}
+
+			// The sleep must not have expired on restore.
+			time.Sleep(time.Second)
+			if _, err := os.Stat(donePath); err == nil {
+				t.Errorf("sleep %d finished within 1s of restore, CLOCK_MONOTONIC counted the time spent checkpointed", sleepSecs)
+			}
+			if err := waitForFileExist(donePath); err != nil {
+				t.Fatalf("error waiting for %q: %v", donePath, err)
+			}
+
+			// CLOCK_REALTIME counts the time spent checkpointed.
+			started, err := readOutputNum(startedPath, 0)
+			if err != nil {
+				t.Fatalf("error reading %q: %v", startedPath, err)
+			}
+			done, err := readOutputNum(donePath, 0)
+			if err != nil {
+				t.Fatalf("error reading %q: %v", donePath, err)
+			}
+			// Allow 1s for date(1) truncation.
+			if got, want := done-started, sleepSecs+checkpointedSecs-1; got < want {
+				t.Errorf("CLOCK_REALTIME advanced by %ds during the sleep, want >= %ds", got, want)
+			}
+		})
+	}
+}
+
 // TestCheckpointRestoreHostname verifies that hostname is updated on restore
 // if it was not changed inside the container, and is NOT updated if it was changed.
 func TestCheckpointRestoreHostname(t *testing.T) {

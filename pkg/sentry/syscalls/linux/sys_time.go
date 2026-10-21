@@ -131,8 +131,8 @@ func getClock(t *kernel.Task, clockID int32) (ktime.Clock, error) {
 		//	- CLOCK_BOOTTIME should behave as CLOCK_MONOTONIC while also
 		//		including suspend time.
 		//	- gVisor has no concept of suspend/resume.
-		//	- CLOCK_MONOTONIC already includes save/restore time, which is
-		//		the closest to suspend time.
+		//	- Save/restore, the closest to suspend/resume, is excluded
+		//		from both clocks, as CRIU does.
 		return t.Kernel().MonotonicClock(), nil
 	case linux.CLOCK_PROCESS_CPUTIME_ID:
 		return t.ThreadGroup().CPUClock(), nil
