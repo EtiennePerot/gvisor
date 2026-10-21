@@ -1080,3 +1080,109 @@ func TestSealedMapping(t *testing.T) {
 	defer mm2.DecUsers(ctx)
 	wantError(t, linuxerr.EPERM, "child MUnmap(sealed)", mm2.MUnmap(ctx, sealedAddr, pageSize))
 }
+
+// committedBytes returns the number of bytes in mf that are not holes.
+func committedBytes(t *testing.T, mf *pgalloc.MemoryFile) uint64 {
+	t.Helper()
+	var total uint64
+	size := int64(mf.TotalSize())
+	for off := int64(0); off < size; {
+		data, err := unix.Seek(mf.FD(), off, unix.SEEK_DATA)
+		if err == unix.ENXIO {
+			break
+		}
+		if err != nil {
+			t.Fatalf("SEEK_DATA from %#x: %v", off, err)
+		}
+		hole, err := unix.Seek(mf.FD(), data, unix.SEEK_HOLE)
+		if err != nil {
+			t.Fatalf("SEEK_HOLE from %#x: %v", data, err)
+		}
+		total += uint64(hole - data)
+		off = hole
+	}
+	return total
+}
+
+// TestCopyOnWriteSkipsUncommittedPages tests that breaking copy-on-write on
+// sparsely-committed private anonymous memory copies its contents without
+// committing its uncommitted pages in either the source or the copy.
+func TestCopyOnWriteSkipsUncommittedPages(t *testing.T) {
+	if hostarch.HugePageSize > 2<<20 {
+		t.Skipf("huge pages (%d bytes) are too large for this test", hostarch.HugePageSize)
+	}
+	ctx := contexttest.Context(t)
+	mm := testMemoryManager(ctx, t)
+	defer mm.DecUsers(ctx)
+
+	// Map enough memory to contain at least one aligned huge page, and write
+	// one page in every stride.
+	const (
+		length = 3 * hostarch.HugePageSize
+		stride = 16 * hostarch.PageSize
+	)
+	addr, err := mm.MMap(ctx, memmap.MMapOpts{
+		Length:   length,
+		Private:  true,
+		Perms:    hostarch.ReadWrite,
+		MaxPerms: hostarch.AnyAccess,
+	})
+	if err != nil {
+		t.Fatalf("MMap got err %v want nil", err)
+	}
+	want := make([]byte, length)
+	for off := 0; off < length; off += stride {
+		want[off] = 'A'
+		want[off+pageSizeInt-1] = 'Z'
+		if _, err := mm.CopyOut(ctx, addr+hostarch.Addr(off), want[off:off+pageSizeInt], usermem.IOOpts{}); err != nil {
+			t.Fatalf("CopyOut got err %v want nil", err)
+		}
+	}
+
+	mm2, err := mm.Fork(ctx)
+	if err != nil {
+		t.Fatalf("Fork got err %v want nil", err)
+	}
+	defer mm2.DecUsers(ctx)
+
+	// Write to a page in the aligned huge page in the child, causing up to a
+	// huge page around it to be copied.
+	hugeAddr, ok := addr.HugeRoundUp()
+	if !ok {
+		t.Fatalf("%#x overflows when rounded up to a huge page", addr)
+	}
+	before := committedBytes(t, mm.mf)
+	childWant := bytes.Clone(want)
+	writeOff := int(hugeAddr-addr) + stride
+	childWant[writeOff] = 'B'
+	if _, err := mm2.CopyOut(ctx, hugeAddr+stride, childWant[writeOff:writeOff+1], usermem.IOOpts{}); err != nil {
+		t.Fatalf("CopyOut got err %v want nil", err)
+	}
+	parentOff, _ := pmaAt(t, mm, hugeAddr)
+	childOff, _ := pmaAt(t, mm2, hugeAddr)
+	if parentOff == childOff {
+		t.Fatalf("child pma still shares memory with the parent at offset %#x", childOff)
+	}
+	// Only the committed pages in the copied huge page should have been
+	// committed in the copy.
+	if got, max := committedBytes(t, mm.mf)-before, uint64(hostarch.HugePageSize/stride)*pageSize; got > max {
+		t.Errorf("breaking copy-on-write committed %d bytes, want at most %d", got, max)
+	}
+
+	for _, tc := range []struct {
+		name string
+		mm   *MemoryManager
+		want []byte
+	}{
+		{"parent", mm, want},
+		{"child", mm2, childWant},
+	} {
+		got := make([]byte, length)
+		if _, err := tc.mm.CopyIn(ctx, addr, got, usermem.IOOpts{}); err != nil {
+			t.Fatalf("%s: CopyIn got err %v want nil", tc.name, err)
+		}
+		if !bytes.Equal(got, tc.want) {
+			t.Errorf("%s: contents differ after copy-on-write break", tc.name)
+		}
+	}
+}

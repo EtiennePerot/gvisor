@@ -470,20 +470,39 @@ func (mm *MemoryManager) getPMAsInternalLocked(ctx context.Context, vseg vmaIter
 					}
 					// Copy contents.
 					huge := mm.mf.HugepagesEnabled() && copyAR.IsHugePageAligned()
-					reader := safemem.BlockSeqReader{Blocks: mm.internalMappingsLocked(pseg, copyAR)}
-					fr, err := mm.mf.Allocate(uint64(copyAR.Length()), pgalloc.AllocOpts{
-						Kind:       usage.Anonymous,
-						MemCgID:    memCgID,
-						Mode:       pgalloc.AllocateAndWritePopulate,
-						Huge:       huge,
-						Dir:        allocDir,
-						ReaderFunc: reader.ReadToBlocks,
-					})
-					if _, ok := err.(safecopy.BusError); ok {
-						// If we got SIGBUS during the copy, deliver SIGBUS to
-						// userspace (instead of SIGSEGV) if we're breaking
-						// copy-on-write due to application page fault.
-						err = &memmap.BusError{err}
+					allocOpts := pgalloc.AllocOpts{
+						Kind:    usage.Anonymous,
+						MemCgID: memCgID,
+						Huge:    huge,
+						Dir:     allocDir,
+					}
+					var (
+						fr     memmap.FileRange
+						err    error
+						copied bool
+					)
+					if oldpma.private {
+						// copyAR may extend far beyond the pages that are
+						// actually in use (e.g. a sparsely-used heap
+						// across fork()); avoid committing the unused
+						// pages on both sides of the copy. Since private
+						// pages are only written after breaking
+						// copy-on-write, they can't change during the
+						// copy.
+						fr, copied = mm.mf.AllocateSparseCopy(pseg.fileRangeOf(copyAR), allocOpts)
+					}
+					if !copied {
+						reader := safemem.BlockSeqReader{Blocks: mm.internalMappingsLocked(pseg, copyAR)}
+						allocOpts.Mode = pgalloc.AllocateAndWritePopulate
+						allocOpts.ReaderFunc = reader.ReadToBlocks
+						fr, err = mm.mf.Allocate(uint64(copyAR.Length()), allocOpts)
+						if _, ok := err.(safecopy.BusError); ok {
+							// If we got SIGBUS during the copy, deliver SIGBUS
+							// to userspace (instead of SIGSEGV) if we're
+							// breaking copy-on-write due to application page
+							// fault.
+							err = &memmap.BusError{err}
+						}
 					}
 					if fr.Length() == 0 {
 						return pstart, pseg.PrevGap(), err
