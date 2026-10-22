@@ -31,6 +31,7 @@ import (
 	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/rand"
+	"gvisor.dev/gvisor/pkg/rawfile"
 	"gvisor.dev/gvisor/pkg/refs"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
@@ -735,6 +736,170 @@ func TestDispatchPacketFormat(t *testing.T) {
 				t.Errorf("pkt.NetworkProtocolNumber = %d, want %d", pkt.NetworkProtocolNumber, wantProto)
 			}
 		})
+	}
+}
+
+func TestRecvMMsgDispatcherAdapt(t *testing.T) {
+	d := &recvMMsgDispatcher{
+		bufs:    make([]*iovecBuffer, MaxMsgsPerRecv),
+		msgHdrs: make([]rawfile.MMsgHdr, MaxMsgsPerRecv),
+		active:  1,
+	}
+	for i := range d.bufs {
+		d.bufs[i] = newIovecBuffer(BufConfig, false /* skipsVnetHdr */)
+	}
+
+	// Single packets that had to be waited for keep one slot.
+	for i := 0; i < 2*shrinkAfterNonFullReads; i++ {
+		d.adapt(1, true /* waited */)
+	}
+	if d.active != 1 {
+		t.Fatalf("after waited single-packet reads: active = %d, want 1", d.active)
+	}
+
+	// Reads that fill every slot without waiting double the slots, up to
+	// MaxMsgsPerRecv.
+	for _, want := range []int{2, 4, 8, 8} {
+		d.adapt(d.active, false /* waited */)
+		if d.active != want {
+			t.Fatalf("after backlogged read: active = %d, want %d", d.active, want)
+		}
+	}
+
+	// Reads that fill every slot after waiting do not grow the slots, but
+	// reset the shrink countdown, as do full reads.
+	d.active = 2
+	d.adapt(2, true /* waited */)
+	if d.active != 2 {
+		t.Fatalf("after waited full read: active = %d, want 2", d.active)
+	}
+	d.active = MaxMsgsPerRecv
+
+	// Fill all slots, as dispatch does, to check that shrink releases them.
+	for k := range d.msgHdrs {
+		iovecs := d.bufs[k].nextIovecs()
+		d.msgHdrs[k].Msg.Iov = &iovecs[0]
+		d.msgHdrs[k].Msg.SetIovlen(len(iovecs))
+	}
+	for i := 0; i < shrinkAfterNonFullReads-1; i++ {
+		d.adapt(MaxMsgsPerRecv/2, false /* waited */)
+	}
+	d.adapt(MaxMsgsPerRecv, true /* waited */)
+	for i := 0; i < shrinkAfterNonFullReads-1; i++ {
+		d.adapt(1, true /* waited */)
+	}
+	if d.active != MaxMsgsPerRecv {
+		t.Fatalf("before %d consecutive non-full reads: active = %d, want %d", shrinkAfterNonFullReads, d.active, MaxMsgsPerRecv)
+	}
+	d.adapt(1, true /* waited */)
+	if d.active != 1 {
+		t.Fatalf("after %d consecutive non-full reads: active = %d, want 1", shrinkAfterNonFullReads, d.active)
+	}
+	if d.msgHdrs[0].Msg.Iovlen == 0 || d.bufs[0].views[0] == nil {
+		t.Errorf("slot 0 was released")
+	}
+	for k := 1; k < MaxMsgsPerRecv; k++ {
+		if d.msgHdrs[k].Msg.Iovlen != 0 {
+			t.Errorf("slot %d: Iovlen = %d, want 0", k, d.msgHdrs[k].Msg.Iovlen)
+		}
+		for i, v := range d.bufs[k].views {
+			if v != nil {
+				t.Errorf("slot %d: view %d was not released", k, i)
+			}
+		}
+	}
+	d.bufs[0].release()
+}
+
+func TestRecvMMsgDispatcherGrowsAndShrinks(t *testing.T) {
+	fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_DGRAM, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(fds[0])
+	defer unix.Close(fds[1])
+
+	ethHdr := []byte{
+		1, 2, 3, 4, 5, 60,
+		1, 2, 3, 4, 5, 61,
+		8, 0,
+	}
+	seq := byte(0)
+	send := func(n int) {
+		for i := 0; i < n; i++ {
+			data := append(append([]byte(nil), ethHdr...), 0x40, 0, 0, 0, seq)
+			seq++
+			if err := unix.Sendmsg(fds[1], data, nil, nil, 0); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	sink := &fakeNetworkDispatcher{}
+	ld, err := newRecvMMsgDispatcher(fds[0], &endpoint{
+		addr:       tcpip.LinkAddress(ethHdr[:header.EthernetAddressSize]),
+		hdrSize:    len(ethHdr),
+		dispatcher: sink,
+	}, &Options{ProcessorsPerChannel: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := ld.(*recvMMsgDispatcher)
+	defer d.release()
+
+	dispatch := func(wantPkts, wantActive int) {
+		t.Helper()
+		before := len(sink.pkts)
+		if ok, err := d.dispatch(); !ok || err != nil {
+			t.Fatalf("d.dispatch() = %v, %v", ok, err)
+		}
+		if got := len(sink.pkts) - before; got != wantPkts {
+			t.Errorf("dispatch delivered %d packets, want %d", got, wantPkts)
+		}
+		if d.active != wantActive {
+			t.Errorf("after dispatch: active = %d, want %d", d.active, wantActive)
+		}
+	}
+
+	// A backlog of queued packets grows the slots: the reads get 1, 2, 4
+	// and 3 packets.
+	send(10)
+	dispatch(1, 2)
+	dispatch(2, 4)
+	dispatch(4, 8)
+	dispatch(3, 8)
+	for k := 1; k < MaxMsgsPerRecv; k++ {
+		// Small packets only use the first view, so check the last one.
+		if views := d.bufs[k].views; views[len(views)-1] == nil {
+			t.Errorf("slot %d holds no buffers after growing", k)
+		}
+	}
+
+	// Many reads that don't fill all slots go back to one slot. The last
+	// read above was the first of them.
+	for i := 2; i < shrinkAfterNonFullReads; i++ {
+		send(1)
+		dispatch(1, 8)
+	}
+	send(1)
+	dispatch(1, 1)
+	for k := 1; k < MaxMsgsPerRecv; k++ {
+		if views := d.bufs[k].views; views[len(views)-1] != nil {
+			t.Errorf("slot %d holds buffers after shrinking", k)
+		}
+	}
+
+	// Growing again after shrinking refills the released slots.
+	send(3)
+	dispatch(1, 2)
+	dispatch(2, 4)
+
+	// Packets are delivered in order.
+	for i, pkt := range sink.pkts {
+		if got := pkt.Data().AsRange().ToSlice()[4]; got != byte(i) {
+			t.Fatalf("packet %d has sequence number %d", i, got)
+		}
+		pkt.DecRef()
 	}
 }
 

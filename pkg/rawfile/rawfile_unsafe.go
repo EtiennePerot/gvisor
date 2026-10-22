@@ -183,22 +183,32 @@ func BlockingReadvUntilStopped(efd int, fd int, iovecs []unix.Iovec) (int, unix.
 // the file descriptor becomes readable or stop is signalled (efd becomes
 // readable). Returns -1 in the latter case.
 func BlockingRecvMMsgUntilStopped(efd int, fd int, msgHdrs []MMsgHdr) (int, unix.Errno) {
+	n, _, e := BlockingRecvMMsgUntilStoppedWaited(efd, fd, msgHdrs)
+	return n, e
+}
+
+// BlockingRecvMMsgUntilStoppedWaited is like BlockingRecvMMsgUntilStopped,
+// but also reports whether it had to wait for fd to become readable. If it
+// did not, the returned messages were already queued when it was called.
+func BlockingRecvMMsgUntilStoppedWaited(efd int, fd int, msgHdrs []MMsgHdr) (int, bool, unix.Errno) {
+	waited := false
 	for {
 		n, _, e := unix.RawSyscall6(unix.SYS_RECVMMSG, uintptr(fd), uintptr(unsafe.Pointer(&msgHdrs[0])), uintptr(len(msgHdrs)), unix.MSG_DONTWAIT, 0, 0)
 		if e == 0 {
-			return int(n), e
+			return int(n), waited, e
 		}
 
 		if e != 0 && e != unix.EWOULDBLOCK {
-			return 0, e
+			return 0, waited, e
 		}
 
+		waited = true
 		stopped, e := BlockingPollUntilStopped(efd, fd, unix.POLLIN)
 		if stopped {
-			return -1, e
+			return -1, waited, e
 		}
 		if e != 0 && e != unix.EINTR {
-			return 0, e
+			return 0, waited, e
 		}
 	}
 }

@@ -137,10 +137,10 @@ func (b *iovecBuffer) pullBuffer(n int) buffer.Buffer {
 }
 
 func (b *iovecBuffer) release() {
-	for _, v := range b.views {
+	for i, v := range b.views {
 		if v != nil {
 			v.Release()
-			v = nil
+			b.views[i] = nil
 		}
 	}
 }
@@ -229,10 +229,20 @@ type recvMMsgDispatcher struct {
 	bufs []*iovecBuffer
 
 	// msgHdrs is an array of MMsgHdr objects where each MMsghdr is used to
-	// reference an array of iovecs in the iovecs field defined above.  This
-	// array is passed as the parameter to recvmmsg call to retrieve
-	// potentially more than 1 packet per unix.
+	// reference an array of iovecs in the iovecs field defined above. A
+	// prefix of this array is passed as the parameter to recvmmsg call to
+	// retrieve potentially more than 1 packet per unix.
 	msgHdrs []rawfile.MMsgHdr `state:"nosave"`
+
+	// active is the number of slots in bufs and msgHdrs that are passed to
+	// recvmmsg. It is a power of two between 1 and MaxMsgsPerRecv, and
+	// adapts to the receive backlog; see adapt. Slots at or after active
+	// hold no buffers.
+	active int
+
+	// nonFullReads is the number of consecutive reads that returned fewer
+	// than active packets.
+	nonFullReads int
 
 	// pkts is reused to avoid allocations.
 	pkts stack.PacketBufferList
@@ -246,8 +256,13 @@ type recvMMsgDispatcher struct {
 
 const (
 	// MaxMsgsPerRecv is the maximum number of packets we want to retrieve
-	// in a single RecvMMsg call.
+	// in a single RecvMMsg call. It must be a power of two.
 	MaxMsgsPerRecv = 8
+
+	// shrinkAfterNonFullReads is the number of consecutive reads returning
+	// fewer packets than there are active slots after which the
+	// recvMMsgDispatcher goes back to a single slot.
+	shrinkAfterNonFullReads = 256
 )
 
 func newRecvMMsgDispatcher(fd int, e *endpoint, opts *Options) (linkDispatcher, error) {
@@ -261,6 +276,7 @@ func newRecvMMsgDispatcher(fd int, e *endpoint, opts *Options) (linkDispatcher, 
 		e:       e,
 		bufs:    make([]*iovecBuffer, MaxMsgsPerRecv),
 		msgHdrs: make([]rawfile.MMsgHdr, MaxMsgsPerRecv),
+		active:  1,
 	}
 	skipsVnetHdr := d.e.gsoKind == stack.HostGSOSupported
 	for i := range d.bufs {
@@ -287,10 +303,13 @@ func (d *recvMMsgDispatcher) close() {
 // recvMMsgDispatch reads more than one packet at a time from the file
 // descriptor and dispatches it.
 func (d *recvMMsgDispatcher) dispatch() (bool, tcpip.Error) {
-	// Fill message headers.
-	for k := range d.msgHdrs {
-		if d.msgHdrs[k].Msg.Iovlen > 0 {
-			break
+	// Fill message headers. Slots that were not received into by the
+	// previous read are still filled; after adapt grows the number of active
+	// slots, they may be followed by empty slots.
+	msgHdrs := d.msgHdrs[:d.active]
+	for k := range msgHdrs {
+		if msgHdrs[k].Msg.Iovlen > 0 {
+			continue
 		}
 		iovecs := d.bufs[k].nextIovecs()
 		iovLen := len(iovecs)
@@ -299,7 +318,7 @@ func (d *recvMMsgDispatcher) dispatch() (bool, tcpip.Error) {
 		d.msgHdrs[k].Msg.SetIovlen(iovLen)
 	}
 
-	nMsgs, errno := rawfile.BlockingRecvMMsgUntilStopped(d.EFD, d.fd, d.msgHdrs)
+	nMsgs, waited, errno := rawfile.BlockingRecvMMsgUntilStoppedWaited(d.EFD, d.fd, msgHdrs)
 	if errno != 0 {
 		return false, tcpip.TranslateErrno(errno)
 	}
@@ -333,6 +352,42 @@ func (d *recvMMsgDispatcher) dispatch() (bool, tcpip.Error) {
 		}
 	}
 	d.mgr.wakeReady()
+	d.adapt(nMsgs, waited)
 
 	return true, nil
+}
+
+// adapt adjusts the number of active slots after a read that returned n
+// packets, and waited for the first one if waited is true.
+//
+// Each slot holds a receive buffer large enough for a GSO packet (about 64
+// KiB), so the dispatcher starts with a single slot. When a read fills every
+// active slot with packets that were already queued, packets arrive faster
+// than they are read, and the dispatcher doubles its active slots. After many
+// consecutive reads that do not fill every active slot, it goes back to a
+// single slot and releases the buffers of the others. Request/response traffic
+// thus only uses one buffer, while bulk receive gets batching.
+func (d *recvMMsgDispatcher) adapt(n int, waited bool) {
+	if n < d.active {
+		d.nonFullReads++
+		if d.nonFullReads >= shrinkAfterNonFullReads {
+			d.shrink()
+		}
+		return
+	}
+	d.nonFullReads = 0
+	if !waited && d.active < len(d.msgHdrs) {
+		d.active = min(2*d.active, len(d.msgHdrs))
+	}
+}
+
+// shrink goes back to a single active slot and releases the buffers of the
+// other slots.
+func (d *recvMMsgDispatcher) shrink() {
+	for k := 1; k < d.active; k++ {
+		d.bufs[k].release()
+		d.msgHdrs[k].Msg.Iovlen = 0
+	}
+	d.active = 1
+	d.nonFullReads = 0
 }

@@ -284,7 +284,7 @@ var allowedSyscalls = seccomp.MakeSyscallRules(map[uintptr]seccomp.SyscallRule{
 	unix.SYS_RECVMMSG: seccomp.PerArg{
 		seccomp.AnyValue{},
 		seccomp.AnyValue{},
-		seccomp.EqualTo(fdbased.MaxMsgsPerRecv),
+		seccomp.LessThanOrEqual(fdbased.MaxMsgsPerRecv),
 		seccomp.EqualTo(unix.MSG_DONTWAIT),
 		seccomp.EqualTo(0),
 	},
