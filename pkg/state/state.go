@@ -95,9 +95,11 @@ func Save(ctx context.Context, w io.Writer, rootPtr any) (Stats, error) {
 		w:              wire.Writer{Writer: w},
 		types:          makeTypeEncodeDatabase(),
 		zeroValues:     make(map[reflect.Type]*objectEncodeState),
-		pending:        make(map[objectID]*objectEncodeState),
-		encodedStructs: make(map[reflect.Value]*wire.Struct),
+		encodedStructs: make(map[reflect.Value]wire.Object),
+		codecs:         !codecsDisabled,
 	}
+	es.enc.es = &es
+	es.enc.top = true
 
 	// Perform the encoding.
 	err := safely(func() {
@@ -114,7 +116,9 @@ func Load(ctx context.Context, r io.Reader, rootPtr any) (Stats, error) {
 		r:        wire.Reader{Reader: r},
 		types:    makeTypeDecodeDatabase(),
 		deferred: make(map[objectID]wire.Object),
+		codecs:   !codecsDisabled,
 	}
+	ds.dec = Decoder{ds: &ds, r: &ds.r}
 
 	// Attempt our decode.
 	err := safely(func() {

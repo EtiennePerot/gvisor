@@ -1052,6 +1052,9 @@ func Save(w *Writer, obj Object) {
 	case *Complex128:
 		typeComplex128.save(w)
 		x.save(w)
+	case *Raw:
+		x.Tag.save(w)
+		x.save(w)
 	default:
 		panic(fmt.Errorf("unknown type: %#v", obj)) // Escapes: error formatting.
 	}
