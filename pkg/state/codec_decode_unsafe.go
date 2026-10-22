@@ -15,7 +15,9 @@
 package state
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"math"
 	"reflect"
 	"unsafe"
@@ -23,16 +25,25 @@ import (
 	"gvisor.dev/gvisor/pkg/state/wire"
 )
 
-// Tag is the tag of a serialized value. See wire.Tag.
-type Tag = wire.Tag
+// typedDecoder decodes objects in the typed format. Implementations are
+// pointer-shaped types, so that they are stored in interfaces without
+// allocating (unlike closures created by generic functions).
+type typedDecoder interface {
+	decode(d *Decoder, ods *objectDecodeState)
+}
 
-// Decoder decodes values directly from their serialized form. It is used by
-// generated StateDecode methods.
+// arrayDecoder is a typedDecoder for arrays, which can also allocate them.
+type arrayDecoder interface {
+	typedDecoder
+	alloc(n int) unsafe.Pointer
+}
+
+// Decoder decodes values in the typed format. It is used by generated
+// StateDecode methods.
 //
-// Decoding has the same semantics as decodeObject: for example, Nil leaves
-// the destination unchanged, and integers that do not fit their destination
-// are errors. Values that the typed functions don't handle are loaded as
-// wire.Objects and decoded by decodeObject.
+// As with decodeObject, zero values leave the destination unchanged (this
+// matters for the root object, which may already be initialized), and
+// integers that do not fit their destination are errors.
 type Decoder struct {
 	ds *decodeState
 
@@ -41,11 +52,6 @@ type Decoder struct {
 
 	// r is the input stream.
 	r *wire.Reader
-
-	// pendingTag, if hasPendingTag, is the tag of the next value, which has
-	// already been read.
-	pendingTag    Tag
-	hasPendingTag bool
 
 	// lastRef is the object referred to by the last decoded value, as found
 	// by waitObject, or zero.
@@ -57,21 +63,13 @@ func (d *Decoder) Context() context.Context {
 	return d.ds.ctx
 }
 
-// Tag reads the tag of the next value.
-func (d *Decoder) Tag() Tag {
-	if d.hasPendingTag {
-		d.hasPendingTag = false
-		return d.pendingTag
-	}
-	return wire.Tag(wire.ReadUint(d.r))
-}
-
-// uint reads a Uint.
+// uint reads a varint.
 func (d *Decoder) uint() uint64 {
 	return wire.ReadUint(d.r)
 }
 
-// BeginWait starts decoding a field loaded with Source.LoadWait.
+// BeginWait starts decoding a field loaded with Source.LoadWait, or saved
+// through a value.
 func (d *Decoder) BeginWait() {
 	d.lastRef = 0
 }
@@ -83,14 +81,34 @@ func (d *Decoder) EndWait() {
 	}
 }
 
+// EndValue finishes decoding a field saved through a value, returning the
+// object that the field's loader must wait for (see LoadValueNow).
+func (d *Decoder) EndValue() uint32 {
+	return uint32(d.lastRef)
+}
+
+// LoadValueNow returns true if the loader of a field saved through a value,
+// whose decoding returned ref (see EndValue), can run now. Otherwise, the
+// caller must call LoadValueLater.
+func (d *Decoder) LoadValueNow(ref uint32) bool {
+	id := objectID(ref)
+	return id == 0 || id == d.ods.id || id == 1
+}
+
+// LoadValueLater runs fn, the loader of a field saved through a value, once
+// the object ref is complete. See LoadValueNow.
+func (d *Decoder) LoadValueLater(ref uint32, fn func()) {
+	d.ds.wait(d.ods, objectID(ref), fn)
+}
+
 // AfterLoad implements Source.AfterLoad.
 func (d *Decoder) AfterLoad(fn func()) {
-	d.ods.addCallback(userCallback(fn))
+	d.ods.addCallback(callback{fn: fn})
 }
 
 // LoadEncoded loads the next value as a wire.Object, for LoadValue.
 func (d *Decoder) LoadEncoded() wire.Object {
-	return wire.LoadTagged(d.r, d.Tag())
+	return wire.Load(d.r)
 }
 
 // LoadValue implements Source.LoadValue for a value loaded by LoadEncoded.
@@ -113,239 +131,228 @@ func refOf(encoded wire.Object) objectID {
 	return 0
 }
 
-// fallback decodes a value with tag tag into obj using decodeObject.
-func (d *Decoder) fallback(obj reflect.Value, tag Tag) {
-	encoded := wire.LoadTagged(d.r, tag)
+// legacy decodes a tagged wire.Object into obj using decodeObject.
+func (d *Decoder) legacy(obj reflect.Value) {
+	encoded := wire.Load(d.r)
 	d.ds.decodeObject(d.ods, obj, encoded)
 	d.lastRef = refOf(encoded)
 }
 
-// fallbackAt is fallback for the value of type T at p.
-func fallbackAt[T any](d *Decoder, p *T, tag Tag) {
-	d.fallback(reflect.NewAt(typeOf[T](), unsafe.Pointer(p)).Elem(), tag)
-}
-
 // newObject creates the object with the given ID at ptr, of type typ, which
 // will be decoded by dec.
-func (ds *decodeState) newObject(id objectID, ptr unsafe.Pointer, typ reflect.Type, dec objectDecodeFunc, decArg any) *objectDecodeState {
+func (ds *decodeState) newObject(id objectID, ptr unsafe.Pointer, typ reflect.Type, dec typedDecoder, decArg any) *objectDecodeState {
 	ods := ds.addObject(id, reflect.NewAt(typ, ptr).Elem())
 	ods.dec = dec
 	ods.decArg = decArg
-	if encoded, ok := ds.deferred[id]; ok {
-		delete(ds.deferred, id)
-		ds.decodeObject(ods, ods.obj, encoded)
+	// The object may have been written before this reference (see
+	// writeObjects).
+	if len(ds.deferred) != 0 {
+		if encoded, ok := ds.deferred[id]; ok {
+			delete(ds.deferred, id)
+			ds.decodeObject(ods, ods.obj, encoded)
+		}
 	}
+	ds.decodeStandalone(ods)
 	return ods
 }
 
-// readRef reads the contents of a Ref. It returns a non-nil *wire.Ref if the
-// reference has dots.
-func (d *Decoder) readRef() (objectID, *wire.Ref) {
-	root := objectID(d.uint())
-	ndots := d.uint()
-	if ndots == 0 {
-		return root, nil
-	}
-	ref := &wire.Ref{Root: wire.Uint(root), Dots: wire.ReadDots(d.r, ndots)}
-	ref.Type = wire.ReadTypeSpec(d.r)
-	return root, ref
+// ref reads a reference: zero for nil, or an object ID shifted left by one,
+// with the low bit set if dots and a type follow (see writeRef). If dots
+// follow, the caller must call target.
+func (d *Decoder) ref() (root objectID, dots bool) {
+	v := d.uint()
+	return objectID(v >> 1), v&1 != 0
 }
 
-// target returns the address of the object of type typ referred to by ref.
-func (d *Decoder) target(ref *wire.Ref, typ reflect.Type) unsafe.Pointer {
+// target reads the dots and type of a reference to a part of the object
+// root (see ref), of type typ, and returns its address.
+func (d *Decoder) target(root objectID, typ reflect.Type) unsafe.Pointer {
+	ref := &wire.Ref{Root: wire.Uint(root), Dots: wire.ReadDots(d.r, d.uint())}
+	ref.Type = wire.ReadTypeSpec(d.r)
 	return d.ds.register(ref, typ).Addr().UnsafePointer()
 }
 
 // structValue decodes a struct of type typ at p, implementing Codec c.
-func (d *Decoder) structValue(p unsafe.Pointer, typ reflect.Type, c Codec, tag Tag) {
-	if tag != wire.TagStruct {
-		d.fallback(reflect.NewAt(typ, p).Elem(), tag)
-		return
-	}
+func (d *Decoder) structValue(p unsafe.Pointer, typ reflect.Type, c Codec) {
 	ds := d.ds
-	id := typeID(d.uint())
-	if id == 0 {
-		d.ds.decodeStruct(d.ods, reflect.NewAt(typ, p).Elem(), wire.LoadStructFields(d.r, 0))
-		d.lastRef = 0
-		return
-	}
-	rte := ds.types.Lookup(id, typ)
-	if !rte.identity {
-		ds.decodeStruct(d.ods, reflect.NewAt(typ, p).Elem(), wire.LoadStructFields(d.r, wire.TypeID(id)))
-		d.lastRef = 0
-		return
-	}
-	ft := wire.Tag(d.uint())
-	switch n := len(rte.Fields); n {
-	case 0:
-		if ft != wire.TagNoObjects {
-			Failf("type %q has no fields, got %d", rte.Name, ft)
-		}
-	case 1:
-		d.pendingTag, d.hasPendingTag = ft, true
-	default:
-		if ft != wire.TagMultipleObjects {
-			Failf("type %q has %d fields, got %d", rte.Name, n, ft)
-		}
-		if count := d.uint(); count != uint64(n) {
-			Failf("type %q has %d fields, got %d", rte.Name, n, count)
-		}
-	}
-	d.ods.typ = id
 	if ds.stats.enabled {
-		ds.stats.start(id)
+		// Types have no IDs in the typed format: use TypeIndex.
+		index := c.StateTypeIndex().get()
+		for int(index) >= len(ds.typedNames) {
+			ds.typedNames = append(ds.typedNames, "")
+		}
+		ds.typedNames[index] = reverseTypeDatabase[typ].Name
+		ds.stats.start(typeID(index))
 		defer ds.stats.done()
 	}
 	c.StateDecode(ds.ctx, d)
-	if d.hasPendingTag {
-		Failf("type %q: field not decoded", rte.Name)
-	}
 	d.lastRef = 0
 }
 
-// decodeTop decodes the top-level object ods, whose tag has been read. It
-// returns false if ods must be decoded by decodeObject.
-func (ds *decodeState) decodeTop(ods *objectDecodeState, tag Tag) bool {
-	d := &ds.dec
-	if ods.dec != nil {
-		d.ods = ods
-		ods.dec(d, ods, tag)
-		return true
-	}
-	if ods.obj.Kind() != reflect.Struct {
-		return false
-	}
-	c, ok := ods.obj.Addr().Interface().(Codec)
-	if !ok {
-		return false
-	}
+// decodeTop decodes the top-level object ods, in the typed format.
+func (ds *decodeState) decodeTop(d *Decoder, ods *objectDecodeState) {
 	d.ods = ods
-	d.structValue(ods.ptr, ods.obj.Type(), c, tag)
-	return true
+	if ods.dec != nil {
+		ods.dec.decode(d, ods)
+		return
+	}
+	if ods.obj.Kind() == reflect.Struct {
+		if c, ok := ods.obj.Addr().Interface().(Codec); ok {
+			d.structValue(ods.ptr, ods.obj.Type(), c)
+			return
+		}
+	}
+	Failf("no typed decoder for object %d of type %v", ods.id, ods.obj.Type())
+}
+
+// loadStandalone reads the standalone object id (see writeObjects), whose
+// state is ods if it was created already. Structs have their type, so they
+// can be created here. If ods can't be decoded yet, decodeStandalone decodes
+// it once it is created with its decoder, or gets it.
+func (ds *decodeState) loadStandalone(id objectID, ods *objectDecodeState) {
+	spec := wire.ReadTypeSpec(&ds.r)
+	n := wire.ReadUint(&ds.r)
+	if _, ok := spec.(wire.TypeSpecNil); ods == nil && !ok {
+		typ := ds.findType(spec)
+		ods = ds.newObject(id, reflect.New(typ).UnsafePointer(), typ, nil, nil)
+	}
+	if ods != nil && (ods.dec != nil || ods.obj.Kind() == reflect.Struct) {
+		ds.decodeTop(&ds.dec, ods)
+		return
+	}
+	if n > math.MaxInt32 {
+		Failf("invalid object length %d", n)
+	}
+	b := make([]byte, n)
+	wire.ReadFull(&ds.r, b)
+	if ds.standalone == nil {
+		ds.standalone = make(map[objectID][]byte)
+	}
+	ds.standalone[id] = b
+}
+
+// decodeStandalone decodes ods if it is a standalone object read already, and
+// its decoder is known.
+func (ds *decodeState) decodeStandalone(ods *objectDecodeState) {
+	if len(ds.standalone) == 0 || (ods.dec == nil && ods.obj.Kind() != reflect.Struct) {
+		return
+	}
+	b, ok := ds.standalone[ods.id]
+	if !ok {
+		return
+	}
+	delete(ds.standalone, ods.id)
+	r := wire.Reader{Reader: bytes.NewReader(b)}
+	ds.decodeTop(&Decoder{ds: ds, r: &r}, ods)
+}
+
+// setDecoder sets the decoder of ods, created by a reference that didn't
+// provide it.
+func (ds *decodeState) setDecoder(ods *objectDecodeState, dec typedDecoder, decArg any) {
+	ods.dec, ods.decArg = dec, decArg
+	ds.decodeStandalone(ods)
 }
 
 // DecodeBool decodes a bool.
-func DecodeBool[T ~bool](d *Decoder, p *T, tag Tag) {
-	switch tag {
-	case wire.TagNil:
-	case wire.TagBool:
-		*p = d.uint() == 1
-	default:
-		fallbackAt(d, p, tag)
+func DecodeBool[T ~bool](d *Decoder, p *T) {
+	if d.uint() != 0 {
+		*p = true
 	}
 }
 
 // DecodeInt decodes a signed integer.
-func DecodeInt[T Signed](d *Decoder, p *T, tag Tag) {
-	switch tag {
-	case wire.TagNil:
-	case wire.TagInt:
-		v := wire.ReadInt(d.r)
+func DecodeInt[T Signed](d *Decoder, p *T) {
+	if v := wire.ReadInt(d.r); v != 0 {
 		*p = T(v)
 		if int64(*p) != v {
 			Failf("signed integer truncated from %v to %v", v, int64(*p))
 		}
-	default:
-		fallbackAt(d, p, tag)
 	}
 }
 
 // DecodeUint decodes an unsigned integer.
-func DecodeUint[T Unsigned](d *Decoder, p *T, tag Tag) {
-	switch tag {
-	case wire.TagNil:
-	case wire.TagUint:
-		v := d.uint()
+func DecodeUint[T Unsigned](d *Decoder, p *T) {
+	if v := d.uint(); v != 0 {
 		*p = T(v)
 		if uint64(*p) != v {
 			Failf("unsigned integer truncated from %v to %v", v, uint64(*p))
 		}
-	default:
-		fallbackAt(d, p, tag)
 	}
 }
 
+// fixed reads n bytes, without copying them if possible. The returned bytes
+// are valid until the next read.
+func (d *Decoder) fixed(n int) []byte {
+	return wire.ReadFixed(d.r, n)
+}
+
 // DecodeFloat32 decodes a float32.
-func DecodeFloat32[T ~float32](d *Decoder, p *T, tag Tag) {
-	switch tag {
-	case wire.TagNil:
-	case wire.TagFloat32:
-		*p = T(wire.ReadFloat32(d.r))
-	default:
-		fallbackAt(d, p, tag)
+func DecodeFloat32[T ~float32](d *Decoder, p *T) {
+	if v := binary.LittleEndian.Uint32(d.fixed(4)); v != 0 {
+		*p = T(math.Float32frombits(v))
 	}
 }
 
 // DecodeFloat64 decodes a float64.
-func DecodeFloat64[T ~float64](d *Decoder, p *T, tag Tag) {
-	switch tag {
-	case wire.TagNil:
-	case wire.TagFloat64:
-		*p = T(wire.ReadFloat64(d.r))
-	default:
-		fallbackAt(d, p, tag)
+func DecodeFloat64[T ~float64](d *Decoder, p *T) {
+	if v := binary.LittleEndian.Uint64(d.fixed(8)); v != 0 {
+		*p = T(math.Float64frombits(v))
 	}
 }
 
 // DecodeComplex64 decodes a complex64.
-func DecodeComplex64[T ~complex64](d *Decoder, p *T, tag Tag) {
-	switch tag {
-	case wire.TagNil:
-	case wire.TagComplex64:
-		re := wire.ReadFloat32(d.r)
-		im := wire.ReadFloat32(d.r)
-		*p = T(complex(re, im))
-	default:
-		fallbackAt(d, p, tag)
+func DecodeComplex64[T ~complex64](d *Decoder, p *T) {
+	b := d.fixed(8)
+	re, im := binary.LittleEndian.Uint32(b), binary.LittleEndian.Uint32(b[4:])
+	if re != 0 || im != 0 {
+		*p = T(complex(math.Float32frombits(re), math.Float32frombits(im)))
 	}
 }
 
 // DecodeComplex128 decodes a complex128.
-func DecodeComplex128[T ~complex128](d *Decoder, p *T, tag Tag) {
-	switch tag {
-	case wire.TagNil:
-	case wire.TagComplex128:
-		re := wire.ReadFloat64(d.r)
-		im := wire.ReadFloat64(d.r)
-		*p = T(complex(re, im))
-	default:
-		fallbackAt(d, p, tag)
+func DecodeComplex128[T ~complex128](d *Decoder, p *T) {
+	b := d.fixed(16)
+	re, im := binary.LittleEndian.Uint64(b), binary.LittleEndian.Uint64(b[8:])
+	if re != 0 || im != 0 {
+		*p = T(complex(math.Float64frombits(re), math.Float64frombits(im)))
 	}
 }
 
+// string_ reads a string.
+func (d *Decoder) string_() string {
+	n := d.uint()
+	if n == 0 {
+		return ""
+	}
+	if n > math.MaxInt32 {
+		Failf("invalid string length %d", n)
+	}
+	b := make([]byte, n)
+	wire.ReadFull(d.r, b)
+	return unsafe.String(&b[0], len(b))
+}
+
 // DecodeString decodes a string.
-func DecodeString[T ~string](d *Decoder, p *T, tag Tag) {
-	switch tag {
-	case wire.TagNil:
-	case wire.TagString:
-		*p = T(wire.ReadString(d.r))
-	default:
-		fallbackAt(d, p, tag)
+func DecodeString[T ~string](d *Decoder, p *T) {
+	if s := d.string_(); s != "" {
+		*p = T(s)
 	}
 }
 
 // DecodePointer decodes a pointer.
-func DecodePointer[P ~*T, T any](d *Decoder, p *P, tag Tag) {
-	d.pointer(unsafe.Pointer(p), typeOf[T](), tag)
+func DecodePointer[P ~*T, T any](d *Decoder, p *P) {
+	d.pointer(unsafe.Pointer(p), typeOf[T]())
 }
 
 // pointer decodes a pointer to an object of type typ into the pointer at p.
-func (d *Decoder) pointer(p unsafe.Pointer, typ reflect.Type, tag Tag) {
-	switch tag {
-	case wire.TagNil:
-		return
-	case wire.TagRef:
-	default:
-		d.fallback(reflect.NewAt(reflect.PointerTo(typ), p).Elem(), tag)
-		return
-	}
-	root, ref := d.readRef()
+func (d *Decoder) pointer(p unsafe.Pointer, typ reflect.Type) {
+	root, dots := d.ref()
 	d.lastRef = root
 	if root == 0 {
 		return
 	}
-	if ref != nil {
-		*(*unsafe.Pointer)(p) = d.target(ref, typ)
+	if dots {
+		*(*unsafe.Pointer)(p) = d.target(root, typ)
 		return
 	}
 	if ods := d.ds.lookup(root); ods != nil {
@@ -358,138 +365,105 @@ func (d *Decoder) pointer(p unsafe.Pointer, typ reflect.Type, tag Tag) {
 	*(*unsafe.Pointer)(p) = d.ds.newObject(root, reflect.New(typ).UnsafePointer(), typ, nil, nil).ptr
 }
 
-// decodeArrayObject is an objectDecodeFunc for arrays backing []T slices.
-func decodeArrayObject[T any](d *Decoder, ods *objectDecodeState, tag Tag) {
-	elem := ods.decArg.(func(*Decoder, *T, Tag))
-	DecodeArray(d, unsafe.Slice((*T)(ods.ptr), ods.obj.Len()), tag, elem)
+// sliceDecoder decodes arrays backing []T slices.
+type sliceDecoder[T any] struct {
+	elem func(*Decoder, *T)
+}
+
+// decode implements typedDecoder.decode.
+func (s sliceDecoder[T]) decode(d *Decoder, ods *objectDecodeState) {
+	DecodeArray(d, unsafe.Slice((*T)(ods.ptr), ods.obj.Len()), s.elem)
+}
+
+// alloc implements arrayDecoder.alloc.
+func (sliceDecoder[T]) alloc(n int) unsafe.Pointer {
+	return unsafe.Pointer(unsafe.SliceData(make([]T, n)))
 }
 
 // DecodeSlice decodes a slice whose elements are decoded by elem.
-func DecodeSlice[S ~[]T, T any](d *Decoder, p *S, tag Tag, elem func(*Decoder, *T, Tag)) {
-	switch tag {
-	case wire.TagNil:
-		return
-	case wire.TagSlice:
-	default:
-		fallbackAt(d, p, tag)
-		return
-	}
-	ptr, length, capacity, ok := d.slice(typeOf[T](), allocArray[T], decodeArrayObject[T], elem)
+func DecodeSlice[S ~[]T, T any](d *Decoder, p *S, elem func(*Decoder, *T)) {
+	ptr, length, capacity, ok := d.slice(typeOf[T](), sliceDecoder[T]{elem})
 	if ok {
 		*p = S(unsafe.Slice((*T)(ptr), capacity)[:length:capacity])
 	}
 }
 
-// slice decodes a slice of elements of type elemTyp, whose tag has been read.
-// If the slice is not nil, it returns its backing array, allocated by alloc
-// and decoded by dec if needed, with its length and capacity.
-func (d *Decoder) slice(elemTyp reflect.Type, alloc func(int) unsafe.Pointer, dec objectDecodeFunc, decArg any) (unsafe.Pointer, int, int, bool) {
-	length, capacity := d.uint(), d.uint()
-	root, ref := d.readRef()
-	d.lastRef = root
-	if root == 0 {
+// slice decodes a slice of elements of type elemTyp (see Encoder.slice). If
+// the slice is not nil, it returns its backing array, allocated by alloc and
+// decoded by dec if needed, with its length and capacity.
+func (d *Decoder) slice(elemTyp reflect.Type, dec arrayDecoder) (unsafe.Pointer, int, int, bool) {
+	capacity := d.uint()
+	if capacity == 0 {
+		d.lastRef = 0
 		return nil, 0, 0, false
 	}
-	if length > capacity || capacity > math.MaxInt32 {
-		Failf("invalid slice length %d, capacity %d", length, capacity)
+	capacity--
+	length := d.uint()
+	root, dots := d.ref()
+	d.lastRef = root
+	if length > capacity || capacity > math.MaxInt32 || root == 0 {
+		Failf("invalid slice length %d, capacity %d, object %d", length, capacity, root)
 	}
-	var ptr unsafe.Pointer
-	if ref != nil {
-		ptr = d.target(ref, reflect.ArrayOf(int(capacity), elemTyp))
-	} else if ods := d.ds.lookup(root); ods != nil {
+	var ods *objectDecodeState
+	if dots {
+		return d.target(root, reflect.ArrayOf(int(capacity), elemTyp)), int(length), int(capacity), true
+	} else if ods = d.ds.lookup(root); ods != nil {
 		if ods.obj.Kind() != reflect.Array || ods.obj.Type().Elem() != elemTyp || uint64(ods.obj.Len()) < capacity {
 			Failf("object %d has type %v, not [%d]%v", root, ods.obj.Type(), capacity, elemTyp)
 		}
-		ptr = ods.ptr
+		if ods.dec == nil {
+			// Created by decodeObject or a reference into the
+			// object, which didn't provide its decoder.
+			d.ds.setDecoder(ods, dec, nil)
+		}
 	} else {
-		ptr = alloc(int(capacity))
-		d.ds.newObject(root, ptr, reflect.ArrayOf(int(capacity), elemTyp), dec, decArg)
+		ods = d.ds.newObject(root, dec.alloc(int(capacity)), reflect.ArrayOf(int(capacity), elemTyp), dec, nil)
 	}
-	return ptr, int(length), int(capacity), true
+	return ods.ptr, int(length), int(capacity), true
 }
 
 // byteArray decodes an array of n elements of kind uint8 at p.
-func (d *Decoder) byteArray(p unsafe.Pointer, n int, tag Tag) {
-	DecodeArray(d, unsafe.Slice((*uint8)(p), n), tag, DecodeUint[uint8])
+func (d *Decoder) byteArray(p unsafe.Pointer, n int) {
+	if n > 0 {
+		wire.ReadFull(d.r, unsafe.Slice((*byte)(p), n))
+	}
 }
 
-// decodeByteArrayObject is an objectDecodeFunc for arrays backing slices of
-// elements of kind uint8.
-func decodeByteArrayObject(d *Decoder, ods *objectDecodeState, tag Tag) {
-	d.byteArray(ods.ptr, ods.obj.Len(), tag)
+// byteSliceDecoder decodes arrays backing slices of elements of kind uint8.
+type byteSliceDecoder struct{}
+
+// decode implements typedDecoder.decode.
+func (byteSliceDecoder) decode(d *Decoder, ods *objectDecodeState) {
+	d.byteArray(ods.ptr, ods.obj.Len())
 }
 
-// allocArray allocates an array of n elements of type T.
-func allocArray[T any](n int) unsafe.Pointer {
-	return unsafe.Pointer(unsafe.SliceData(make([]T, n)))
+// alloc implements arrayDecoder.alloc.
+func (byteSliceDecoder) alloc(n int) unsafe.Pointer {
+	return unsafe.Pointer(unsafe.SliceData(make([]byte, n)))
 }
 
 // byteSlice decodes a slice of elements of kind uint8 into p, of type typ.
-func (d *Decoder) byteSlice(p unsafe.Pointer, typ reflect.Type, tag Tag) {
-	switch tag {
-	case wire.TagNil:
-		return
-	case wire.TagSlice:
-	default:
-		d.fallback(reflect.NewAt(typ, p).Elem(), tag)
-		return
-	}
-	if ptr, length, capacity, ok := d.slice(typ.Elem(), allocArray[byte], decodeByteArrayObject, nil); ok {
+func (d *Decoder) byteSlice(p unsafe.Pointer, typ reflect.Type) {
+	if ptr, length, capacity, ok := d.slice(typ.Elem(), byteSliceDecoder{}); ok {
 		*(*[]byte)(p) = unsafe.Slice((*byte)(ptr), capacity)[:length:capacity]
 	}
 }
 
-// emptyStruct decodes a struct without fields, of type typ at p.
-func (d *Decoder) emptyStruct(p unsafe.Pointer, typ reflect.Type, tag Tag) {
-	if tag != wire.TagStruct {
-		d.fallback(reflect.NewAt(typ, p).Elem(), tag)
-		return
-	}
-	if id := d.uint(); id != 0 {
-		// A registered type.
-		d.ds.decodeStruct(d.ods, reflect.NewAt(typ, p).Elem(), wire.LoadStructFields(d.r, wire.TypeID(id)))
-		d.lastRef = 0
-		return
-	}
-	if ft := wire.Tag(d.uint()); ft != wire.TagNoObjects {
-		Failf("empty struct %v has fields (tag %d)", typ, ft)
-	}
-	d.lastRef = 0
-}
-
 // DecodeArray decodes an array (passed as a slice of the whole array) whose
 // elements are decoded by elem.
-func DecodeArray[T any](d *Decoder, a []T, tag Tag, elem func(*Decoder, *T, Tag)) {
-	switch tag {
-	case wire.TagNil:
-		return
-	case wire.TagArray:
-	case wire.TagBytes:
-		if typeOf[T]().Kind() != reflect.Uint8 {
-			Failf("byte array decoded into array of %v", typeOf[T]())
-		}
-		if n := d.uint(); n != uint64(len(a)) {
-			Failf("mismatching array length expect=%d, actual=%d", len(a), n)
-		}
-		if len(a) > 0 {
-			wire.ReadFull(d.r, unsafe.Slice((*byte)(unsafe.Pointer(&a[0])), len(a)))
-		}
-		d.lastRef = 0
-		return
-	default:
-		Failf("array of %v has tag %d", typeOf[T](), tag)
-	}
-	if n := d.uint(); n != uint64(len(a)) {
-		Failf("mismatching array length expect=%d, actual=%d", len(a), n)
-	}
+func DecodeArray[T any](d *Decoder, a []T, elem func(*Decoder, *T)) {
 	if len(a) == 0 {
 		return
 	}
-	et := d.Tag()
+	if typeOf[T]().Kind() == reflect.Uint8 {
+		d.byteArray(unsafe.Pointer(&a[0]), len(a))
+		d.lastRef = 0
+		return
+	}
 	ds, ods := d.ds, d.ods
 	for i := range a {
 		d.lastRef = 0
-		elem(d, &a[i], et)
+		elem(d, &a[i])
 		if d.lastRef != 0 {
 			ds.wait(ods, d.lastRef, nil)
 		}
@@ -497,39 +471,24 @@ func DecodeArray[T any](d *Decoder, a []T, tag Tag, elem func(*Decoder, *T, Tag)
 	d.lastRef = 0
 }
 
-// mapDecoder holds what is needed to decode a map object.
-type mapDecoder[K comparable, V any] struct {
-	key func(*Decoder, *K, Tag)
-	val func(*Decoder, *V, Tag)
+// mapDecoder decodes maps, with key; the value decoder is in decArg.
+type mapDecoder[M ~map[K]V, K comparable, V any] struct {
+	key func(*Decoder, *K)
 }
 
-// decodeMapObject is an objectDecodeFunc for maps.
-func decodeMapObject[K comparable, V any](d *Decoder, ods *objectDecodeState, tag Tag) {
-	md := ods.decArg.(*mapDecoder[K, V])
-	m := *(*map[K]V)(ods.ptr)
-	if tag != wire.TagMap {
-		d.fallback(ods.obj, tag)
-		return
-	}
+// decode implements typedDecoder.decode.
+func (md mapDecoder[M, K, V]) decode(d *Decoder, ods *objectDecodeState) {
+	val := ods.decArg.(func(*Decoder, *V))
+	m := *(*M)(ods.ptr)
 	n := d.uint()
-	var kt, vt Tag
 	ds := d.ds
 	for i := uint64(0); i < n; i++ {
-		var (
-			k K
-			v V
-		)
-		if i == 0 {
-			kt = d.Tag()
-		}
+		k, v := new(K), new(V)
 		d.lastRef = 0
-		md.key(d, &k, kt)
+		md.key(d, k)
 		kRef := d.lastRef
-		if i == 0 {
-			vt = d.Tag()
-		}
 		d.lastRef = 0
-		md.val(d, &v, vt)
+		val(d, v)
 		vRef := d.lastRef
 		if kRef != 0 {
 			ds.wait(ods, kRef, nil)
@@ -537,29 +496,20 @@ func decodeMapObject[K comparable, V any](d *Decoder, ods *objectDecodeState, ta
 		if vRef != 0 {
 			ds.wait(ods, vRef, nil)
 		}
-		m[k] = v
+		m[*k] = *v
 	}
 	d.lastRef = 0
 }
 
 // DecodeMap decodes a map whose keys and values are decoded by key and val.
-func DecodeMap[M ~map[K]V, K comparable, V any](d *Decoder, p *M, tag Tag, key func(*Decoder, *K, Tag), val func(*Decoder, *V, Tag)) {
-	switch tag {
-	case wire.TagNil:
-		return
-	case wire.TagRef:
-	default:
-		fallbackAt(d, p, tag)
-		return
-	}
-	root, ref := d.readRef()
+func DecodeMap[M ~map[K]V, K comparable, V any](d *Decoder, p *M, key func(*Decoder, *K), val func(*Decoder, *V)) {
+	root, dots := d.ref()
 	d.lastRef = root
 	if root == 0 {
 		return
 	}
-	if ref != nil {
-		d.ds.decodeObject(d.ods, reflect.ValueOf(p).Elem(), ref)
-		return
+	if dots {
+		Failf("reference into map object %d", root)
 	}
 	if ods := d.ds.lookup(root); ods != nil {
 		if ods.obj.Type() != typeOf[M]() {
@@ -569,12 +519,16 @@ func DecodeMap[M ~map[K]V, K comparable, V any](d *Decoder, p *M, tag Tag, key f
 		if *mp == nil {
 			*mp = make(M)
 		}
+		if ods.dec == nil {
+			// See Decoder.slice.
+			d.ds.setDecoder(ods, mapDecoder[M, K, V]{key}, val)
+		}
 		*p = *mp
 		return
 	}
 	mp := new(M)
 	*mp = make(M)
-	d.ds.newObject(root, unsafe.Pointer(mp), typeOf[M](), decodeMapObject[K, V], &mapDecoder[K, V]{key, val})
+	d.ds.newObject(root, unsafe.Pointer(mp), typeOf[M](), mapDecoder[M, K, V]{key}, val)
 	*p = *mp
 }
 
@@ -588,78 +542,52 @@ func (ds *decodeState) localType(id typeID) reflect.Type {
 	return ds.findType(wire.TypeID(id))
 }
 
-// iface decodes an interface value into obj, of type typ at p. If the value
-// is decoded without decodeObject, it is returned with set == true.
-func (d *Decoder) iface(p unsafe.Pointer, typ reflect.Type, tag Tag) (v any, set bool) {
-	switch tag {
-	case wire.TagNil:
-		return nil, false
-	case wire.TagInterface:
-	default:
-		d.fallback(reflect.NewAt(typ, p).Elem(), tag)
+// iface decodes an interface value (see Encoder.iface) into the interface of
+// type typ at p. If the value is decoded without decodeObject, it is
+// returned with set == true, to be assigned by the caller.
+func (d *Decoder) iface(p unsafe.Pointer, typ reflect.Type) (v any, set bool) {
+	code := d.uint()
+	if code == 0 {
+		d.lastRef = 0
 		return nil, false
 	}
-	hdr := wire.Uint(d.uint())
-	var ts wire.TypeSpec
-	if hdr == wire.TypeSpecTagPointer {
-		hdr2 := wire.Uint(d.uint())
-		if hdr2 == wire.TypeSpecTagID {
-			elemTyp := d.ds.localType(typeID(d.uint()))
-			vt := d.Tag()
-			if vt != wire.TagRef {
-				// Not possible for a pointer.
-				Failf("interface pointer value has tag %d", vt)
-			}
-			root, ref := d.readRef()
-			d.lastRef = root
-			if root == 0 {
-				return reflect.Zero(reflect.PointerTo(elemTyp)).Interface(), true
-			}
-			var ptr unsafe.Pointer
-			if ref != nil {
-				ptr = d.target(ref, elemTyp)
-			} else if ods := d.ds.lookup(root); ods != nil {
-				if ods.obj.Type() != elemTyp {
-					Failf("object %d has type %v, not %v", root, ods.obj.Type(), elemTyp)
-				}
-				ptr = ods.ptr
-			} else {
-				ptr = d.ds.newObject(root, reflect.New(elemTyp).UnsafePointer(), elemTyp, nil, nil).ptr
-			}
-			return reflect.NewAt(elemTyp, ptr).Interface(), true
-		}
-		ts = &wire.TypeSpecPointer{Type: wire.ReadTypeSpecBody(d.r, hdr2)}
-	} else {
-		ts = wire.ReadTypeSpecBody(d.r, hdr)
+	kind := code & 3
+	if kind == ifaceLegacy {
+		d.legacy(reflect.NewAt(typ, p).Elem())
+		return nil, false
 	}
-	encoded := &wire.Interface{Type: ts, Value: wire.Load(d.r)}
-	d.ds.decodeObject(d.ods, reflect.NewAt(typ, p).Elem(), encoded)
-	d.lastRef = refOf(encoded)
-	return nil, false
+	elemTyp := d.ds.localType(typeID(code >> 2))
+	if kind == ifaceNilPointer {
+		d.lastRef = 0
+		return reflect.Zero(reflect.PointerTo(elemTyp)).Interface(), true
+	}
+	var ptr unsafe.Pointer
+	d.pointer(unsafe.Pointer(&ptr), elemTyp)
+	return reflect.NewAt(elemTyp, ptr).Interface(), true
 }
 
 // DecodeInterface decodes an interface.
-func DecodeInterface[T any](d *Decoder, p *T, tag Tag) {
+func DecodeInterface[T any](d *Decoder, p *T) {
 	// Assign through a type assertion, which caches the interface table,
 	// rather than with reflect.Value.Set, which checks the method sets.
-	if v, set := d.iface(unsafe.Pointer(p), typeOf[T](), tag); set {
+	if v, set := d.iface(unsafe.Pointer(p), typeOf[T]()); set {
 		*p = v.(T)
 	}
 }
 
-// DecodeValue decodes a value of any type. It is used for types whose kind is
-// not known to go_stateify, and by the other Decode functions.
-func DecodeValue[T any](d *Decoder, p *T, tag Tag) {
-	if v, set := d.value(unsafe.Pointer(p), typeOf[T](), any(p), tag); set {
+// DecodeValue decodes a value of any type. It is used for elements whose kind
+// is not known to go_stateify.
+func DecodeValue[T any](d *Decoder, p *T) {
+	if v, set := d.value(unsafe.Pointer(p), typeOf[T](), any(p)); set {
 		*p = v.(T)
 	}
 }
 
 // DecodeAny is DecodeValue for p of type *T, without instantiating code for
 // each type T. It is used for fields whose kind is not known to go_stateify.
-func DecodeAny(d *Decoder, p any, tag Tag) {
+func DecodeAny(d *Decoder, p any) {
 	rv := reflect.ValueOf(p)
-	if v, set := d.value(rv.UnsafePointer(), rv.Type().Elem(), p, tag); set {
+	if v, set := d.value(rv.UnsafePointer(), rv.Type().Elem(), p); set {
 		rv.Elem().Set(reflect.ValueOf(v))
 	}
 }
@@ -667,70 +595,72 @@ func DecodeAny(d *Decoder, p any, tag Tag) {
 // value implements DecodeValue for the value of type typ at up. pi is a
 // pointer to it. If typ is an interface type, the decoded value may be
 // returned with set == true, to be assigned by the caller.
-func (d *Decoder) value(up unsafe.Pointer, typ reflect.Type, pi any, tag Tag) (v any, set bool) {
+func (d *Decoder) value(up unsafe.Pointer, typ reflect.Type, pi any) (v any, set bool) {
 	if c, ok := pi.(Codec); ok && typ.Kind() == reflect.Struct {
-		d.structValue(up, typ, c, tag)
+		d.structValue(up, typ, c)
 		return nil, false
 	}
 	switch typ.Kind() {
 	case reflect.Bool:
-		DecodeBool(d, (*bool)(up), tag)
+		DecodeBool(d, (*bool)(up))
 	case reflect.Int:
-		DecodeInt(d, (*int)(up), tag)
+		DecodeInt(d, (*int)(up))
 	case reflect.Int8:
-		DecodeInt(d, (*int8)(up), tag)
+		DecodeInt(d, (*int8)(up))
 	case reflect.Int16:
-		DecodeInt(d, (*int16)(up), tag)
+		DecodeInt(d, (*int16)(up))
 	case reflect.Int32:
-		DecodeInt(d, (*int32)(up), tag)
+		DecodeInt(d, (*int32)(up))
 	case reflect.Int64:
-		DecodeInt(d, (*int64)(up), tag)
+		DecodeInt(d, (*int64)(up))
 	case reflect.Uint:
-		DecodeUint(d, (*uint)(up), tag)
+		DecodeUint(d, (*uint)(up))
 	case reflect.Uint8:
-		DecodeUint(d, (*uint8)(up), tag)
+		DecodeUint(d, (*uint8)(up))
 	case reflect.Uint16:
-		DecodeUint(d, (*uint16)(up), tag)
+		DecodeUint(d, (*uint16)(up))
 	case reflect.Uint32:
-		DecodeUint(d, (*uint32)(up), tag)
+		DecodeUint(d, (*uint32)(up))
 	case reflect.Uint64:
-		DecodeUint(d, (*uint64)(up), tag)
+		DecodeUint(d, (*uint64)(up))
 	case reflect.Uintptr:
-		DecodeUint(d, (*uintptr)(up), tag)
+		DecodeUint(d, (*uintptr)(up))
 	case reflect.Float32:
-		DecodeFloat32(d, (*float32)(up), tag)
+		DecodeFloat32(d, (*float32)(up))
 	case reflect.Float64:
-		DecodeFloat64(d, (*float64)(up), tag)
+		DecodeFloat64(d, (*float64)(up))
 	case reflect.Complex64:
-		DecodeComplex64(d, (*complex64)(up), tag)
+		DecodeComplex64(d, (*complex64)(up))
 	case reflect.Complex128:
-		DecodeComplex128(d, (*complex128)(up), tag)
+		DecodeComplex128(d, (*complex128)(up))
 	case reflect.String:
-		DecodeString(d, (*string)(up), tag)
+		DecodeString(d, (*string)(up))
 	case reflect.Ptr:
-		d.pointer(up, typ.Elem(), tag)
+		d.pointer(up, typ.Elem())
+	case reflect.Interface:
+		return d.iface(up, typ)
 	case reflect.Slice:
 		if typ.Elem().Kind() != reflect.Uint8 {
-			d.fallback(reflect.NewAt(typ, up).Elem(), tag)
+			d.legacy(reflect.NewAt(typ, up).Elem())
 			break
 		}
-		d.byteSlice(up, typ, tag)
+		d.byteSlice(up, typ)
 	case reflect.Array:
 		if typ.Elem().Kind() != reflect.Uint8 {
-			d.fallback(reflect.NewAt(typ, up).Elem(), tag)
+			d.legacy(reflect.NewAt(typ, up).Elem())
 			break
 		}
-		d.byteArray(up, typ.Len(), tag)
+		d.byteArray(up, typ.Len())
+		d.lastRef = 0
 	case reflect.Struct:
 		if typ.NumField() != 0 {
-			d.fallback(reflect.NewAt(typ, up).Elem(), tag)
+			d.legacy(reflect.NewAt(typ, up).Elem())
 			break
 		}
-		d.emptyStruct(up, typ, tag)
-	case reflect.Interface:
-		return d.iface(up, typ, tag)
+		// Structs without fields are not encoded.
+		d.lastRef = 0
 	default:
-		d.fallback(reflect.NewAt(typ, up).Elem(), tag)
+		d.legacy(reflect.NewAt(typ, up).Elem())
 	}
 	return nil, false
 }

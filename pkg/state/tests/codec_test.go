@@ -57,6 +57,21 @@ func (b *graphBuilder) leaf() graphLeaf {
 	return l
 }
 
+// ownsLeaf returns true if l is a leaf of the graph outside maps.
+func (b *graphBuilder) ownsLeaf(l *graphLeaf) bool {
+	for _, nd := range b.nodes {
+		if l == &nd.Leaf || l == nd.LeafPtr || l == &nd.Arr[0] || l == &nd.Arr[1] {
+			return true
+		}
+		for i := range nd.Leaves {
+			if l == &nd.Leaves[i] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (b *graphBuilder) node() *graphNode {
 	return b.nodes[b.r.Intn(len(b.nodes))]
 }
@@ -190,6 +205,32 @@ func (b *graphBuilder) build(n int) *graphNode {
 		if r.Intn(4) == 0 {
 			nd.MS = map[graphName]graphLeaf{graphName(r.Intn(5)): b.leaf()}
 		}
+		for j := range nd.Links {
+			if r.Intn(2) == 0 {
+				v := r.Int63()
+				nd.Links[j].I = &v
+			}
+			if r.Intn(2) == 0 {
+				nd.Links[j].N = b.node()
+			}
+		}
+		if r.Intn(2) == 0 {
+			nd.LinkS = make([]graphLink, 1+r.Intn(3))
+			for j := range nd.LinkS {
+				v := r.Int63()
+				nd.LinkS[j] = graphLink{N: b.node(), I: &v}
+			}
+		}
+		// Refer to links in other nodes, which may be found (and their
+		// pointers followed) before the containing node or slice.
+		switch r.Intn(3) {
+		case 0:
+			nd.LinkPtr = &b.node().Links[r.Intn(2)]
+		case 1:
+			if o := b.node(); len(o.LinkS) > 0 {
+				nd.LinkPtr = &o.LinkS[r.Intn(len(o.LinkS))]
+			}
+		}
 	}
 	return b.nodes[0]
 }
@@ -206,10 +247,11 @@ func diff(a, b []byte) string {
 	return fmt.Sprintf("lengths %d and %d, first difference at %d: %v vs %v", len(a), len(b), i, window(a), window(b))
 }
 
-// TestCodecRandomGraphs compares the generated codecs with the reflection-based
-// implementation on random object graphs: both must produce the same encoding
-// (when it does not depend on map iteration order), and each decoder must
-// reproduce the graph from each encoding, including pointer aliasing.
+// TestCodecRandomGraphs checks the generated codecs against the
+// reflection-based implementation on random object graphs: each decoder must
+// reproduce the graph, including pointer aliasing (checked by comparing the
+// reflection-based encodings of the original and loaded graphs, when they do
+// not depend on map iteration order), and each struct must be saved once.
 func TestCodecRandomGraphs(t *testing.T) {
 	seeds := 500
 	if testing.Short() {
@@ -226,6 +268,11 @@ func TestCodecRandomGraphs(t *testing.T) {
 				t.Fatalf("seed %d: save (codecs=%t) failed: %v", seed, codecs, err)
 			}
 			for p, n := range graphSaves {
+				if l, ok := p.(*graphLeaf); ok && !b.ownsLeaf(l) {
+					// Map values are saved from copies, whose
+					// addresses may be reused.
+					continue
+				}
 				if n != 1 {
 					t.Fatalf("seed %d: save (codecs=%t) saved %T %p %d times", seed, codecs, p, p, n)
 				}
@@ -233,14 +280,15 @@ func TestCodecRandomGraphs(t *testing.T) {
 			encoded[i] = data
 		}
 		reflectData, codecData := encoded[0], encoded[1]
-		if !b.hasMaps && !bytes.Equal(reflectData, codecData) {
-			t.Fatalf("seed %d: encodings differ: %s", seed, diff(reflectData, codecData))
-		}
 		for _, enc := range []struct {
 			name string
 			data []byte
 		}{{"reflect", reflectData}, {"codec", codecData}} {
 			for _, codecs := range []bool{false, true} {
+				if enc.name == "codec" && !codecs {
+					// The typed format requires codecs.
+					continue
+				}
 				loaded, _, err := load(reflect.TypeOf(root), enc.data, codecs)
 				if err != nil {
 					t.Fatalf("seed %d: load (codecs=%t) of %s encoding failed: %v", seed, codecs, enc.name, err)
@@ -267,5 +315,54 @@ func TestCodecRandomGraphs(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// TestCodecAbsorbedReferrer checks an object whose only referrer is merged
+// into a containing object after referring to it.
+func TestCodecAbsorbedReferrer(t *testing.T) {
+	v := int64(42)
+	arr := &[2]graphLink{{}, {I: &v}}
+	// Saving root finds arr[1] first, and follows its pointer to v, before
+	// finding arr through root.Next.Next.
+	root := &graphNode{LinkPtr: &arr[1], Next: &graphNode{Next: &graphNode{LinkS: arr[:]}}}
+	data, _, err := save(root, true)
+	if err != nil {
+		t.Fatalf("save failed: %v", err)
+	}
+	loaded, _, err := load(reflect.TypeOf(root), data, true)
+	if err != nil {
+		t.Fatalf("load failed: %v", err)
+	}
+	got := loaded.(*graphNode)
+	if got.LinkPtr == nil || got.LinkPtr.I == nil || *got.LinkPtr.I != 42 {
+		t.Fatalf("got LinkPtr %+v, want a link to 42", got.LinkPtr)
+	}
+	if got.LinkPtr != &got.Next.Next.LinkS[1] {
+		t.Errorf("LinkPtr does not point into Next.Next.LinkS")
+	}
+}
+
+// TestCodecStandalone checks a backing array found through a pointer to an
+// element, whose slice is only reachable from that element, so that the
+// encoder writes it without a preceding reference providing its decoder.
+func TestCodecStandalone(t *testing.T) {
+	o := &graphNode{}
+	o.LinkS = []graphLink{{N: o}}
+	root := &graphNode{LinkPtr: &o.LinkS[0]}
+	data, _, err := save(root, true)
+	if err != nil {
+		t.Fatalf("save failed: %v", err)
+	}
+	loaded, _, err := load(reflect.TypeOf(root), data, true)
+	if err != nil {
+		t.Fatalf("load failed: %v", err)
+	}
+	got := loaded.(*graphNode)
+	if got.LinkPtr == nil || got.LinkPtr.N == nil {
+		t.Fatalf("got LinkPtr %+v, want a link to a node", got.LinkPtr)
+	}
+	if n := got.LinkPtr.N; len(n.LinkS) != 1 || &n.LinkS[0] != got.LinkPtr || n.LinkS[0].N != n {
+		t.Errorf("got node %+v, want LinkS[0] at LinkPtr referring to the node", n)
 	}
 }

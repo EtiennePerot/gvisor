@@ -16,6 +16,7 @@ package state
 
 import (
 	"context"
+	"encoding/binary"
 	"math"
 	"reflect"
 	"unsafe"
@@ -23,25 +24,49 @@ import (
 	"gvisor.dev/gvisor/pkg/state/wire"
 )
 
-// Encoder encodes values directly in their serialized form. It is used by
-// generated StateEncode methods.
+// Encoder encodes values in the typed format. It is used by generated
+// StateEncode methods.
 //
-// The encoding is the one produced by encodeObject followed by wire.Save,
-// except that references (which may change until the whole object graph has
-// been resolved) and values encoded by encodeObject are embedded as
-// wire.Objects, serialized when the object is.
+// In the typed format, values are encoded without tags or headers: the
+// decoder knows their types statically. See codec.go.
 type Encoder struct {
 	es *encodeState
 
 	// buf is the serialized data.
 	buf []byte
 
-	// objs are the embedded objects.
-	objs []wire.Embedded
+	// objs are the embedded references and values.
+	objs []embedded
 
 	// top is true for es.enc, which encodes top-level objects and records
 	// the encodings of structs nested in them in es.spans.
 	top bool
+}
+
+// embedded is a value embedded in an encoding, which is only serialized when
+// the encoding is written: a reference to an object (when typ != nil), or a
+// value encoded by encodeObject (a tagged wire.Object, otherwise).
+//
+// References are resolved when written, once all objects are known, since
+// the object containing an address may change until then (see resolve).
+type embedded struct {
+	// off is the offset in the encoding before which the value is written.
+	off int
+
+	// addr and typ are the address and type of the referenced object.
+	addr uintptr
+	typ  reflect.Type
+
+	// oes is the object containing the referenced object when it was
+	// resolved. It may have been absorbed since.
+	oes *objectEncodeState
+
+	// decoder is set if the reference provides the decoder of the
+	// object, because it was created by typed code (see writeObjects).
+	decoder bool
+
+	// obj is the embedded wire.Object.
+	obj wire.Object
 }
 
 const (
@@ -61,12 +86,18 @@ type structKey struct {
 }
 
 // structSpan records the encoding of a struct value nested in a top-level
-// object encoded by es.enc. It contains no pointers, so that recording one for
-// every struct costs little.
+// object encoded by es.enc.
 type structSpan struct {
 	key              structKey
 	start, end       int32
 	objStart, objEnd int32
+}
+
+// encodedStruct is a saved encoding of a struct, with offsets of embedded
+// values relative to its start.
+type encodedStruct struct {
+	data []byte
+	objs []embedded
 }
 
 // Context returns the context object provided at save time.
@@ -74,67 +105,46 @@ func (e *Encoder) Context() context.Context {
 	return e.es.ctx
 }
 
-// tag appends tag if m includes tags.
-func (e *Encoder) tag(tag wire.Tag, m Mode) {
-	if m.tagged() {
-		e.buf = append(e.buf, byte(tag)) // All tags are < 0x80.
-	}
-}
-
-// nil_ appends a Nil value.
-func (e *Encoder) nil_() {
-	e.buf = append(e.buf, byte(wire.TagNil))
-}
-
-// embed embeds obj.
-func (e *Encoder) embed(obj wire.Object, m Mode) {
-	e.objs = append(e.objs, wire.Embedded{
-		Off:      len(e.buf),
-		Obj:      obj,
-		Untagged: !m.tagged(),
-	})
-}
-
-// embedRaw appends a copy of r, which has tag r.Tag.
-func (e *Encoder) embedRaw(r *wire.Raw, m Mode) {
-	e.tag(r.Tag, m)
-	off := len(e.buf)
-	e.buf = append(e.buf, r.Data...)
-	for _, o := range r.Objects {
-		o.Off += off
-		e.objs = append(e.objs, o)
-	}
-}
-
-// legacy encodes obj using encodeObject.
-func (e *Encoder) legacy(obj reflect.Value, m Mode) {
+// legacy encodes obj using encodeObject, embedding the result.
+func (e *Encoder) legacy(obj reflect.Value) {
 	var encoded wire.Object
-	e.es.encodeObject(obj, m.strategy(), &encoded)
-	e.embed(encoded, m)
+	e.es.encodeObject(obj, encodeDefault, &encoded)
+	e.objs = append(e.objs, embedded{off: len(e.buf), obj: encoded})
 }
 
-// newRef allocates a wire.Ref.
-func (es *encodeState) newRef() *wire.Ref {
-	if len(es.refArena) == cap(es.refArena) {
-		es.refArena = make([]wire.Ref, 0, min(max(2*cap(es.refArena), 16), 256))
-	}
-	es.refArena = es.refArena[:len(es.refArena)+1]
-	return &es.refArena[len(es.refArena)-1]
-}
-
-// nilRef appends a nil reference.
-func (e *Encoder) nilRef(m Mode) {
-	e.tag(wire.TagRef, m)
-	e.buf = append(e.buf, 0, 0) // Root and number of dots.
-}
-
-// ref appends a reference to the object of type typ at addr.
+// ref resolves the object of type typ at addr and embeds a reference to it.
 //
 // Precondition: addr != nil.
-func (e *Encoder) ref(addr unsafe.Pointer, typ reflect.Type, m Mode, enc objectEncodeFunc, encArg any) {
-	r := e.es.newRef()
-	e.es.resolve(reflect.NewAt(typ, addr), r, enc, encArg)
-	e.embed(r, m)
+func (e *Encoder) ref(addr unsafe.Pointer, typ reflect.Type, enc typedEncoder, encArg any) {
+	oes := e.es.resolve(reflect.NewAt(typ, addr), nil, enc, encArg)
+	e.objs = append(e.objs, embedded{off: len(e.buf), addr: uintptr(addr), typ: typ, oes: oes, decoder: enc != nil})
+}
+
+// structValue encodes the struct of type typ at addr, implementing Codec c.
+func (e *Encoder) structValue(addr unsafe.Pointer, typ reflect.Type, c Codec) {
+	es := e.es
+	key := structKey{uintptr(addr), c.StateTypeIndex().get()}
+	if es.checkEncoded {
+		// Never encode a struct twice; see saveStructEncodings.
+		if s, ok := es.encodedCodecStructs[key]; ok {
+			start, objStart := len(e.buf), len(e.objs)
+			e.buf = append(e.buf, s.data...)
+			for _, o := range s.objs {
+				o.off += start
+				e.objs = append(e.objs, o)
+			}
+			e.recordSpan(key, start, objStart)
+			return
+		}
+	}
+	start, objStart := len(e.buf), len(e.objs)
+	if es.stats.enabled {
+		te := es.typeEntryFor(key.index, typ)
+		es.stats.start(te.ID)
+		defer es.stats.done()
+	}
+	c.StateEncode(e)
+	e.recordSpan(key, start, objStart)
 }
 
 // typeEntryFor returns the type entry for the Codec type typ with the given
@@ -159,40 +169,6 @@ func (es *encodeState) typeEntryFor(index uint32, typ reflect.Type) *typeEntry {
 		es.typesByIndex[index] = te
 	}
 	return te
-}
-
-// structValue encodes the struct of type typ at addr, implementing Codec c.
-func (e *Encoder) structValue(addr unsafe.Pointer, typ reflect.Type, c Codec, m Mode) {
-	es := e.es
-	key := structKey{uintptr(addr), c.StateTypeIndex().get()}
-	if es.checkEncoded {
-		// See encodeStruct: never encode a struct twice.
-		if r, ok := es.encodedCodecStructs[key]; ok {
-			e.tag(wire.TagStruct, m)
-			start, objStart := len(e.buf), len(e.objs)
-			e.embedRaw(r, ModeValueUntagged)
-			e.recordSpan(key, start, objStart)
-			return
-		}
-	}
-	te := es.typeEntryFor(key.index, typ)
-	e.tag(wire.TagStruct, m)
-	start, objStart := len(e.buf), len(e.objs)
-	e.buf = wire.AppendUint(e.buf, uint64(te.ID))
-	switch n := len(te.Fields); n {
-	case 0:
-		e.buf = append(e.buf, byte(wire.TagNoObjects))
-	case 1:
-	default:
-		e.buf = append(e.buf, byte(wire.TagMultipleObjects))
-		e.buf = wire.AppendUint(e.buf, uint64(n))
-	}
-	if es.stats.enabled {
-		es.stats.start(te.ID)
-		defer es.stats.done()
-	}
-	c.StateEncode(e)
-	e.recordSpan(key, start, objStart)
 }
 
 // recordSpan records the encoding of a struct, if needed.
@@ -239,7 +215,7 @@ func (es *encodeState) encodeDeferred(oes *objectEncodeState) {
 		es.arena = make([]byte, 0, min(max(2*cap(es.arena), 1024), maxArenaSize))
 	}
 	if cap(es.embedded)-len(es.embedded) < minArenaSpace/16 {
-		es.embedded = make([]wire.Embedded, 0, min(max(2*cap(es.embedded), 32), maxArenaSize/64))
+		es.embedded = make([]embedded, 0, min(max(2*cap(es.embedded), 32), maxArenaSize/64))
 	}
 	e := &es.enc
 	e.buf = es.arena[len(es.arena):len(es.arena)]
@@ -250,24 +226,24 @@ func (es *encodeState) encodeDeferred(oes *objectEncodeState) {
 	es.currentIsArray = oes.obj.Kind() == reflect.Array
 	es.checkEncoded = oes.containsEncoded
 	if oes.enc != nil {
-		oes.enc(e, oes)
+		oes.enc.encode(e, oes)
 	} else {
-		e.structValue(oes.addr, oes.obj.Type(), c, ModeDefault)
+		e.structValue(oes.addr, oes.obj.Type(), c)
 	}
 	es.checkEncoded = false
 	es.current = nil
 	oes.spanEnd = len(es.spans)
 	oes.encoded = nil
-	oes.raw.Data = e.buf[:len(e.buf):len(e.buf)]
+	oes.data = e.buf[:len(e.buf):len(e.buf)]
 	es.encodedBytes += len(e.buf)
 	if cap(e.buf) == bufCap {
 		es.arena = es.arena[:len(es.arena)+len(e.buf)]
 	} else {
 		es.arena = es.arena[:cap(es.arena)] // Start a new arena next.
 	}
-	oes.raw.Objects = nil
+	oes.objs = nil
 	if len(e.objs) > 0 {
-		oes.raw.Objects = e.objs[:len(e.objs):len(e.objs)]
+		oes.objs = e.objs[:len(e.objs):len(e.objs)]
 	}
 	if cap(e.objs) == objsCap {
 		es.embedded = es.embedded[:len(es.embedded)+len(e.objs)]
@@ -288,6 +264,7 @@ func (es *encodeState) encoded(oes *objectEncodeState) {
 
 // absorb is called when oes is merged into the containing object container.
 func (es *encodeState) absorb(container, oes *objectEncodeState) {
+	oes.container = container
 	if oes.containsEncoded {
 		// The encodings that oes would have reused are now within
 		// container.
@@ -306,63 +283,35 @@ func (es *encodeState) absorb(container, oes *objectEncodeState) {
 }
 
 // saveStructEncodings saves the encodings of the Codec structs encoded as part
-// of oes, so that they can be reused by containing objects.
+// of oes, so that they can be reused by containing objects: StateEncode may
+// have side effects (beforeSave, or creating objects saved through values),
+// so it must be called once per struct.
 func (es *encodeState) saveStructEncodings(oes *objectEncodeState) {
 	if es.encodedCodecStructs == nil {
-		es.encodedCodecStructs = make(map[structKey]*wire.Raw)
+		es.encodedCodecStructs = make(map[structKey]encodedStruct)
 	}
-	if oes.encoded == nil && oes.obj.Kind() == reflect.Struct && len(oes.raw.Data) > 0 && wire.Tag(oes.raw.Data[0]) == wire.TagStruct {
+	if oes.encoded == nil && oes.obj.Kind() == reflect.Struct {
 		// The object is a Codec struct encoded by encodeDeferred.
 		key := structKey{uintptr(oes.addr), oes.obj.Addr().Interface().(Codec).StateTypeIndex().get()}
 		if _, ok := es.encodedCodecStructs[key]; !ok {
-			r := &wire.Raw{Tag: wire.TagStruct, Data: oes.raw.Data[1:]}
-			for _, o := range oes.raw.Objects {
-				o.Off--
-				r.Objects = append(r.Objects, o)
-			}
-			es.encodedCodecStructs[key] = r
+			es.encodedCodecStructs[key] = encodedStruct{data: oes.data, objs: oes.objs}
 		}
 	}
 	for _, span := range es.spans[oes.spanStart:oes.spanEnd] {
-		r := &wire.Raw{
-			Tag:  wire.TagStruct,
-			Data: oes.raw.Data[span.start:span.end:span.end],
-		}
-		for _, o := range oes.raw.Objects[span.objStart:span.objEnd] {
-			o.Off -= int(span.start)
-			r.Objects = append(r.Objects, o)
+		s := encodedStruct{data: oes.data[span.start:span.end:span.end]}
+		for _, o := range oes.objs[span.objStart:span.objEnd] {
+			o.off -= int(span.start)
+			s.objs = append(s.objs, o)
 		}
 		if _, ok := es.encodedCodecStructs[span.key]; !ok {
-			es.encodedCodecStructs[span.key] = r
+			es.encodedCodecStructs[span.key] = s
 		}
 	}
-}
-
-// encodeCodecStruct encodes a Codec struct for encodeStruct.
-func (es *encodeState) encodeCodecStruct(obj reflect.Value, c Codec) *wire.Raw {
-	key := structKey{obj.Addr().Pointer(), c.StateTypeIndex().get()}
-	if r, ok := es.encodedCodecStructs[key]; ok {
-		return r
-	}
-	e := Encoder{es: es}
-	e.structValue(obj.Addr().UnsafePointer(), obj.Type(), c, ModeValueUntagged)
-	r := &wire.Raw{Tag: wire.TagStruct, Data: e.buf, Objects: e.objs}
-	if es.encodedCodecStructs == nil {
-		es.encodedCodecStructs = make(map[structKey]*wire.Raw)
-	}
-	es.encodedCodecStructs[key] = r
-	return r
 }
 
 // EncodeBool encodes a bool.
-func EncodeBool[T ~bool](e *Encoder, p *T, m Mode) {
-	v := *p
-	if !v && m == ModeDefault {
-		e.nil_()
-		return
-	}
-	e.tag(wire.TagBool, m)
-	if v {
+func EncodeBool[T ~bool](e *Encoder, p *T) {
+	if *p {
 		e.buf = append(e.buf, 1)
 	} else {
 		e.buf = append(e.buf, 0)
@@ -370,447 +319,391 @@ func EncodeBool[T ~bool](e *Encoder, p *T, m Mode) {
 }
 
 // EncodeInt encodes a signed integer.
-func EncodeInt[T Signed](e *Encoder, p *T, m Mode) {
-	v := *p
-	if v == 0 && m == ModeDefault {
-		e.nil_()
-		return
-	}
-	e.tag(wire.TagInt, m)
-	e.buf = wire.AppendInt(e.buf, int64(v))
+func EncodeInt[T Signed](e *Encoder, p *T) {
+	e.buf = wire.AppendInt(e.buf, int64(*p))
 }
 
 // EncodeUint encodes an unsigned integer.
-func EncodeUint[T Unsigned](e *Encoder, p *T, m Mode) {
-	v := *p
-	if v == 0 && m == ModeDefault {
-		e.nil_()
-		return
-	}
-	e.tag(wire.TagUint, m)
-	e.buf = wire.AppendUint(e.buf, uint64(v))
+func EncodeUint[T Unsigned](e *Encoder, p *T) {
+	e.buf = wire.AppendUint(e.buf, uint64(*p))
 }
 
 // EncodeFloat32 encodes a float32.
-func EncodeFloat32[T ~float32](e *Encoder, p *T, m Mode) {
-	v := float32(*p)
-	if math.Float32bits(v) == 0 && m == ModeDefault {
-		e.nil_()
-		return
-	}
-	e.tag(wire.TagFloat32, m)
-	e.buf = wire.AppendFloat32(e.buf, v)
+func EncodeFloat32[T ~float32](e *Encoder, p *T) {
+	e.buf = binary.LittleEndian.AppendUint32(e.buf, math.Float32bits(float32(*p)))
 }
 
 // EncodeFloat64 encodes a float64.
-func EncodeFloat64[T ~float64](e *Encoder, p *T, m Mode) {
-	v := float64(*p)
-	if math.Float64bits(v) == 0 && m == ModeDefault {
-		e.nil_()
-		return
-	}
-	e.tag(wire.TagFloat64, m)
-	e.buf = wire.AppendFloat64(e.buf, v)
+func EncodeFloat64[T ~float64](e *Encoder, p *T) {
+	e.buf = binary.LittleEndian.AppendUint64(e.buf, math.Float64bits(float64(*p)))
 }
 
 // EncodeComplex64 encodes a complex64.
-func EncodeComplex64[T ~complex64](e *Encoder, p *T, m Mode) {
+func EncodeComplex64[T ~complex64](e *Encoder, p *T) {
 	v := complex64(*p)
-	re, im := real(v), imag(v)
-	if math.Float32bits(re) == 0 && math.Float32bits(im) == 0 && m == ModeDefault {
-		e.nil_()
-		return
-	}
-	e.tag(wire.TagComplex64, m)
-	e.buf = wire.AppendFloat32(e.buf, re)
-	e.buf = wire.AppendFloat32(e.buf, im)
+	e.buf = binary.LittleEndian.AppendUint32(e.buf, math.Float32bits(real(v)))
+	e.buf = binary.LittleEndian.AppendUint32(e.buf, math.Float32bits(imag(v)))
 }
 
 // EncodeComplex128 encodes a complex128.
-func EncodeComplex128[T ~complex128](e *Encoder, p *T, m Mode) {
+func EncodeComplex128[T ~complex128](e *Encoder, p *T) {
 	v := complex128(*p)
-	re, im := real(v), imag(v)
-	if math.Float64bits(re) == 0 && math.Float64bits(im) == 0 && m == ModeDefault {
-		e.nil_()
-		return
-	}
-	e.tag(wire.TagComplex128, m)
-	e.buf = wire.AppendFloat64(e.buf, re)
-	e.buf = wire.AppendFloat64(e.buf, im)
+	e.buf = binary.LittleEndian.AppendUint64(e.buf, math.Float64bits(real(v)))
+	e.buf = binary.LittleEndian.AppendUint64(e.buf, math.Float64bits(imag(v)))
 }
 
 // EncodeString encodes a string.
-func EncodeString[T ~string](e *Encoder, p *T, m Mode) {
-	v := string(*p)
-	if len(v) == 0 && m == ModeDefault {
-		e.nil_()
-		return
-	}
-	e.tag(wire.TagString, m)
-	e.buf = wire.AppendString(e.buf, v)
+func EncodeString[T ~string](e *Encoder, p *T) {
+	e.buf = wire.AppendString(e.buf, string(*p))
 }
 
 // EncodePointer encodes a pointer.
-func EncodePointer[P ~*T, T any](e *Encoder, p *P, m Mode) {
-	e.pointer(unsafe.Pointer(*p), typeOf[T](), m)
+func EncodePointer[P ~*T, T any](e *Encoder, p *P) {
+	e.pointer(unsafe.Pointer(*p), typeOf[T]())
 }
 
-// pointer encodes a pointer to an object of type typ.
-func (e *Encoder) pointer(v unsafe.Pointer, typ reflect.Type, m Mode) {
+// pointer encodes a pointer to an object of type typ: zero for nil, or a
+// reference, written by writeRef.
+func (e *Encoder) pointer(v unsafe.Pointer, typ reflect.Type) {
 	if v == nil {
-		if m == ModeDefault {
-			e.nil_()
-		} else {
-			e.nilRef(m)
-		}
+		e.buf = append(e.buf, 0)
 		return
 	}
-	e.ref(v, typ, m, nil, nil)
+	e.ref(v, typ, nil, nil)
 }
 
-// encodeArrayObject is an objectEncodeFunc for arrays backing []T slices.
-func encodeArrayObject[T any](e *Encoder, oes *objectEncodeState) {
-	elem := oes.encArg.(func(*Encoder, *T, Mode))
-	a := unsafe.Slice((*T)(oes.addr), oes.obj.Len())
-	EncodeArray(e, a, ModeDefault, elem)
+// arrayEncoder encodes arrays backing []T slices.
+type arrayEncoder[T any] struct {
+	elem func(*Encoder, *T)
+}
+
+// encode implements typedEncoder.encode.
+func (a arrayEncoder[T]) encode(e *Encoder, oes *objectEncodeState) {
+	EncodeArray(e, unsafe.Slice((*T)(oes.addr), oes.obj.Len()), a.elem)
 }
 
 // EncodeSlice encodes a slice whose elements are encoded by elem.
-func EncodeSlice[S ~[]T, T any](e *Encoder, p *S, m Mode, elem func(*Encoder, *T, Mode)) {
+func EncodeSlice[S ~[]T, T any](e *Encoder, p *S, elem func(*Encoder, *T)) {
 	s := []T(*p)
 	// See arrayFromSlice.
 	clear(s[len(s):cap(s)])
-	e.slice(unsafe.Pointer(unsafe.SliceData(s)), len(s), cap(s), s == nil, typeOf[T](), m, encodeArrayObject[T], elem)
+	e.slice(unsafe.Pointer(unsafe.SliceData(s)), len(s), cap(s), s == nil, typeOf[T](), arrayEncoder[T]{elem})
 }
 
-// slice encodes a slice of elements of type elemTyp. The backing array is
-// encoded by enc.
-func (e *Encoder) slice(data unsafe.Pointer, length, capacity int, isNil bool, elemTyp reflect.Type, m Mode, enc objectEncodeFunc, encArg any) {
+// slice encodes a slice of elements of type elemTyp: zero for nil, or its
+// capacity plus one, its length and a reference to its backing array, which
+// is encoded by enc.
+func (e *Encoder) slice(data unsafe.Pointer, length, capacity int, isNil bool, elemTyp reflect.Type, enc typedEncoder) {
 	if isNil {
-		if m == ModeDefault {
-			e.nil_()
-			return
-		}
-		e.tag(wire.TagSlice, m)
-		e.buf = append(e.buf, 0, 0, 0, 0) // Length, capacity, nil reference.
+		e.buf = append(e.buf, 0)
 		return
 	}
-	e.tag(wire.TagSlice, m)
+	e.buf = wire.AppendUint(e.buf, uint64(capacity)+1)
 	e.buf = wire.AppendUint(e.buf, uint64(length))
-	e.buf = wire.AppendUint(e.buf, uint64(capacity))
-	e.ref(data, reflect.ArrayOf(capacity, elemTyp), ModeValueUntagged, enc, encArg)
+	e.ref(data, reflect.ArrayOf(capacity, elemTyp), enc, nil)
 }
 
 // byteArray encodes an array of n elements of kind uint8 at p.
-func (e *Encoder) byteArray(p unsafe.Pointer, n int, m Mode) {
-	EncodeArray(e, unsafe.Slice((*uint8)(p), n), m, EncodeUint[uint8])
+func (e *Encoder) byteArray(p unsafe.Pointer, n int) {
+	e.buf = append(e.buf, unsafe.Slice((*byte)(p), n)...)
 }
 
-// encodeByteArrayObject is an objectEncodeFunc for arrays backing slices of
-// elements of kind uint8.
-func encodeByteArrayObject(e *Encoder, oes *objectEncodeState) {
-	e.byteArray(oes.addr, oes.obj.Len(), ModeDefault)
+// byteArrayEncoder encodes arrays backing slices of elements of kind uint8.
+type byteArrayEncoder struct{}
+
+// encode implements typedEncoder.encode.
+func (byteArrayEncoder) encode(e *Encoder, oes *objectEncodeState) {
+	e.byteArray(oes.addr, oes.obj.Len())
 }
 
 // byteSlice encodes the slice of elements of kind uint8 at p, of type typ.
-func (e *Encoder) byteSlice(p unsafe.Pointer, typ reflect.Type, m Mode) {
+func (e *Encoder) byteSlice(p unsafe.Pointer, typ reflect.Type) {
 	s := *(*[]byte)(p)
 	// See arrayFromSlice.
 	clear(s[len(s):cap(s)])
-	e.slice(unsafe.Pointer(unsafe.SliceData(s)), len(s), cap(s), s == nil, typ.Elem(), m, encodeByteArrayObject, nil)
-}
-
-// emptyStruct encodes a struct without fields of type typ, as encodeStruct
-// does.
-func (e *Encoder) emptyStruct(typ reflect.Type, up unsafe.Pointer, m Mode) {
-	if te, _ := e.es.types.Lookup(typ); te != nil {
-		// Registered types are encoded with their type ID.
-		e.legacy(reflect.NewAt(typ, up).Elem(), m)
-		return
-	}
-	e.tag(wire.TagStruct, m)
-	e.buf = append(e.buf, 0, byte(wire.TagNoObjects)) // Type ID and fields.
-}
-
-// primitiveZeroKind describes how to check whether an array of primitives is
-// zero.
-type primitiveZeroKind uint8
-
-const (
-	notPrimitiveZero primitiveZeroKind = iota
-	bytesZero
-	stringsZero
-	reflectZero
-)
-
-// zeroKind returns how to check whether an array with elements of type typ is
-// the zero value, matching isPrimitiveZero(typ) && obj.IsZero().
-func zeroKind(typ reflect.Type) primitiveZeroKind {
-	switch typ.Kind() {
-	case reflect.Struct:
-		return notPrimitiveZero
-	case reflect.String:
-		return stringsZero
-	case reflect.Array:
-		if !isPrimitiveZero(typ) {
-			return notPrimitiveZero
-		}
-		return reflectZero
-	default:
-		return bytesZero
-	}
-}
-
-// arrayIsZero returns true if a should be encoded as Nil by ModeDefault.
-func arrayIsZero[T any](a []T) bool {
-	switch zeroKind(typeOf[T]()) {
-	case notPrimitiveZero:
-		return false
-	case bytesZero:
-		if len(a) == 0 {
-			return true
-		}
-		b := unsafe.Slice((*byte)(unsafe.Pointer(&a[0])), uintptr(len(a))*unsafe.Sizeof(a[0]))
-		for _, x := range b {
-			if x != 0 {
-				return false
-			}
-		}
-		return true
-	case stringsZero:
-		for i := range a {
-			if len(*(*string)(unsafe.Pointer(&a[i]))) != 0 {
-				return false
-			}
-		}
-		return true
-	default:
-		for i := range a {
-			if !reflect.ValueOf(&a[i]).Elem().IsZero() {
-				return false
-			}
-		}
-		return true
-	}
+	e.slice(unsafe.Pointer(unsafe.SliceData(s)), len(s), cap(s), s == nil, typ.Elem(), byteArrayEncoder{})
 }
 
 // EncodeArray encodes an array (passed as a slice of the whole array) whose
-// elements are encoded by elem.
-func EncodeArray[T any](e *Encoder, a []T, m Mode, elem func(*Encoder, *T, Mode)) {
-	if m == ModeDefault && arrayIsZero(a) {
-		e.nil_()
+// elements are encoded by elem. Arrays of bytes are copied.
+func EncodeArray[T any](e *Encoder, a []T, elem func(*Encoder, *T)) {
+	if len(a) == 0 {
 		return
 	}
 	if typeOf[T]().Kind() == reflect.Uint8 {
-		// See encodeArray.
-		e.tag(wire.TagBytes, m)
-		e.buf = wire.AppendUint(e.buf, uint64(len(a)))
-		if len(a) > 0 {
-			e.buf = append(e.buf, unsafe.Slice((*byte)(unsafe.Pointer(&a[0])), len(a))...)
-		}
+		e.byteArray(unsafe.Pointer(&a[0]), len(a))
 		return
 	}
-	e.tag(wire.TagArray, m)
-	e.buf = wire.AppendUint(e.buf, uint64(len(a)))
 	for i := range a {
-		elem(e, &a[i], elemMode(i))
+		elem(e, &a[i])
 	}
 }
 
-// mapEncoder holds what is needed to encode a map object.
-type mapEncoder[K comparable, V any] struct {
-	m   map[K]V
-	key func(*Encoder, *K, Mode)
-	val func(*Encoder, *V, Mode)
+// mapEncoder encodes maps, with key; the value encoder is in encArg.
+type mapEncoder[M ~map[K]V, K comparable, V any] struct {
+	key func(*Encoder, *K)
 }
 
-// encodeMapObject is an objectEncodeFunc for maps.
-func encodeMapObject[K comparable, V any](e *Encoder, oes *objectEncodeState) {
-	me := oes.encArg.(*mapEncoder[K, V])
-	e.tag(wire.TagMap, ModeDefault)
-	e.buf = wire.AppendUint(e.buf, uint64(len(me.m)))
-	i := 0
-	for k, v := range me.m {
-		me.key(e, &k, elemMode(i))
-		me.val(e, &v, elemMode(i))
-		i++
+// encode implements typedEncoder.encode.
+func (me mapEncoder[M, K, V]) encode(e *Encoder, oes *objectEncodeState) {
+	val := oes.encArg.(func(*Encoder, *V))
+	m := oes.obj.Interface().(M)
+	e.buf = wire.AppendUint(e.buf, uint64(len(m)))
+	for k, v := range m {
+		me.key(e, &k)
+		val(e, &v)
 	}
 }
 
-// EncodeMap encodes a map whose keys and values are encoded by key and val.
-func EncodeMap[M ~map[K]V, K comparable, V any](e *Encoder, p *M, m Mode, key func(*Encoder, *K, Mode), val func(*Encoder, *V, Mode)) {
-	v := map[K]V(*p)
-	if v == nil {
-		if m == ModeDefault {
-			e.nil_()
-		} else {
-			e.nilRef(m)
-		}
+// EncodeMap encodes a map whose keys and values are encoded by key and val: a
+// zero for nil, or a reference to the map object.
+func EncodeMap[M ~map[K]V, K comparable, V any](e *Encoder, p *M, key func(*Encoder, *K), val func(*Encoder, *V)) {
+	if *p == nil {
+		e.buf = append(e.buf, 0)
 		return
 	}
-	r := e.es.newRef()
 	// Use the map's own type, as encodeObject does.
-	e.es.resolve(reflect.ValueOf(*p), r, encodeMapObject[K, V], &mapEncoder[K, V]{v, key, val})
-	e.embed(r, m)
+	rv := reflect.ValueOf(*p)
+	oes := e.es.resolve(rv, nil, mapEncoder[M, K, V]{key}, val)
+	e.objs = append(e.objs, embedded{off: len(e.buf), addr: rv.Pointer(), typ: rv.Type(), oes: oes, decoder: true})
 }
 
-// typeSpec returns the encoded type specification of typ.
-func (es *encodeState) typeSpec(typ reflect.Type) []byte {
-	if b, ok := es.typeSpecs[typ]; ok {
-		return b
+// Interface encodings: zero for nil, or a type ID shifted left by two, with
+// one of the following kinds.
+const (
+	// ifacePointer is a non-nil pointer to the type, followed by a
+	// reference.
+	ifacePointer = 1
+
+	// ifaceNilPointer is a nil pointer to the type.
+	ifaceNilPointer = 2
+
+	// ifaceLegacy is followed by a tagged wire.Object encoding the interface
+	// value, for other types. The type ID is zero.
+	ifaceLegacy = 3
+)
+
+// typeIDOf returns the type ID of typ, or zero if typ has no type ID.
+func (es *encodeState) typeIDOf(typ reflect.Type) uint64 {
+	if id, ok := es.typeIDs[typ]; ok {
+		return id
 	}
-	b := wire.AppendTypeSpec(nil, es.findType(typ))
-	if es.typeSpecs == nil {
-		es.typeSpecs = make(map[reflect.Type][]byte)
+	var id uint64
+	if te, ok := es.types.Lookup(typ); te != nil {
+		if !ok {
+			es.pendingTypes = append(es.pendingTypes, te.Type)
+		}
+		id = uint64(te.ID)
 	}
-	es.typeSpecs[typ] = b
-	return b
+	if es.typeIDs == nil {
+		es.typeIDs = make(map[reflect.Type]uint64)
+	}
+	es.typeIDs[typ] = id
+	return id
 }
 
 // EncodeInterface encodes an interface.
-func EncodeInterface[T any](e *Encoder, p *T, m Mode) {
-	e.iface(any(*p), m)
+func EncodeInterface[T any](e *Encoder, p *T) {
+	e.iface(any(*p), unsafe.Pointer(p), typeOf[T]())
 }
 
-// iface encodes the interface value v.
-func (e *Encoder) iface(v any, m Mode) {
+// iface encodes the interface value v, of the interface type typ at p.
+func (e *Encoder) iface(v any, p unsafe.Pointer, typ reflect.Type) {
 	if v == nil {
-		if m == ModeDefault {
-			e.nil_()
+		e.buf = append(e.buf, 0)
+		return
+	}
+	dyn := reflect.TypeOf(v)
+	if dyn.Kind() == reflect.Ptr {
+		if id := e.es.typeIDOf(dyn.Elem()); id != 0 {
+			ptr := reflect.ValueOf(v).UnsafePointer()
+			if ptr == nil {
+				e.buf = wire.AppendUint(e.buf, id<<2|ifaceNilPointer)
+				return
+			}
+			e.buf = wire.AppendUint(e.buf, id<<2|ifacePointer)
+			e.ref(ptr, dyn.Elem(), nil, nil)
 			return
 		}
-		e.tag(wire.TagInterface, m)
-		e.buf = append(e.buf, byte(wire.TypeSpecTagNil), byte(wire.TagNil))
-		return
 	}
-	typ := reflect.TypeOf(v)
-	spec := e.es.typeSpec(typ)
-	e.tag(wire.TagInterface, m)
-	e.buf = append(e.buf, spec...)
-	if typ.Kind() == reflect.Ptr {
-		e.pointer(reflect.ValueOf(v).UnsafePointer(), typ.Elem(), ModeValue)
-		return
-	}
-	e.legacy(reflect.ValueOf(v), ModeValue)
+	e.buf = append(e.buf, ifaceLegacy)
+	e.legacy(reflect.NewAt(typ, p).Elem())
 }
 
 // EncodeValue encodes a value of any type. It is used for elements whose kind
 // is not known to go_stateify.
-func EncodeValue[T any](e *Encoder, p *T, m Mode) {
-	e.value(unsafe.Pointer(p), typeOf[T](), any(p), m)
+func EncodeValue[T any](e *Encoder, p *T) {
+	e.value(unsafe.Pointer(p), typeOf[T](), any(p))
 }
 
 // EncodeAny is EncodeValue for p of type *T, without instantiating code for
 // each type T. It is used for fields whose kind is not known to go_stateify.
-func EncodeAny(e *Encoder, p any, m Mode) {
+func EncodeAny(e *Encoder, p any) {
 	rv := reflect.ValueOf(p)
-	e.value(rv.UnsafePointer(), rv.Type().Elem(), p, m)
+	e.value(rv.UnsafePointer(), rv.Type().Elem(), p)
 }
 
 // value implements EncodeValue for the value of type typ at up. pi is a
 // pointer to it.
-func (e *Encoder) value(up unsafe.Pointer, typ reflect.Type, pi any, m Mode) {
+func (e *Encoder) value(up unsafe.Pointer, typ reflect.Type, pi any) {
 	if c, ok := pi.(Codec); ok && typ.Kind() == reflect.Struct {
-		e.structValue(up, typ, c, m)
+		e.structValue(up, typ, c)
 		return
 	}
 	switch typ.Kind() {
 	case reflect.Bool:
-		EncodeBool(e, (*bool)(up), m)
+		EncodeBool(e, (*bool)(up))
 	case reflect.Int:
-		EncodeInt(e, (*int)(up), m)
+		EncodeInt(e, (*int)(up))
 	case reflect.Int8:
-		EncodeInt(e, (*int8)(up), m)
+		EncodeInt(e, (*int8)(up))
 	case reflect.Int16:
-		EncodeInt(e, (*int16)(up), m)
+		EncodeInt(e, (*int16)(up))
 	case reflect.Int32:
-		EncodeInt(e, (*int32)(up), m)
+		EncodeInt(e, (*int32)(up))
 	case reflect.Int64:
-		EncodeInt(e, (*int64)(up), m)
+		EncodeInt(e, (*int64)(up))
 	case reflect.Uint:
-		EncodeUint(e, (*uint)(up), m)
+		EncodeUint(e, (*uint)(up))
 	case reflect.Uint8:
-		EncodeUint(e, (*uint8)(up), m)
+		EncodeUint(e, (*uint8)(up))
 	case reflect.Uint16:
-		EncodeUint(e, (*uint16)(up), m)
+		EncodeUint(e, (*uint16)(up))
 	case reflect.Uint32:
-		EncodeUint(e, (*uint32)(up), m)
+		EncodeUint(e, (*uint32)(up))
 	case reflect.Uint64:
-		EncodeUint(e, (*uint64)(up), m)
+		EncodeUint(e, (*uint64)(up))
 	case reflect.Uintptr:
-		EncodeUint(e, (*uintptr)(up), m)
+		EncodeUint(e, (*uintptr)(up))
 	case reflect.Float32:
-		EncodeFloat32(e, (*float32)(up), m)
+		EncodeFloat32(e, (*float32)(up))
 	case reflect.Float64:
-		EncodeFloat64(e, (*float64)(up), m)
+		EncodeFloat64(e, (*float64)(up))
 	case reflect.Complex64:
-		EncodeComplex64(e, (*complex64)(up), m)
+		EncodeComplex64(e, (*complex64)(up))
 	case reflect.Complex128:
-		EncodeComplex128(e, (*complex128)(up), m)
+		EncodeComplex128(e, (*complex128)(up))
 	case reflect.String:
-		EncodeString(e, (*string)(up), m)
+		EncodeString(e, (*string)(up))
 	case reflect.Interface:
-		e.iface(reflect.NewAt(typ, up).Elem().Interface(), m)
+		e.iface(reflect.NewAt(typ, up).Elem().Interface(), up, typ)
 	case reflect.Ptr:
-		e.pointer(*(*unsafe.Pointer)(up), typ.Elem(), m)
+		e.pointer(*(*unsafe.Pointer)(up), typ.Elem())
 	case reflect.Slice:
 		if typ.Elem().Kind() != reflect.Uint8 {
-			e.legacy(reflect.NewAt(typ, up).Elem(), m)
+			e.legacy(reflect.NewAt(typ, up).Elem())
 			return
 		}
-		e.byteSlice(up, typ, m)
+		e.byteSlice(up, typ)
 	case reflect.Array:
 		if typ.Elem().Kind() != reflect.Uint8 {
-			e.legacy(reflect.NewAt(typ, up).Elem(), m)
+			e.legacy(reflect.NewAt(typ, up).Elem())
 			return
 		}
-		e.byteArray(up, typ.Len(), m)
+		e.byteArray(up, typ.Len())
 	case reflect.Struct:
 		if typ.NumField() != 0 {
-			e.legacy(reflect.NewAt(typ, up).Elem(), m)
-			return
+			e.legacy(reflect.NewAt(typ, up).Elem())
 		}
-		e.emptyStruct(typ, up, m)
+		// Structs without fields are not encoded.
 	default:
-		e.legacy(reflect.NewAt(typ, up).Elem(), m)
+		e.legacy(reflect.NewAt(typ, up).Elem())
 	}
-}
-
-// Detach returns an Encoder that encodes a single value (with ModeDefault)
-// separately from e. It is used by StateEncode for fields saved through a
-// value, which are encoded before all other fields (as by StateSave); Finish
-// and EmbedValue then place the result.
-func (e *Encoder) Detach() *Encoder {
-	return &Encoder{es: e.es}
-}
-
-// Finish returns the value encoded by a detached Encoder.
-func (e *Encoder) Finish() wire.Object {
-	if len(e.buf) == 0 {
-		// The value was encoded by encodeObject.
-		if len(e.objs) != 1 || e.objs[0].Off != 0 || e.objs[0].Untagged {
-			Failf("invalid detached encoding")
-		}
-		return e.objs[0].Obj
-	}
-	r := &wire.Raw{Tag: wire.Tag(e.buf[0]), Data: e.buf[1:]}
-	for _, o := range e.objs {
-		o.Off--
-		r.Objects = append(r.Objects, o)
-	}
-	return r
 }
 
 // EncodeLegacyValue encodes v as Sink.SaveValue does, for fields saved
 // through a value of a type that go_stateify can't parse.
-func EncodeLegacyValue(e *Encoder, v any) wire.Object {
-	var encoded wire.Object
-	e.es.encodeObject(reflect.ValueOf(v), encodeDefault, &encoded)
-	return encoded
+func EncodeLegacyValue(e *Encoder, v any) {
+	e.legacy(reflect.ValueOf(v))
 }
 
-// EmbedValue embeds the result of Finish or EncodeLegacyValue as the next
-// field.
-func EmbedValue(e *Encoder, obj wire.Object) {
-	e.embed(obj, ModeDefault)
+// writeRef appends the reference to the object of type typ at addr, which
+// must have been resolved, to b.
+func (es *encodeState) writeRef(b []byte, o *embedded) []byte {
+	addr, typ, oes := o.addr, o.typ, o.oes
+	if typ.Kind() != reflect.Map && typ.Size() == 0 && addr == dummyAddr {
+		oes = es.zeroValues[typ]
+	} else {
+		// Find the object containing the referenced object now: the
+		// object found by resolve may have been absorbed since.
+		for oes.container != nil {
+			oes = oes.container
+		}
+		start, otyp := uintptr(oes.addr), oes.obj.Type()
+		if start != addr || otyp != typ {
+			// A reference into a containing object: see resolve.
+			// The decoder can create the object from its type
+			// unless it needs a decoder from typed code.
+			if oes.enc == nil {
+				es.enqueue(oes)
+			}
+			b = wire.AppendUint(b, uint64(oes.id)<<1|1)
+			dots := es.traverse(otyp, typ, start, addr)
+			b = wire.AppendUint(b, uint64(len(dots)))
+			b = wire.AppendDots(b, dots)
+			return wire.AppendTypeSpec(b, es.findType(otyp))
+		}
+	}
+	if oes.enc == nil || o.decoder {
+		es.enqueue(oes)
+	}
+	return wire.AppendUint(b, uint64(oes.id)<<1)
+}
+
+// writeTyped writes the typed encoding of oes to es.w; see writeObjects for
+// standalone.
+func (es *encodeState) writeTyped(oes *objectEncodeState, standalone bool) {
+	// Resolve references first, since they may add types, which must be
+	// written before the object.
+	b := es.refBuf[:0]
+	es.refOffs = es.refOffs[:0]
+	for i := range oes.objs {
+		if o := &oes.objs[i]; o.typ != nil {
+			b = es.writeRef(b, o)
+		} else {
+			wire.WalkRefs(o.obj, es.walkRef)
+		}
+		es.refOffs = append(es.refOffs, len(b))
+	}
+	es.refBuf = b
+	w := &es.w
+	var spec wire.TypeSpec = wire.TypeSpecNil{}
+	if standalone {
+		// Write the body to a buffer, to write its length first. Only
+		// structs (whose decoders are always known) have their type.
+		if oes.obj.Kind() == reflect.Struct {
+			spec = es.findType(oes.obj.Type())
+		}
+		es.standaloneBuf.Reset()
+		w = &wire.Writer{Writer: &es.standaloneBuf}
+	}
+	es.writePendingTypes()
+	off, refOff := 0, 0
+	if !standalone {
+		wire.SaveUint(w, uint64(wire.TagUint))
+		wire.SaveUint(w, uint64(oes.id))
+		wire.SaveUint(w, objectTyped)
+	}
+	for i, o := range oes.objs {
+		w.WriteBytes(oes.data[off:o.off])
+		off = o.off
+		if o.typ != nil {
+			w.WriteBytes(b[refOff:es.refOffs[i]])
+		} else {
+			wire.Save(w, o.obj)
+		}
+		refOff = es.refOffs[i]
+	}
+	w.WriteBytes(oes.data[off:])
+	if standalone {
+		if err := w.Flush(); err != nil {
+			panic(err)
+		}
+		wire.SaveUint(&es.w, uint64(wire.TagUint))
+		wire.SaveUint(&es.w, uint64(oes.id))
+		wire.SaveUint(&es.w, objectStandalone)
+		es.w.WriteBytes(wire.AppendTypeSpec(nil, spec))
+		wire.SaveUint(&es.w, uint64(es.standaloneBuf.Len()))
+		es.w.WriteBytes(es.standaloneBuf.Bytes())
+	}
 }

@@ -225,9 +225,9 @@ func (g *codecGen) elemFunc(t ast.Expr, dec bool) string {
 			// The function literal below would need to name t.
 			return sp + op + "Value"
 		}
-		params := fmt.Sprintf("e *%sEncoder, p *%s, m %sMode", sp, types.ExprString(t), sp)
+		params := fmt.Sprintf("e *%sEncoder, p *%s", sp, types.ExprString(t))
 		if dec {
-			params = fmt.Sprintf("d *%sDecoder, p *%s, tag %sTag", sp, types.ExprString(t), sp)
+			params = fmt.Sprintf("d *%sDecoder, p *%s", sp, types.ExprString(t))
 		}
 		return fmt.Sprintf("func(%s) { %s }", params, g.call("p", t, dec, true))
 	default:
@@ -237,44 +237,42 @@ func (g *codecGen) elemFunc(t ast.Expr, dec bool) string {
 
 // call returns a call encoding (or decoding, if dec) the value of type t
 // pointed to by ptr. If elem, the call is in a function returned by elemFunc
-// (with parameters e, p and m, or d, p and tag); otherwise it is in
-// StateEncode (or StateDecode).
+// (with parameters e and p, or d and p); otherwise it is in StateEncode (or
+// StateDecode).
 func (g *codecGen) call(ptr string, t ast.Expr, dec, elem bool) string {
-	sp := g.statePrefix
-	op, v, arg := "Encode", "stateEncoder", sp+"ModeDefault"
+	op, v := "Encode", "stateEncoder"
 	if dec {
-		op, v, arg = "Decode", "stateDecoder", "stateDecoder.Tag()"
+		op, v = "Decode", "stateDecoder"
 	}
-	return g.callWith(ptr, t, dec, elem, op, v, arg)
-}
-
-// callWith is call, with the given encoder (or decoder) variable v and mode
-// (or tag) argument.
-func (g *codecGen) callWith(ptr string, t ast.Expr, dec, elem bool, op, v, arg string) string {
-	sp := g.statePrefix
 	if elem {
-		v, arg = "e", "m"
+		v = "e"
 		if dec {
-			v, arg = "d", "tag"
+			v = "d"
 		}
 	}
+	return g.callWith(ptr, t, dec, elem, op, v)
+}
+
+// callWith is call, with the given encoder (or decoder) variable v.
+func (g *codecGen) callWith(ptr string, t ast.Expr, dec, elem bool, op, v string) string {
+	sp := g.statePrefix
 	k, u := g.kind(t)
 	switch k {
 	case "":
 		if !elem {
 			// Avoid instantiating EncodeValue for each field type.
-			return fmt.Sprintf("%s%sAny(%s, %s, %s)", sp, op, v, ptr, arg)
+			return fmt.Sprintf("%s%sAny(%s, %s)", sp, op, v, ptr)
 		}
-		return fmt.Sprintf("%s%sValue(%s, %s, %s)", sp, op, v, ptr, arg)
+		return fmt.Sprintf("%s%sValue(%s, %s)", sp, op, v, ptr)
 	case "Slice":
-		return fmt.Sprintf("%s%sSlice(%s, %s, %s, %s)", sp, op, v, ptr, arg, g.elemFunc(u.(*ast.ArrayType).Elt, dec))
+		return fmt.Sprintf("%s%sSlice(%s, %s, %s)", sp, op, v, ptr, g.elemFunc(u.(*ast.ArrayType).Elt, dec))
 	case "Array":
-		return fmt.Sprintf("%s%sArray(%s, %s[:], %s, %s)", sp, op, v, strings.TrimPrefix(ptr, "&"), arg, g.elemFunc(u.(*ast.ArrayType).Elt, dec))
+		return fmt.Sprintf("%s%sArray(%s, %s[:], %s)", sp, op, v, strings.TrimPrefix(ptr, "&"), g.elemFunc(u.(*ast.ArrayType).Elt, dec))
 	case "Map":
 		mt := u.(*ast.MapType)
-		return fmt.Sprintf("%s%sMap(%s, %s, %s, %s, %s)", sp, op, v, ptr, arg, g.elemFunc(mt.Key, dec), g.elemFunc(mt.Value, dec))
+		return fmt.Sprintf("%s%sMap(%s, %s, %s, %s)", sp, op, v, ptr, g.elemFunc(mt.Key, dec), g.elemFunc(mt.Value, dec))
 	default:
-		return fmt.Sprintf("%s%s%s(%s, %s, %s)", sp, op, k, v, ptr, arg)
+		return fmt.Sprintf("%s%s%s(%s, %s)", sp, op, k, v, ptr)
 	}
 }
 
@@ -300,24 +298,20 @@ func (g *codecGen) emitCodec(w io.Writer, recv, name string, ss *ast.StructType,
 	fmt.Fprintf(w, "func (%s *%s) StateEncode(stateEncoder *%sEncoder) {\n", recv, name, sp)
 	fmt.Fprintf(w, "	%s.beforeSave()\n", recv)
 	emitZeroChecks()
+	// Values are saved first, as by StateSave.
 	for _, f := range fields {
 		if f.kind == fieldValue {
 			fmt.Fprintf(w, "	%sValue := %s.save%s()\n", f.name, recv, camelCased(f.name))
 			fmt.Fprintf(w, "	_ = (%s)(%sValue)\n", f.valueType, f.name)
-			vt, err := parser.ParseExpr(f.valueType)
-			if err != nil {
-				fmt.Fprintf(w, "	%sEncoded := %sEncodeLegacyValue(stateEncoder, %sValue)\n", f.name, sp, f.name)
-				continue
-			}
-			enc := f.name + "ValueEncoder"
-			fmt.Fprintf(w, "	%s := stateEncoder.Detach()\n", enc)
-			fmt.Fprintf(w, "	%s\n", g.callWith("&"+f.name+"Value", vt, false, false, "Encode", enc, sp+"ModeDefault"))
-			fmt.Fprintf(w, "	%sEncoded := %s.Finish()\n", f.name, enc)
 		}
 	}
 	for _, f := range fields {
 		if f.kind == fieldValue {
-			fmt.Fprintf(w, "	%sEmbedValue(stateEncoder, %sEncoded)\n", sp, f.name)
+			if vt, err := parser.ParseExpr(f.valueType); err == nil {
+				fmt.Fprintf(w, "	%s\n", g.call("&"+f.name+"Value", vt, false, false))
+			} else {
+				fmt.Fprintf(w, "	%sEncodeLegacyValue(stateEncoder, %sValue)\n", sp, f.name)
+			}
 			continue
 		}
 		fmt.Fprintf(w, "	%s\n", g.fieldCall(recv+"."+f.name, f.typ, false))
@@ -326,10 +320,20 @@ func (g *codecGen) emitCodec(w io.Writer, recv, name string, ss *ast.StructType,
 
 	fmt.Fprintf(w, "// +checklocksignore\n")
 	fmt.Fprintf(w, "func (%s *%s) StateDecode(ctx context.Context, stateDecoder *%sDecoder) {\n", recv, name, sp)
+	// Values are loaded last, as by StateLoad.
+	parsed := make(map[string]bool)
 	for _, f := range fields {
 		switch f.kind {
 		case fieldValue:
-			fmt.Fprintf(w, "	%sEncoded := stateDecoder.LoadEncoded()\n", f.name)
+			if vt, err := parser.ParseExpr(f.valueType); err == nil {
+				parsed[f.name] = true
+				fmt.Fprintf(w, "	var %sValue %s\n", f.name, f.valueType)
+				fmt.Fprintf(w, "	stateDecoder.BeginWait()\n")
+				fmt.Fprintf(w, "	%s\n", g.call("&"+f.name+"Value", vt, true, false))
+				fmt.Fprintf(w, "	%sRef := stateDecoder.EndValue()\n", f.name)
+			} else {
+				fmt.Fprintf(w, "	%sEncoded := stateDecoder.LoadEncoded()\n", f.name)
+			}
 		case fieldWait:
 			fmt.Fprintf(w, "	stateDecoder.BeginWait()\n")
 			fmt.Fprintf(w, "	%s\n", g.fieldCall(recv+"."+f.name, f.typ, true))
@@ -339,7 +343,16 @@ func (g *codecGen) emitCodec(w io.Writer, recv, name string, ss *ast.StructType,
 		}
 	}
 	for _, f := range fields {
-		if f.kind == fieldValue {
+		if f.kind != fieldValue {
+			continue
+		}
+		if parsed[f.name] {
+			fmt.Fprintf(w, "	if stateDecoder.LoadValueNow(%sRef) {\n", f.name)
+			fmt.Fprintf(w, "		%s.load%s(ctx, %sValue)\n", recv, camelCased(f.name), f.name)
+			fmt.Fprintf(w, "	} else {\n")
+			fmt.Fprintf(w, "		stateDecoder.LoadValueLater(%sRef, func() { %s.load%s(ctx, %sValue) })\n", f.name, recv, camelCased(f.name), f.name)
+			fmt.Fprintf(w, "	}\n")
+		} else {
 			fmt.Fprintf(w, "	stateDecoder.LoadValue(%sEncoded, new(%s), func(y any) { %s.load%s(ctx, y.(%s)) })\n", f.name, f.valueType, recv, camelCased(f.name), f.valueType)
 		}
 	}
@@ -347,6 +360,7 @@ func (g *codecGen) emitCodec(w io.Writer, recv, name string, ss *ast.StructType,
 		fmt.Fprintf(w, "	stateDecoder.AfterLoad(func() { %s.afterLoad(ctx) })\n", recv)
 	}
 	fmt.Fprintf(w, "}\n\n")
+
 }
 
 // emitIdentCodec emits the Codec methods of a type identical to typeName.

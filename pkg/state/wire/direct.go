@@ -176,6 +176,39 @@ func SaveRawData(w *Writer, r *Raw) {
 	r.save(w)
 }
 
+// WriteBytes writes p, buffering it if Buffer was called. It panics on error.
+func (w *Writer) WriteBytes(p []byte) {
+	w.write(p)
+}
+
+// AppendDots appends the encoding of reference dots, as in a Ref.
+func AppendDots(b []byte, dots []Dot) []byte {
+	for _, d := range dots {
+		switch x := d.(type) {
+		case Index:
+			b = AppendInt(b, int64(x))
+		case *FieldName:
+			b = AppendInt(b, -int64(len(*x)))
+			b = append(b, *x...)
+		default:
+			panic("unknown dot implementation")
+		}
+	}
+	return b
+}
+
+// ReadFixed reads n bytes, without copying them if they are buffered. The
+// returned slice is only valid until the next read. n must be at most 16.
+func ReadFixed(r *Reader, n int) []byte {
+	if win := r.window(); len(win) >= n {
+		r.used += n
+		return win[:n]
+	}
+	p := r.scratch[:n]
+	readFull(r, p)
+	return p
+}
+
 // ReadUint reads a Uint (or Tag).
 func ReadUint(r *Reader) uint64 {
 	return uint64(loadUint(r))
@@ -304,4 +337,29 @@ func LoadStructFieldsTagged(r *Reader, id TypeID, tag Tag) *Struct {
 // ReadFull reads exactly len(p) bytes. It panics on error.
 func ReadFull(r *Reader, p []byte) {
 	readFull(r, p)
+}
+
+// WalkRefs calls fn for each reference in obj, including slice references.
+func WalkRefs(obj Object, fn func(*Ref)) {
+	switch x := obj.(type) {
+	case *Ref:
+		fn(x)
+	case *Slice:
+		fn(&x.Ref)
+	case *Array:
+		for _, o := range x.Contents {
+			WalkRefs(o, fn)
+		}
+	case *Map:
+		for i := range x.Keys {
+			WalkRefs(x.Keys[i], fn)
+			WalkRefs(x.Values[i], fn)
+		}
+	case *Interface:
+		WalkRefs(x.Value, fn)
+	case *Struct:
+		for i := 0; i < x.Fields(); i++ {
+			WalkRefs(*x.Field(i), fn)
+		}
+	}
 }
