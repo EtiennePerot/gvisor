@@ -326,6 +326,8 @@ var reverseTypeDatabase = map[reflect.Type]wire.Type{}
 // Must only be called in contexts where they will definitely never be used,
 // in order to save memory.
 func Release() {
+	// The schema hash is computed from the type databases.
+	schemaHash()
 	globalTypeDatabase = nil
 	reverseTypeDatabase = nil
 }

@@ -109,25 +109,25 @@ func TestFieldCalls(t *testing.T) {
 	for _, tc := range []struct {
 		field, enc, dec string
 	}{
-		{"a", "state.EncodeInt(stateEncoder, &x.a, state.ModeDefault)", "state.DecodeInt(stateDecoder, &x.a, stateDecoder.Tag())"},
-		{"b", "state.EncodeString(stateEncoder, &x.b, state.ModeDefault)", "state.DecodeString(stateDecoder, &x.b, stateDecoder.Tag())"},
-		{"n", "state.EncodeUint(stateEncoder, &x.n, state.ModeDefault)", "state.DecodeUint(stateDecoder, &x.n, stateDecoder.Tag())"},
-		{"al", "state.EncodeUint(stateEncoder, &x.al, state.ModeDefault)", ""},
-		{"p", "state.EncodePointer(stateEncoder, &x.p, state.ModeDefault)", "state.DecodePointer(stateDecoder, &x.p, stateDecoder.Tag())"},
-		{"op", "state.EncodePointer(stateEncoder, &x.op, state.ModeDefault)", ""},
-		{"s", "state.EncodeSlice(stateEncoder, &x.s, state.ModeDefault, state.EncodePointer)", "state.DecodeSlice(stateDecoder, &x.s, stateDecoder.Tag(), state.DecodePointer)"},
-		{"ns", "state.EncodeSlice(stateEncoder, &x.ns, state.ModeDefault, state.EncodeUint)", ""},
-		{"arr", "state.EncodeArray(stateEncoder, x.arr[:], state.ModeDefault, state.EncodeUint)", "state.DecodeArray(stateDecoder, x.arr[:], stateDecoder.Tag(), state.DecodeUint)"},
-		{"pairs", "state.EncodeArray(stateEncoder, x.pairs[:], state.ModeDefault, func(e *state.Encoder, p *pair, m state.Mode) { state.EncodeArray(e, p[:], m, state.EncodeUint) })", ""},
-		{"m", "state.EncodeMap(stateEncoder, &x.m, state.ModeDefault, state.EncodeUint, state.EncodePointer)", ""},
-		{"bn", "state.EncodeMap(stateEncoder, &x.bn, state.ModeDefault, state.EncodeString, state.EncodePointer)", ""},
+		{"a", "state.EncodeInt(stateEncoder, &x.a)", "state.DecodeInt(stateDecoder, &x.a)"},
+		{"b", "state.EncodeString(stateEncoder, &x.b)", "state.DecodeString(stateDecoder, &x.b)"},
+		{"n", "state.EncodeUint(stateEncoder, &x.n)", "state.DecodeUint(stateDecoder, &x.n)"},
+		{"al", "state.EncodeUint(stateEncoder, &x.al)", ""},
+		{"p", "state.EncodePointer(stateEncoder, &x.p)", "state.DecodePointer(stateDecoder, &x.p)"},
+		{"op", "state.EncodePointer(stateEncoder, &x.op)", ""},
+		{"s", "state.EncodeSlice(stateEncoder, &x.s, state.EncodePointer)", "state.DecodeSlice(stateDecoder, &x.s, state.DecodePointer)"},
+		{"ns", "state.EncodeSlice(stateEncoder, &x.ns, state.EncodeUint)", ""},
+		{"arr", "state.EncodeArray(stateEncoder, x.arr[:], state.EncodeUint)", "state.DecodeArray(stateDecoder, x.arr[:], state.DecodeUint)"},
+		{"pairs", "state.EncodeArray(stateEncoder, x.pairs[:], func(e *state.Encoder, p *pair) { state.EncodeArray(e, p[:], state.EncodeUint) })", ""},
+		{"m", "state.EncodeMap(stateEncoder, &x.m, state.EncodeUint, state.EncodePointer)", ""},
+		{"bn", "state.EncodeMap(stateEncoder, &x.bn, state.EncodeString, state.EncodePointer)", ""},
 		// Types from other packages are handled at run time.
-		{"fm", "state.EncodeMap(stateEncoder, &x.fm, state.ModeDefault, state.EncodeValue, state.EncodeInt)", ""},
-		{"o", "state.EncodeAny(stateEncoder, &x.o, state.ModeDefault)", "state.DecodeAny(stateDecoder, &x.o, stateDecoder.Tag())"},
-		{"f", "state.EncodeAny(stateEncoder, &x.f, state.ModeDefault)", ""},
-		{"i", "state.EncodeAny(stateEncoder, &x.i, state.ModeDefault)", ""},
-		{"li", "state.EncodeInterface(stateEncoder, &x.li, state.ModeDefault)", "state.DecodeInterface(stateDecoder, &x.li, stateDecoder.Tag())"},
-		{"x", "state.EncodeInt(stateEncoder, &x.x, state.ModeDefault)", ""},
+		{"fm", "state.EncodeMap(stateEncoder, &x.fm, state.EncodeValue, state.EncodeInt)", ""},
+		{"o", "state.EncodeAny(stateEncoder, &x.o)", "state.DecodeAny(stateDecoder, &x.o)"},
+		{"f", "state.EncodeAny(stateEncoder, &x.f)", ""},
+		{"i", "state.EncodeAny(stateEncoder, &x.i)", ""},
+		{"li", "state.EncodeInterface(stateEncoder, &x.li)", "state.DecodeInterface(stateDecoder, &x.li)"},
+		{"x", "state.EncodeInt(stateEncoder, &x.x)", ""},
 	} {
 		got, ok := calls[tc.field]
 		if !ok {
@@ -145,7 +145,7 @@ func TestFieldCalls(t *testing.T) {
 
 func TestShadowedPrimitive(t *testing.T) {
 	g := &codecGen{local: localTypes{"int": &ast.StructType{}}, statePrefix: "state."}
-	if got, want := g.fieldCall("x.f", ast.NewIdent("int"), false), "state.EncodeAny(stateEncoder, &x.f, state.ModeDefault)"; got != want {
+	if got, want := g.fieldCall("x.f", ast.NewIdent("int"), false), "state.EncodeAny(stateEncoder, &x.f)"; got != want {
 		t.Errorf("got %s, want %s", got, want)
 	}
 }
@@ -164,12 +164,12 @@ func TestEmitCodec(t *testing.T) {
 	for _, want := range []string{
 		"var stateTypeIndexnode state.TypeIndex",
 		"func (x *node) StateTypeIndex() *state.TypeIndex {",
-		// Values are saved first, as by StateSave.
-		"x.beforeSave()\n\t// zero value checks\n\tvValue := x.saveV()\n\t_ = (int64)(vValue)\n\tvValueEncoder := stateEncoder.Detach()\n\tstate.EncodeInt(vValueEncoder, &vValue, state.ModeDefault)\n\tvEncoded := vValueEncoder.Finish()\n\tstate.EncodeInt(stateEncoder, &x.a, state.ModeDefault)",
-		"state.EmbedValue(stateEncoder, vEncoded)\n\tstate.EncodePointer(stateEncoder, &x.w, state.ModeDefault)",
-		// Values are loaded last, as by StateLoad.
-		"vEncoded := stateDecoder.LoadEncoded()\n\tstateDecoder.BeginWait()\n\tstate.DecodePointer(stateDecoder, &x.w, stateDecoder.Tag())\n\tstateDecoder.EndWait()",
-		"stateDecoder.LoadValue(vEncoded, new(int64), func(y any) { x.loadV(ctx, y.(int64)) })\n\tstateDecoder.AfterLoad(func() { x.afterLoad(ctx) })\n}",
+		// Values are saved first, as by StateSave, and encoded in slot order.
+		"x.beforeSave()\n\t// zero value checks\n\tvValue := x.saveV()\n\t_ = (int64)(vValue)\n\tstate.EncodeInt(stateEncoder, &x.a)",
+		"state.EncodeInt(stateEncoder, &vValue)\n\tstate.EncodePointer(stateEncoder, &x.w)",
+		// Values are decoded in slot order, and loaded last, as by StateLoad.
+		"var vValue int64\n\tstateDecoder.BeginWait()\n\tstate.DecodeInt(stateDecoder, &vValue)\n\tvRef := stateDecoder.EndValue()\n\tstateDecoder.BeginWait()\n\tstate.DecodePointer(stateDecoder, &x.w)\n\tstateDecoder.EndWait()",
+		"if stateDecoder.LoadValueNow(vRef) {\n\t\tx.loadV(ctx, vValue)\n\t} else {\n\t\tstateDecoder.LoadValueLater(vRef, func() { x.loadV(ctx, vValue) })\n\t}\n\tstateDecoder.AfterLoad(func() { x.afterLoad(ctx) })\n}",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("generated code does not contain\n%s\n\ngenerated code:\n%s", want, out)

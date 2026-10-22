@@ -241,6 +241,10 @@ func (p *printer) printStream(w io.Writer, r io.Reader) (err error) {
 			continue
 		}
 
+		if state.IsTyped(length) {
+			return fmt.Errorf("object graph %d is in the typed format, which can only be decoded with the Go types; save with state.DisableCodecs to print it", graph+1)
+		}
+
 		// Read & unmarshal the object.
 		//
 		// Note that this loop must match the general structure of the
