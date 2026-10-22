@@ -79,7 +79,7 @@ func (fs *filesystem) newTasksInode(ctx context.Context, k *kernel.Kernel, pidns
 
 	contents := map[string]kernfs.Inode{
 		"cmdline":        fs.newInode(ctx, root, 0444, &cmdLineData{}),
-		"cpuinfo":        fs.newInode(ctx, root, 0444, newStaticFileSetStat(cpuInfoData(k))),
+		"cpuinfo":        fs.newInode(ctx, root, 0444, &cpuInfoData{k: k}),
 		"devices":        fs.newInode(ctx, root, 0444, &devicesData{}),
 		"filesystems":    fs.newInode(ctx, root, 0444, &filesystemsData{}),
 		"loadavg":        fs.newInode(ctx, root, 0444, &loadavgData{}),
@@ -273,29 +273,27 @@ func (i *tasksInode) DecRef(ctx context.Context) {
 	i.tasksInodeRefs.DecRef(func() { i.Destroy(ctx) })
 }
 
-// staticFileSetStat implements a special static file that allows inode
-// attributes to be set. This is to support /proc files that are readonly, but
-// allow attributes to be set.
+// cpuInfoData backs /proc/cpuinfo.
+//
+// It is generated on read rather than stored, since it is about 1 KB per CPU
+// and would otherwise be saved in every checkpoint.
 //
 // +stateify savable
-type staticFileSetStat struct {
+type cpuInfoData struct {
 	dynamicBytesFileSetAttr
-	vfs.StaticData
+
+	k *kernel.Kernel
 }
 
-var _ dynamicInode = (*staticFileSetStat)(nil)
+var _ dynamicInode = (*cpuInfoData)(nil)
 
-func newStaticFileSetStat(data string) *staticFileSetStat {
-	return &staticFileSetStat{StaticData: vfs.StaticData{Data: data}}
-}
-
-func cpuInfoData(k *kernel.Kernel) string {
-	features := k.FeatureSet()
-	var buf bytes.Buffer
-	for i, max := uint(0), k.ApplicationCores(); i < max; i++ {
-		features.WriteCPUInfoTo(i, max, &buf)
+// Generate implements vfs.DynamicBytesSource.Generate.
+func (d *cpuInfoData) Generate(ctx context.Context, buf *bytes.Buffer) error {
+	features := d.k.FeatureSet()
+	for i, max := uint(0), d.k.ApplicationCores(); i < max; i++ {
+		features.WriteCPUInfoTo(i, max, buf)
 	}
-	return buf.String()
+	return nil
 }
 
 func ipcData(v uint64) dynamicInode {
