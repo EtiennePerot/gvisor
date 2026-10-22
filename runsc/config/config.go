@@ -19,6 +19,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -204,6 +205,10 @@ type Config struct {
 	// SidecarReleaseEnforcementPolicy controls when spawned sidecar binaries
 	// must match `runsc`'s build label.
 	SidecarReleaseEnforcementPolicy SidecarReleasePolicy `flag:"sidecar-release-enforcement-policy"`
+
+	// SandboxLifecycleCPUPolicy is the CPU limit of the sandbox cgroup while the
+	// application is not running.
+	SandboxLifecycleCPUPolicy SandboxLifecycleCPUPolicy `flag:"sandbox-lifecycle-cpu-policy"`
 
 	// FinalMetricsLog is the file to which all metric data should be written
 	// upon sandbox termination.
@@ -1534,6 +1539,85 @@ var releaseVersionRE = regexp.MustCompile(`^(?:release|g[a-z]*)-\d{8}(?:\.\d+)?$
 // IsReleaseVersion returns whether ver is a tagged-release version string.
 func IsReleaseVersion(ver string) bool {
 	return releaseVersionRE.MatchString(ver)
+}
+
+// SandboxLifecycleCPUPolicy is the CPU limit of the sandbox cgroup while the
+// application is not running. The zero value removes the limit.
+type SandboxLifecycleCPUPolicy struct {
+	// milliCPUs, if non-zero, is the limit in milliCPUs.
+	milliCPUs int64
+
+	// factor, if non-zero, multiplies the OCI spec limit.
+	// "1" here naturally means preserving the OCI spec limit.
+	factor float64
+}
+
+// Set implements flag.Value. Set(String()) should be idempotent.
+func (p *SandboxLifecycleCPUPolicy) Set(v string) error {
+	switch {
+	case v == "uncapped":
+		*p = SandboxLifecycleCPUPolicy{}
+	case strings.HasSuffix(v, "m"):
+		milliCPUs, err := strconv.ParseInt(strings.TrimSuffix(v, "m"), 10, 64)
+		if err != nil || milliCPUs <= 0 {
+			return fmt.Errorf("invalid sandbox lifecycle CPU policy %q: CPU count must be a positive integer of milliCPUs (e.g. \"2500m\")", v)
+		}
+		*p = SandboxLifecycleCPUPolicy{milliCPUs: milliCPUs}
+	case strings.HasSuffix(v, "x"):
+		factor, err := strconv.ParseFloat(strings.TrimSuffix(v, "x"), 64)
+		if err != nil || !(factor > 0) || math.IsInf(factor, 1) {
+			return fmt.Errorf("invalid sandbox lifecycle CPU policy %q: factor must be a positive number", v)
+		}
+		*p = SandboxLifecycleCPUPolicy{factor: factor}
+	default:
+		return fmt.Errorf("invalid sandbox lifecycle CPU policy %q: must be \"uncapped\", \"<N>m\" (milliCPUs), or \"<X>x\" (multiplier of OCI spec CPU cap)", v)
+	}
+	return nil
+}
+
+// Get implements flag.Value.
+func (p *SandboxLifecycleCPUPolicy) Get() any {
+	return *p
+}
+
+// String implements flag.Value.
+func (p SandboxLifecycleCPUPolicy) String() string {
+	switch {
+	case p.milliCPUs != 0:
+		return strconv.FormatInt(p.milliCPUs, 10) + "m"
+	case p.factor != 0:
+		return strconv.FormatFloat(p.factor, 'g', -1, 64) + "x"
+	default:
+		return "uncapped"
+	}
+}
+
+// Enabled returns whether the lifecycle limit may differ from the OCI spec
+// limit.
+func (p SandboxLifecycleCPUPolicy) Enabled() bool {
+	return p.factor != 1
+}
+
+// Kernel bounds of a CFS quota, in microseconds.
+const (
+	minCPUQuota = 1000
+	maxCPUQuota = 1<<44 - 1
+)
+
+// Quota returns the lifecycle CFS quota for an application CFS quota of
+// `quota` per `period`, both in microseconds.
+// -1 means unlimited.
+func (p SandboxLifecycleCPUPolicy) Quota(quota int64, period uint64) int64 {
+	var lifecycleQuota float64
+	switch {
+	case p.milliCPUs != 0:
+		lifecycleQuota = float64(p.milliCPUs) * float64(period) / 1000
+	case p.factor != 0:
+		lifecycleQuota = float64(quota) * p.factor
+	default:
+		return -1
+	}
+	return int64(math.Round(min(max(lifecycleQuota, minCPUQuota), maxCPUQuota)))
 }
 
 // RestoreSpecValidationPolicy dictates how spec validation should be handled.

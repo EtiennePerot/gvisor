@@ -8,6 +8,7 @@ package(
 go_library(
     name = "sandbox",
     srcs = [
+        "cpulimits.go",
         "network.go",
         "network_unsafe.go",
         "no_xdp.go",
