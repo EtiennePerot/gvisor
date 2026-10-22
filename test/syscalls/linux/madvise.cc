@@ -375,6 +375,82 @@ TEST(MadviseFreeTest, AcceptsPrivateAnonPage) {
   ASSERT_THAT(madvise(m.ptr(), m.len(), MADV_FREE), SyscallSucceeds());
 }
 
+// After MADV_FREE, each page either still holds its old contents or reads as
+// zeroes, and a subsequent write is retained.
+TEST(MadviseFreeTest, PagesAreZeroOrUnchangedAndWritesAreKept) {
+  constexpr size_t kPages = 16;
+  auto m = ASSERT_NO_ERRNO_AND_VALUE(
+      MmapAnon(kPages * kPageSize, PROT_READ | PROT_WRITE, MAP_PRIVATE));
+  memset(m.ptr(), 1, m.len());
+  ASSERT_THAT(madvise(m.ptr(), m.len(), MADV_FREE), SyscallSucceeds());
+  char* const p = reinterpret_cast<char*>(m.ptr());
+  for (size_t i = 0; i < kPages; i++) {
+    char* const page = p + i * kPageSize;
+    const char first = page[0];
+    EXPECT_TRUE(first == 0 || first == 1) << "page " << i;
+    for (size_t j = 0; j < kPageSize; j++) {
+      ASSERT_EQ(page[j], first) << "page " << i << " offset " << j;
+    }
+  }
+  memset(m.ptr(), 2, m.len());
+  ExpectAllMappingBytes(m, 2);
+}
+
+TEST(MadviseFreeTest, DoesNotAffectCOWPageInChild) {
+  auto m = ASSERT_NO_ERRNO_AND_VALUE(
+      MmapAnon(kPageSize, PROT_READ | PROT_WRITE, MAP_PRIVATE));
+  memset(m.ptr(), 1, m.len());
+  int pipefds[2];
+  ASSERT_THAT(pipe(pipefds), SyscallSucceeds());
+  pid_t pid = fork();
+  if (pid == 0) {
+    char c;
+    close(pipefds[1]);
+    TEST_PCHECK(read(pipefds[0], &c, 1) == 1);
+    // The parent's MADV_FREE must not change the child's copy.
+    CheckAllMappingBytes(m, 1);
+    _exit(0);
+  }
+  ASSERT_THAT(pid, SyscallSucceeds());
+  close(pipefds[0]);
+  EXPECT_THAT(madvise(m.ptr(), m.len(), MADV_FREE), SyscallSucceeds());
+  char c = 0;
+  ASSERT_THAT(write(pipefds[1], &c, 1), SyscallSucceedsWithValue(1));
+  close(pipefds[1]);
+  int status;
+  ASSERT_THAT(waitpid(pid, &status, 0), SyscallSucceedsWithValue(pid));
+  EXPECT_TRUE(WIFEXITED(status) && WEXITSTATUS(status) == 0)
+      << "status " << status;
+}
+
+TEST(MadviseFreeTest, AcceptsPrivateDevZeroMapping) {
+  FileDescriptor fd = ASSERT_NO_ERRNO_AND_VALUE(Open("/dev/zero", O_RDWR));
+  Mapping m = ASSERT_NO_ERRNO_AND_VALUE(Mmap(
+      nullptr, kPageSize, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd.get(), 0));
+  memset(m.ptr(), 1, m.len());
+  EXPECT_THAT(madvise(m.ptr(), m.len(), MADV_FREE), SyscallSucceeds());
+}
+
+TEST(MadviseFreeTest, RejectsLockedMapping) {
+  auto m = ASSERT_NO_ERRNO_AND_VALUE(
+      MmapAnon(kPageSize, PROT_READ | PROT_WRITE, MAP_PRIVATE));
+  int ret = mlock(m.ptr(), m.len());
+  if (ret != 0) {
+    GTEST_SKIP() << "mlock failed: " << strerror(errno);
+  }
+  EXPECT_THAT(madvise(m.ptr(), m.len(), MADV_FREE),
+              SyscallFailsWithErrno(EINVAL));
+}
+
+TEST(MadviseFreeTest, FailsOnUnmappedRange) {
+  auto m = ASSERT_NO_ERRNO_AND_VALUE(
+      MmapAnon(2 * kPageSize, PROT_READ | PROT_WRITE, MAP_PRIVATE));
+  ASSERT_THAT(munmap(reinterpret_cast<char*>(m.ptr()) + kPageSize, kPageSize),
+              SyscallSucceeds());
+  EXPECT_THAT(madvise(m.ptr(), m.len(), MADV_FREE),
+              SyscallFailsWithErrno(ENOMEM));
+}
+
 TEST(MadviseFreeTest, RejectsPrivateFileMapping) {
   TempPath f = ASSERT_NO_ERRNO_AND_VALUE(TempPath::CreateFileWith(
       /* parent = */ GetAbsoluteTestTmpdir(),
