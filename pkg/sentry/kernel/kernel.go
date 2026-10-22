@@ -1852,25 +1852,37 @@ func (k *Kernel) BlockedTasks() int64 {
 //
 // +checklocksexclude:k.runningTasksMu
 func (k *Kernel) WaitForTaskActivity(stop <-chan struct{}) bool {
-	k.runningTasksMu.Lock()
-	if k.runningTasks.Load() != 0 {
-		k.runningTasksMu.Unlock()
-		return true
-	}
-	// Read the current notification channel under the lock so we cannot miss a
-	// 0->1 transition: incRunningTasks closes this exact channel (also under the
-	// lock) before installing a replacement, so any transition after this point
-	// wakes us.
-	ch := k.taskActivityCh
-	k.runningTasksMu.Unlock()
-
 	select {
-	case <-ch:
+	case <-k.TaskActivity():
 		return true
 	case <-stop:
 		return false
 	}
 }
+
+// TaskActivity returns a channel that is closed when at least one task is
+// running. If a task is already running, the returned channel is already
+// closed. See WaitForTaskActivity.
+//
+// +checklocksexclude:k.runningTasksMu
+func (k *Kernel) TaskActivity() <-chan struct{} {
+	k.runningTasksMu.Lock()
+	defer k.runningTasksMu.Unlock()
+	if k.runningTasks.Load() != 0 {
+		return closedTaskActivityCh
+	}
+	// incRunningTasks closes this exact channel (also under the lock) before
+	// installing a replacement, so the caller cannot miss a 0->1 transition
+	// after this point.
+	return k.taskActivityCh
+}
+
+// closedTaskActivityCh is returned by TaskActivity when a task is running.
+var closedTaskActivityCh = func() chan struct{} {
+	ch := make(chan struct{})
+	close(ch)
+	return ch
+}()
 
 // WaitExited blocks until all tasks in k have exited. No tasks can be created
 // after WaitExited returns.
