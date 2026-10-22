@@ -220,6 +220,10 @@ type Loader struct {
 	// container. It should be called when a sandbox is destroyed.
 	stopSignalForwarding func()
 
+	// stopIdleMemoryReleaser stops the idle memory releaser started with the
+	// kernel. See startIdleMemoryReleaser.
+	stopIdleMemoryReleaser func()
+
 	// stopProfiling stops profiling started at container creation. It
 	// should be called when a sandbox is destroyed.
 	stopProfiling func()
@@ -1134,6 +1138,9 @@ func (l *Loader) Destroy() {
 		l.stopSignalForwarding()
 	}
 	l.watchdog.Stop()
+	if l.stopIdleMemoryReleaser != nil {
+		l.stopIdleMemoryReleaser()
+	}
 
 	ctx := l.k.SupervisorContext()
 	l.mu.Lock()
@@ -1500,6 +1507,7 @@ func (l *Loader) run() error {
 		return err
 	}
 	l.startupTimer.Reached("kernel started")
+	l.stopIdleMemoryReleaser = startIdleMemoryReleaser(l.k)
 	l.root.procArgs.StartupTimeline.End()
 	l.root.procArgs.StartupTimeline = nil
 	switch l.state {
