@@ -54,6 +54,9 @@ type Reader struct {
 
 	// buf is used by readByte if Reader does not implement io.ByteReader.
 	buf [1]byte
+
+	// scratch is used by ReadFixed.
+	scratch [16]byte
 }
 
 // bufferedReader is implemented by readers (such as bufio.Reader) that let

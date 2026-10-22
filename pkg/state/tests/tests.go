@@ -150,10 +150,13 @@ func containsMap(typ reflect.Type, seen map[reflect.Type]bool) bool {
 
 // runTestCases runs a test for each object in objects.
 //
-// Each object is saved and loaded both with and without Codec methods, and
-// the results are cross-checked: both encoders must produce the same bytes
-// (up to map iteration order), and each decoder must load the output of each
-// encoder.
+// Each object is saved and loaded both with and without Codec methods, which
+// use different formats. Both must load the saved object; the decoder with
+// Codec methods must also load objects saved without them; and, unless the
+// encoding depends on map iteration order, saving the object loaded by the
+// Codec methods without them must give the same bytes as saving the original
+// object, which checks that the graph (including pointer aliasing) is the
+// same.
 func runTestCases(t *testing.T, shouldFail bool, prefix string, objects []any) {
 	t.Helper()
 	for i, root := range objects {
@@ -171,10 +174,18 @@ func runTestCases(t *testing.T, shouldFail bool, prefix string, objects []any) {
 					t.Fatalf("Save (%s) failed unexpectedly: %v", sm.name, err)
 				}
 				encoded[mi] = data
+				t.Logf("Raw state (%s):\n%v", sm.name, data)
+				t.Logf("Save stats:\n%s", saveStats.String())
+				if sm.codecs {
+					// The typed format can't be printed.
+					if err := pretty.PrintText(io.Discard, bytes.NewReader(data)); err == nil {
+						t.Errorf("PrettyPrint (%s) succeeded unexpectedly", sm.name)
+					}
+					continue
+				}
 
 				// Dump the serialized proto to aid with debugging.
 				var ppBuf bytes.Buffer
-				t.Logf("Raw state (%s):\n%v", sm.name, data)
 				if err := pretty.PrintText(&ppBuf, bytes.NewReader(data)); err != nil {
 					// We don't count this as a test failure if we
 					// have shouldFail set, but we will count as a
@@ -190,12 +201,6 @@ func runTestCases(t *testing.T, shouldFail bool, prefix string, objects []any) {
 					}
 				}
 				t.Logf("Encoded state (%s):\n%s", sm.name, ppBuf.String())
-				t.Logf("Save stats:\n%s", saveStats.String())
-			}
-			if !shouldFail {
-				if len(encoded[0]) != len(encoded[1]) || (!bytes.Equal(encoded[0], encoded[1]) && !containsMap(typ, make(map[reflect.Type]bool))) {
-					t.Fatalf("Encodings differ:\n\treflect: %v\n\tcodec:   %v", encoded[0], encoded[1])
-				}
 			}
 
 			failed := false
@@ -206,6 +211,13 @@ func runTestCases(t *testing.T, shouldFail bool, prefix string, objects []any) {
 					continue
 				}
 				for _, lm := range codecModes {
+					if sm.codecs && !lm.codecs {
+						// The typed format requires codecs.
+						if _, _, err := load(typ, data, false); err == nil && !shouldFail {
+							t.Errorf("Load (%s of %s) succeeded unexpectedly", lm.name, sm.name)
+						}
+						continue
+					}
 					// Load a new copy of the object.
 					loadedValue, loadStats, err := load(typ, data, lm.codecs)
 					if err != nil {
@@ -227,6 +239,15 @@ func runTestCases(t *testing.T, shouldFail bool, prefix string, objects []any) {
 					t.Logf("Load stats:\n%s", loadStats.String())
 					if shouldFail {
 						continue
+					}
+					if sm.codecs && encoded[0] != nil && !containsMap(typ, make(map[reflect.Type]bool)) {
+						again, _, err := save(loadedValue, false)
+						if err != nil {
+							t.Fatalf("Save (reflect) of loaded object failed: %v", err)
+						}
+						if !bytes.Equal(again, encoded[0]) {
+							t.Fatalf("Loaded object differs (%s of %s):\n\toriginal: %v\n\tloaded:   %v", lm.name, sm.name, encoded[0], again)
+						}
 					}
 
 					// Truncate half the bytes in the byte stream,

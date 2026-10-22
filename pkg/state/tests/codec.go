@@ -80,7 +80,19 @@ type graphNode struct {
 	FE      foreign.Empty
 	FI      foreign.Ints
 	AE      struct{}
+	Links   [2]graphLink
+	LinkS   []graphLink
+	LinkPtr *graphLink
 	Loaded  int `state:"nosave"`
+}
+
+// graphLink is a struct with pointers, referred to from outside the object
+// containing it.
+//
+// +stateify savable
+type graphLink struct {
+	N *graphNode
+	I *int64
 }
 
 func (*graphNode) graph() {}

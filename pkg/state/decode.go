@@ -24,28 +24,20 @@ import (
 	"gvisor.dev/gvisor/pkg/state/wire"
 )
 
-// internalCallback is a interface called on object completion.
-//
-// There are two implementations: objectDecodeState & userCallback.
-type internalCallback interface {
-	// source returns the dependent object. May be nil.
-	source() *objectDecodeState
-
-	// callbackRun executes the callback.
-	callbackRun(ds *decodeState)
+// callback is called on object completion: it is either a dependent object
+// (waiter) or a user callback (fn).
+type callback struct {
+	waiter *objectDecodeState
+	fn     func()
 }
 
-// userCallback is an implementation of internalCallback.
-type userCallback func()
-
-// source implements internalCallback.source.
-func (userCallback) source() *objectDecodeState {
-	return nil
-}
-
-// callbackRun implements internalCallback.callbackRun.
-func (uc userCallback) callbackRun(*decodeState) {
-	uc()
+// run runs the callback.
+func (c *callback) run(ds *decodeState) {
+	if c.waiter != nil {
+		c.waiter.callbackRun(ds)
+	} else {
+		c.fn()
+	}
 }
 
 // objectDecodeState represents an object that may be in the process of being
@@ -80,24 +72,21 @@ type objectDecodeState struct {
 
 	// dec, if non-nil, decodes the object. It is provided by the typed
 	// decoder that created the object, along with decArg.
-	dec    objectDecodeFunc
+	dec    typedDecoder
 	decArg any
 
 	// blockedBy is the number of dependencies this object has.
 	blockedBy int
 
 	// callbacksInline is inline storage for callbacks.
-	callbacksInline [2]internalCallback
+	callbacksInline [2]callback
 
 	// callbacks is a set of callbacks to execute on load.
-	callbacks []internalCallback
+	callbacks []callback
 
 	pendingEntry odsListElem
 	leafEntry    odsListElem
 }
-
-// objectDecodeFunc decodes the object ods, whose tag has been read, using d.
-type objectDecodeFunc func(d *Decoder, ods *objectDecodeState, tag Tag)
 
 type odsListElem struct {
 	ods *objectDecodeState
@@ -105,19 +94,14 @@ type odsListElem struct {
 }
 
 // addCallback adds a callback to the objectDecodeState.
-func (ods *objectDecodeState) addCallback(ic internalCallback) {
+func (ods *objectDecodeState) addCallback(c callback) {
 	if ods.callbacks == nil {
 		ods.callbacks = ods.callbacksInline[:0]
 	}
-	ods.callbacks = append(ods.callbacks, ic)
+	ods.callbacks = append(ods.callbacks, c)
 }
 
-// source implements internalCallback.source.
-func (ods *objectDecodeState) source() *objectDecodeState {
-	return ods
-}
-
-// callbackRun implements internalCallback.callbackRun.
+// callbackRun is called when an object that ods waits for completes.
 func (ods *objectDecodeState) callbackRun(ds *decodeState) {
 	ods.blockedBy--
 	if ods.blockedBy == 0 {
@@ -162,8 +146,16 @@ type decodeState struct {
 	// leaves are consumed from the front and appended to the back.
 	leaves odsList
 
-	// codecs is true if Codec methods are used.
+	// codecs is true if Codec methods are used, i.e. if the stream is in
+	// the typed format.
 	codecs bool
+
+	// standalone holds the encodings of standalone objects whose decoders
+	// are not known yet (see loadStandalone).
+	standalone map[objectID][]byte
+
+	// typedNames are the names of types by TypeIndex, for stats.
+	typedNames []string
 
 	// dec is the Decoder used for top-level objects.
 	dec Decoder
@@ -195,8 +187,8 @@ func (ds *decodeState) checkComplete(ods *objectDecodeState) bool {
 	}
 
 	// Fire all callbacks.
-	for _, ic := range ods.callbacks {
-		ic.callbackRun(ds)
+	for i := range ods.callbacks {
+		ods.callbacks[i].run(ds)
 	}
 
 	// Mark completed.
@@ -211,15 +203,15 @@ func (ds *decodeState) checkComplete(ods *objectDecodeState) bool {
 // As a special case, we always allow _useable_ references back to the first
 // decoding object because it may have fields that are already decoded. We also
 // allow trivial self reference, since they can be handled internally.
-func (ds *decodeState) wait(waiter *objectDecodeState, id objectID, callback func()) {
+func (ds *decodeState) wait(waiter *objectDecodeState, id objectID, fn func()) {
 	switch id {
 	case waiter.id:
 		// Trivial self reference.
 		fallthrough
 	case 1:
 		// Root object; see above.
-		if callback != nil {
-			callback()
+		if fn != nil {
+			fn()
 		}
 		return
 	}
@@ -232,13 +224,13 @@ func (ds *decodeState) wait(waiter *objectDecodeState, id objectID, callback fun
 
 	// No nil can be returned here.
 	other := ds.lookup(id)
-	if callback != nil {
+	if fn != nil {
 		// Add the additional user callback.
-		other.addCallback(userCallback(callback))
+		other.addCallback(callback{fn: fn})
 	}
 
 	// Mark waiter as unblocked.
-	other.addCallback(waiter)
+	other.addCallback(callback{waiter: waiter})
 }
 
 // waitObject notes a blocking relationship.
@@ -293,11 +285,10 @@ func (ds *decodeState) growObjectsByID(id objectID) {
 }
 
 func (ds *decodeState) addObject(id objectID, obj reflect.Value) *objectDecodeState {
-	ods := &objectDecodeState{
-		id:  id,
-		obj: obj,
-		ptr: obj.Addr().UnsafePointer(),
-	}
+	ods := &objectDecodeState{}
+	ods.id = id
+	ods.obj = obj
+	ods.ptr = obj.Addr().UnsafePointer()
 	ods.pendingEntry.ods = ods
 	ods.leafEntry.ods = ods
 	ds.growObjectsByID(id)
@@ -373,7 +364,7 @@ func (od *objectDecoder) load(slot int, objPtr reflect.Value, wait bool, fn func
 func (od *objectDecoder) afterLoad(fn func()) {
 	// Queue the local callback; this will execute when all of the above
 	// data dependencies have been cleared.
-	od.ods.addCallback(userCallback(fn))
+	od.ods.addCallback(callback{fn: fn})
 }
 
 // decodeStruct decodes a struct value.
@@ -638,7 +629,7 @@ func (ds *decodeState) findCycle() []*objectDecodeState {
 	for elem := ds.pending.Front(); elem != nil; elem = elem.Next() {
 		for _, callback := range elem.ods.callbacks {
 			// User callbacks do not represent blocking dependencies.
-			if waiter := callback.source(); waiter != nil {
+			if waiter := callback.waiter; waiter != nil {
 				blockers[waiter] = elem.ods
 			}
 		}
@@ -662,6 +653,12 @@ func (ds *decodeState) findCycle() []*objectDecodeState {
 func (ds *decodeState) Load(obj reflect.Value) {
 	ds.stats.init()
 	defer ds.stats.fini(func(id typeID) string {
+		if ds.codecs {
+			if int(id) < len(ds.typedNames) {
+				return ds.typedNames[id]
+			}
+			return ""
+		}
 		return ds.types.LookupName(id)
 	})
 
@@ -676,6 +673,20 @@ func (ds *decodeState) Load(obj reflect.Value) {
 	if !object {
 		Failf("object missing")
 	}
+	// The typed format requires codecs; other streams are decoded by
+	// decodeObject.
+	typed := numObjects&typedFlag != 0
+	numObjects &^= typedFlag
+	if typed {
+		if !ds.codecs {
+			Failf("typed format stream with codecs disabled")
+		}
+		if h := wire.ReadUint(&ds.r); h != schemaHash() {
+			Failf("stream schema %#x does not match %#x: incompatible version", h, schemaHash())
+		}
+	}
+	ds.codecs = typed
+	ds.growObjectsByID(objectID(min(numObjects, 1<<20)))
 
 	// Decode all objects.
 	var (
@@ -694,14 +705,27 @@ func (ds *decodeState) Load(obj reflect.Value) {
 			if tag == wire.TagUint {
 				id = objectID(wire.ReadUint(&ds.r))
 				i++
-				// Unmarshal and resolve the actual object.
-				tag = wire.Tag(wire.ReadUint(&ds.r))
 				ods = ds.lookup(id)
-				if ods != nil && ds.codecs && ds.decodeTop(ods, tag) {
-					ods = nil
-					continue
+				if typed {
+					switch wire.ReadUint(&ds.r) {
+					case objectTyped:
+						// Typed objects follow a reference
+						// that provides their decoder (see
+						// writeObjects).
+						if ods == nil {
+							Failf("object %d before any reference to it", id)
+						}
+						ds.decodeTop(&ds.dec, ods)
+						ods = nil
+						continue
+					case objectStandalone:
+						ds.loadStandalone(id, ods)
+						ods = nil
+						continue
+					}
 				}
-				encoded = wire.LoadTagged(&ds.r, tag)
+				// Unmarshal and resolve the actual object.
+				encoded = wire.Load(&ds.r)
 				if ods != nil {
 					// Decode the object.
 					ds.decodeObject(ods, ods.obj, encoded)
@@ -737,6 +761,9 @@ func (ds *decodeState) Load(obj reflect.Value) {
 	}
 
 	// Check if we have any deferred objects.
+	for id := range ds.standalone {
+		Failf("standalone object %d was never decoded", id)
+	}
 	for id, encoded := range ds.deferred {
 		if s, ok := encoded.(*wire.Struct); ok && s.TypeID != 0 {
 			typ := ds.types.LookupType(typeID(s.TypeID))

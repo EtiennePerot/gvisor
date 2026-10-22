@@ -16,7 +16,10 @@ package state
 
 import (
 	"context"
+	"hash/fnv"
 	"reflect"
+	"sort"
+	"sync"
 	"sync/atomic"
 )
 
@@ -67,43 +70,66 @@ func (ti *TypeIndex) get() uint32 {
 	return index
 }
 
-// Mode describes how a value is encoded.
-type Mode uint8
-
+// The typed format.
+//
+// Save uses the typed format when codecs are enabled. It is not compatible
+// with the format of StateSave, and has no tags or type headers: values are
+// encoded as their static types dictate.
+//
+//   - The stream header has typedFlag set, and is followed by schemaHash: the
+//     types of the encoder and decoder must match exactly.
+//   - Objects follow, each preceded by its ID (as a tagged Uint), possibly
+//     preceded by type definitions (as by StateSave), and followed by its
+//     kind: objectTyped, objectLegacy or objectStandalone. Typed objects
+//     follow a reference that lets the decoder create them and provides
+//     their decoder (see writeObjects); standalone objects, for which the
+//     encoder found no such order, are typed objects with their type and
+//     length, which the decoder holds until it has their decoder.
+//   - Typed objects are encoded by Encoder: structs as their fields, in
+//     order; integers as varints; floats in little-endian; strings and byte
+//     arrays as is; pointers, slices, maps and interfaces as described by
+//     Encoder.pointer, Encoder.slice, EncodeMap and Encoder.iface.
+//   - Values that the typed encoder doesn't handle (about 2% of the objects
+//     of a typical kernel, e.g. maps and slices of types from other packages
+//     whose elements the generated code can't name) are encoded by
+//     encodeObject, as tagged wire.Objects, and decoded by decodeObject.
 const (
-	// ModeDefault encodes struct fields and top-level objects: primitive
-	// zero values (including nil pointers, slices, maps and interfaces) are
-	// encoded as Nil.
-	ModeDefault Mode = iota
+	// typedFlag is set in the stream header for the typed format.
+	typedFlag uint64 = 1 << 62
 
-	// ModeValue encodes array, slice and map elements, and values held in
-	// interfaces: values are always encoded in full.
-	ModeValue
-
-	// ModeValueUntagged is ModeValue for array and map elements after the
-	// first one, which are encoded without their tag.
-	ModeValueUntagged
+	// objectTyped, objectLegacy and objectStandalone precede typed
+	// objects, objects encoded by encodeObject, and typed objects with
+	// their type and length.
+	objectTyped      = 0
+	objectLegacy     = 1
+	objectStandalone = 2
 )
 
-// tagged returns true if values encoded with mode m include their tag.
-func (m Mode) tagged() bool {
-	return m != ModeValueUntagged
-}
+var (
+	schemaOnce sync.Once
+	schema     uint64
+)
 
-// strategy returns the encodeStrategy corresponding to m.
-func (m Mode) strategy() encodeStrategy {
-	if m == ModeDefault {
-		return encodeDefault
-	}
-	return encodeAsValue
-}
-
-// elemMode returns the mode of the i-th element of an array or map.
-func elemMode(i int) Mode {
-	if i == 0 {
-		return ModeValue
-	}
-	return ModeValueUntagged
+// schemaHash returns a hash of the names and fields of all registered types.
+func schemaHash() uint64 {
+	schemaOnce.Do(func() {
+		names := make([]string, 0, len(globalTypeDatabase))
+		for name := range globalTypeDatabase {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		h := fnv.New64a()
+		for _, name := range names {
+			h.Write([]byte(name))
+			h.Write([]byte{0})
+			for _, f := range reverseTypeDatabase[globalTypeDatabase[name]].Fields {
+				h.Write([]byte(f))
+				h.Write([]byte{1})
+			}
+		}
+		schema = h.Sum64()
+	})
+	return schema
 }
 
 // Unsigned is the set of unsigned integer types.
@@ -119,6 +145,13 @@ type Signed interface {
 // typeOf returns the reflect.Type of T. It does not allocate.
 func typeOf[T any]() reflect.Type {
 	return reflect.TypeFor[T]()
+}
+
+// IsTyped returns true if length, an object header length returned by
+// ReadHeader, starts an object graph in the typed format. Decoding the typed
+// format requires the Go types, so it can't be printed by pretty.
+func IsTyped(length uint64) bool {
+	return length&typedFlag != 0
 }
 
 // DisableCodecs disables the use of Codec methods by Save and Load, which then
