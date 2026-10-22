@@ -56,6 +56,10 @@ type Decoder struct {
 	// lastRef is the object referred to by the last decoded value, as found
 	// by waitObject, or zero.
 	lastRef objectID
+
+	// dots and names are scratch space for target.
+	dots  []dot
+	names []byte
 }
 
 // Context returns the context object provided at load time.
@@ -95,15 +99,24 @@ func (d *Decoder) LoadValueNow(ref uint32) bool {
 	return id == 0 || id == d.ods.id || id == 1
 }
 
-// LoadValueLater runs fn, the loader of a field saved through a value, once
-// the object ref is complete. See LoadValueNow.
-func (d *Decoder) LoadValueLater(ref uint32, fn func()) {
-	d.ds.wait(d.ods, objectID(ref), fn)
+// LoadValueLater calls x.StateLoadValue(ctx, field, v), to load the field
+// saved through the value v, once the object ref is complete. See
+// LoadValueNow.
+func (d *Decoder) LoadValueLater(ref uint32, x valueLoader, field int, v any) {
+	ds := d.ds
+	if len(ds.valueCallbacks) == 0 {
+		ds.valueCallbacks = make([]valueCallback, 32)
+	}
+	vc := &ds.valueCallbacks[0]
+	ds.valueCallbacks = ds.valueCallbacks[1:]
+	*vc = valueCallback{x: x, field: field, v: v}
+	ds.waitCallback(d.ods, objectID(ref), callback{obj: vc})
 }
 
-// AfterLoad implements Source.AfterLoad.
-func (d *Decoder) AfterLoad(fn func()) {
-	d.ods.addCallback(callback{fn: fn})
+// AfterLoad implements Source.AfterLoad for Codec structs with an afterLoad
+// method, without allocating.
+func (d *Decoder) AfterLoad(a afterLoader) {
+	d.ods.addCallback(d.ds, callback{obj: a})
 }
 
 // LoadEncoded loads the next value as a wire.Object, for LoadValue.
@@ -156,6 +169,19 @@ func (ds *decodeState) newObject(id objectID, ptr unsafe.Pointer, typ reflect.Ty
 	return ods
 }
 
+// pointerArena is storage for pointer-shaped objects (see allocPointer).
+type pointerArena []unsafe.Pointer
+
+// allocPointer returns storage for a pointer-shaped object.
+func (ds *decodeState) allocPointer() unsafe.Pointer {
+	if len(ds.pointerArena) == 0 {
+		ds.pointerArena = make(pointerArena, 64)
+	}
+	p := &ds.pointerArena[0]
+	ds.pointerArena = ds.pointerArena[1:]
+	return unsafe.Pointer(p)
+}
+
 // ref reads a reference: zero for nil, or an object ID shifted left by one,
 // with the low bit set if dots and a type follow (see writeRef). If dots
 // follow, the caller must call target.
@@ -164,12 +190,90 @@ func (d *Decoder) ref() (root objectID, dots bool) {
 	return objectID(v >> 1), v&1 != 0
 }
 
+// dot is a reference dot read by target.
+type dot struct {
+	// index is the array index, or the length of the field name in names,
+	// for fields.
+	index int
+	field bool
+}
+
+// fieldKey identifies a struct field by name.
+type fieldKey struct {
+	typ  reflect.Type
+	name string
+}
+
 // target reads the dots and type of a reference to a part of the object
-// root (see ref), of type typ, and returns its address.
+// root (see ref), of type typ, and returns its address. Dots are walked by
+// reflection, but without allocating.
 func (d *Decoder) target(root objectID, typ reflect.Type) unsafe.Pointer {
-	ref := &wire.Ref{Root: wire.Uint(root), Dots: wire.ReadDots(d.r, d.uint())}
-	ref.Type = wire.ReadTypeSpec(d.r)
-	return d.ds.register(ref, typ).Addr().UnsafePointer()
+	n := d.uint()
+	if n > 1<<10 {
+		Failf("invalid number of reference dots %d", n)
+	}
+	d.dots = d.dots[:0]
+	d.names = d.names[:0]
+	for i := uint64(0); i < n; i++ {
+		x := wire.ReadInt(d.r)
+		if x >= 0 {
+			d.dots = append(d.dots, dot{index: int(x)})
+			continue
+		}
+		l := -x
+		if l > 1<<16 {
+			Failf("invalid field name length %d", l)
+		}
+		start := len(d.names)
+		d.names = append(d.names, make([]byte, l)...)
+		wire.ReadFull(d.r, d.names[start:])
+		d.dots = append(d.dots, dot{index: int(l), field: true})
+	}
+	spec := wire.ReadTypeSpec(d.r)
+	ds := d.ds
+	ds.growObjectsByID(root)
+	ods := ds.objectsByID[root-1]
+	if ods == nil {
+		otyp := ds.findType(spec)
+		ods = ds.newObject(root, reflect.New(otyp).UnsafePointer(), otyp, nil, nil)
+	}
+	// Dots are in reverse order; field names are in order in names.
+	obj := ods.obj
+	end := len(d.names)
+	for i := len(d.dots) - 1; i >= 0; i-- {
+		dt := d.dots[i]
+		if !dt.field {
+			if obj.Kind() != reflect.Array || dt.index >= obj.Len() {
+				Failf("invalid reference index %d into %v", dt.index, obj.Type())
+			}
+			obj = obj.Index(dt.index)
+			continue
+		}
+		if obj.Kind() != reflect.Struct {
+			Failf("invalid reference field into %v", obj.Type())
+		}
+		name := d.names[end-dt.index : end]
+		end -= dt.index
+		key := fieldKey{obj.Type(), unsafe.String(unsafe.SliceData(name), len(name))}
+		f, ok := ds.fields[key]
+		if !ok {
+			sf, found := key.typ.FieldByName(key.name)
+			if !found || len(sf.Index) != 1 {
+				Failf("no field %q in %v", key.name, key.typ)
+			}
+			f = sf.Index[0]
+			key.name = string(name)
+			if ds.fields == nil {
+				ds.fields = make(map[fieldKey]int)
+			}
+			ds.fields[key] = f
+		}
+		obj = obj.Field(f)
+	}
+	if obj.Type() != typ {
+		Failf("reference to %v, not %v", obj.Type(), typ)
+	}
+	return obj.Addr().UnsafePointer()
 }
 
 // structValue decodes a struct of type typ at p, implementing Codec c.
@@ -482,8 +586,41 @@ func (md mapDecoder[M, K, V]) decode(d *Decoder, ods *objectDecodeState) {
 	m := *(*M)(ods.ptr)
 	n := d.uint()
 	ds := d.ds
+	// Struct and array loaders may retain the addresses of the keys and
+	// values (for afterLoad), so these must be distinct; other values are
+	// copied into the map, and their variables can be reused.
+	reuseKey := typeOf[K]().Kind() != reflect.Struct && typeOf[K]().Kind() != reflect.Array
+	reuseVal := typeOf[V]().Kind() != reflect.Struct && typeOf[V]().Kind() != reflect.Array
+	var k *K
+	var v *V
+	if reuseKey && reuseVal {
+		// Reuse variables across maps of the same type, as mapEncoder.
+		kv, _ := ds.mapScratch[ods.obj.Type()].(*mapEntry[K, V])
+		if kv == nil {
+			kv = new(mapEntry[K, V])
+			if ds.mapScratch == nil {
+				ds.mapScratch = make(map[reflect.Type]any)
+			}
+			ds.mapScratch[ods.obj.Type()] = kv
+		}
+		k, v = &kv.k, &kv.v
+		*kv = mapEntry[K, V]{}
+	} else {
+		k, v = new(K), new(V)
+	}
 	for i := uint64(0); i < n; i++ {
-		k, v := new(K), new(V)
+		if i > 0 {
+			if reuseKey {
+				*k = *new(K)
+			} else {
+				k = new(K)
+			}
+			if reuseVal {
+				*v = *new(V)
+			} else {
+				v = new(V)
+			}
+		}
 		d.lastRef = 0
 		md.key(d, k)
 		kRef := d.lastRef
@@ -526,7 +663,8 @@ func DecodeMap[M ~map[K]V, K comparable, V any](d *Decoder, p *M, key func(*Deco
 		*p = *mp
 		return
 	}
-	mp := new(M)
+	// Maps are pointer-shaped.
+	mp := (*M)(d.ds.allocPointer())
 	*mp = make(M)
 	d.ds.newObject(root, unsafe.Pointer(mp), typeOf[M](), mapDecoder[M, K, V]{key}, val)
 	*p = *mp

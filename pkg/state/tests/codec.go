@@ -122,3 +122,10 @@ func (n *graphNode) beforeSave() {
 func (n *graphNode) afterLoad(context.Context) {
 	n.Loaded++
 }
+
+// nestedMaps has a map of maps, like netlink's port.Manager.
+//
+// +stateify savable
+type nestedMaps struct {
+	M map[int]map[int32]struct{}
+}
