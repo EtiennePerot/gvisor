@@ -40,20 +40,78 @@ type Reader struct {
 	io.Reader
 
 	// br is Reader as an io.ByteReader (e.g. bufio.Reader), if it implements
-	// it. brInit is true once br has been initialized by readByte.
+	// it. brInit is true once br and bufr have been initialized.
 	br     io.ByteReader
 	brInit bool
+
+	// bufr is Reader as a bufferedReader, if it implements it.
+	bufr bufferedReader
+
+	// win is buffered data peeked from bufr. Its first used bytes have been
+	// consumed, but not yet discarded from bufr. See Sync.
+	win  []byte
+	used int
 
 	// buf is used by readByte if Reader does not implement io.ByteReader.
 	buf [1]byte
 }
 
+// bufferedReader is implemented by readers (such as bufio.Reader) that let
+// Reader decode from their buffer directly. Reader never reads more than it
+// consumes from such a reader.
+type bufferedReader interface {
+	io.ByteReader
+	Buffered() int
+	Peek(n int) ([]byte, error)
+	Discard(n int) (int, error)
+}
+
+// Sync discards consumed data from the underlying reader. It must be called
+// before the underlying reader is used directly after r.
+func (r *Reader) Sync() {
+	if r.used > 0 {
+		if _, err := r.bufr.Discard(r.used); err != nil {
+			panic(err)
+		}
+	}
+	r.win = nil
+	r.used = 0
+}
+
+// window returns the unconsumed buffered data.
+func (r *Reader) window() []byte {
+	return r.win[r.used:]
+}
+
 // readByte reads a single byte from r.Reader without allocation. It panics on
 // error.
 func (r *Reader) readByte() byte {
+	if r.used < len(r.win) {
+		b := r.win[r.used]
+		r.used++
+		return b
+	}
+	return r.readByteSlow()
+}
+
+// readByteSlow implements readByte when the window is empty.
+func (r *Reader) readByteSlow() byte {
 	if !r.brInit {
 		r.br, _ = r.Reader.(io.ByteReader)
+		r.bufr, _ = r.Reader.(bufferedReader)
 		r.brInit = true
+	}
+	if r.bufr != nil {
+		r.Sync()
+		if n := r.bufr.Buffered(); n > 0 {
+			win, err := r.bufr.Peek(n)
+			if len(win) == 0 {
+				panic(err)
+			}
+			r.win = win
+			r.used = 1
+			return win[0]
+		}
 	}
 	if r.br != nil {
 		b, err := r.br.ReadByte()
@@ -132,6 +190,14 @@ func (w *Writer) write(p []byte) {
 // contract dictates that it must always complete all bytes given or return an
 // error.
 func readFull(r *Reader, p []byte) {
+	if win := r.window(); len(win) >= len(p) {
+		copy(p, win)
+		r.used += len(p)
+		return
+	}
+	if r.bufr != nil {
+		r.Sync()
+	}
 	for done := 0; done < len(p); {
 		n, err := r.Read(p[done:])
 		done += n
@@ -202,6 +268,21 @@ func loadUint(r *Reader) Uint {
 		u Uint
 		s uint
 	)
+	if win := r.window(); len(win) >= 10 {
+		for i := 0; i <= 9; i++ {
+			b := win[i]
+			if b < 0x80 {
+				if i == 9 && b > 1 {
+					panic("overflow")
+				}
+				r.used += i + 1
+				return u | Uint(b)<<s
+			}
+			u |= Uint(b&0x7f) << s
+			s += 7
+		}
+		panic("overflow")
+	}
 	for i := 0; i <= 9; i++ {
 		b := r.readByte()
 		if b < 0x80 {

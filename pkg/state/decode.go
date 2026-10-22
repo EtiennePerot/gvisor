@@ -753,6 +753,8 @@ func ReadHeader(r *wire.Reader) (length uint64, object bool, err error) {
 	// Read the header.
 	err = safely(func() {
 		length = wire.LoadUint(r)
+		// The caller may read from the underlying reader next.
+		r.Sync()
 	})
 	if err != nil {
 		// On the header, pass raw I/O errors.
