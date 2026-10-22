@@ -628,7 +628,7 @@ func (i *lisafsInode) restoreInode(ctx context.Context, inode *lisafs.Inode, opt
 	//	- We need to associate the new inoKey with the existing i.ino.
 	i.inoKey = inoKeyFromStatx(&inode.Stat)
 	i.fs.inoMu.Lock()
-	i.fs.inoByKey[i.inoKey] = i.ino
+	i.fs.setInoLocked(i.inoKey, i.ino)
 	i.fs.inoMu.Unlock()
 	// inodeByKey contains non-directory inodes only.
 	if !d.isDir() {

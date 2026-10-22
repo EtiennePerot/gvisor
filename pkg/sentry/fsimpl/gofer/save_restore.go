@@ -277,7 +277,9 @@ func (fs *filesystem) CompleteRestore(ctx context.Context, opts vfs.CompleteRest
 		return fmt.Errorf("no server FD available for filesystem with unique ID %q, map: %#v", fs.iopts.UniqueID, fdmap)
 	}
 	fs.opts.fd = fd
+	fs.inoMapper = newInoMapper()
 	fs.inoByKey = make(map[inoKey]uint64)
+	fs.remappedInos = make(map[uint64]struct{})
 	fs.inodeByKey = make(map[inoKey]*inode)
 
 	if err := fs.restoreRoot(ctx, &opts); err != nil {

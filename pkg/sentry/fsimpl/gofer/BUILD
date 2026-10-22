@@ -76,6 +76,7 @@ go_library(
         "handle.go",
         "host_named_pipe.go",
         "inode_impl.go",
+        "inode_number.go",
         "inode_refs.go",
         "lisafs_inode.go",
         "regular_file.go",
@@ -138,7 +139,10 @@ go_library(
 
 go_test(
     name = "gofer_test",
-    srcs = ["gofer_test.go"],
+    srcs = [
+        "gofer_test.go",
+        "inode_number_test.go",
+    ],
     embed = [":gofer"],
     deps = [
         "//pkg/abi/linux",
