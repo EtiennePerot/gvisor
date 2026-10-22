@@ -169,7 +169,9 @@ func TestEmitCodec(t *testing.T) {
 		"state.EncodeInt(stateEncoder, &vValue)\n\tstate.EncodePointer(stateEncoder, &x.w)",
 		// Values are decoded in slot order, and loaded last, as by StateLoad.
 		"var vValue int64\n\tstateDecoder.BeginWait()\n\tstate.DecodeInt(stateDecoder, &vValue)\n\tvRef := stateDecoder.EndValue()\n\tstateDecoder.BeginWait()\n\tstate.DecodePointer(stateDecoder, &x.w)\n\tstateDecoder.EndWait()",
-		"if stateDecoder.LoadValueNow(vRef) {\n\t\tx.loadV(ctx, vValue)\n\t} else {\n\t\tstateDecoder.LoadValueLater(vRef, func() { x.loadV(ctx, vValue) })\n\t}\n\tstateDecoder.AfterLoad(func() { x.afterLoad(ctx) })\n}",
+		"if stateDecoder.LoadValueNow(vRef) {\n\t\tx.loadV(ctx, vValue)\n\t} else {\n\t\tstateDecoder.LoadValueLater(vRef, x, 18, vValue)\n\t}\n\tstateDecoder.AfterLoad(x)\n}",
+		"func (x *node) StateLoadValue(ctx context.Context, stateField int, stateValue any) {\n\tswitch stateField {\n\tcase 18:\n\t\tstateV, _ := stateValue.(int64)\n\t\tx.loadV(ctx, stateV)\n\t}\n}",
+		"func (x *node) StateAfterLoad(ctx context.Context) {\n\tx.afterLoad(ctx)\n}",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("generated code does not contain\n%s\n\ngenerated code:\n%s", want, out)

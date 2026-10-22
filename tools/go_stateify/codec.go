@@ -342,7 +342,7 @@ func (g *codecGen) emitCodec(w io.Writer, recv, name string, ss *ast.StructType,
 			fmt.Fprintf(w, "	%s\n", g.fieldCall(recv+"."+f.name, f.typ, true))
 		}
 	}
-	for _, f := range fields {
+	for i, f := range fields {
 		if f.kind != fieldValue {
 			continue
 		}
@@ -350,17 +350,38 @@ func (g *codecGen) emitCodec(w io.Writer, recv, name string, ss *ast.StructType,
 			fmt.Fprintf(w, "	if stateDecoder.LoadValueNow(%sRef) {\n", f.name)
 			fmt.Fprintf(w, "		%s.load%s(ctx, %sValue)\n", recv, camelCased(f.name), f.name)
 			fmt.Fprintf(w, "	} else {\n")
-			fmt.Fprintf(w, "		stateDecoder.LoadValueLater(%sRef, func() { %s.load%s(ctx, %sValue) })\n", f.name, recv, camelCased(f.name), f.name)
+			fmt.Fprintf(w, "		stateDecoder.LoadValueLater(%sRef, %s, %d, %sValue)\n", f.name, recv, i, f.name)
 			fmt.Fprintf(w, "	}\n")
 		} else {
 			fmt.Fprintf(w, "	stateDecoder.LoadValue(%sEncoded, new(%s), func(y any) { %s.load%s(ctx, y.(%s)) })\n", f.name, f.valueType, recv, camelCased(f.name), f.valueType)
 		}
 	}
 	if hasAfterLoad {
-		fmt.Fprintf(w, "	stateDecoder.AfterLoad(func() { %s.afterLoad(ctx) })\n", recv)
+		fmt.Fprintf(w, "	stateDecoder.AfterLoad(%s)\n", recv)
 	}
 	fmt.Fprintf(w, "}\n\n")
 
+	if len(parsed) != 0 {
+		fmt.Fprintf(w, "// StateLoadValue is called by the state package to load fields saved through values.\n")
+		fmt.Fprintf(w, "func (%s *%s) StateLoadValue(ctx context.Context, stateField int, stateValue any) {\n", recv, name)
+		fmt.Fprintf(w, "	switch stateField {\n")
+		for i, f := range fields {
+			if f.kind == fieldValue && parsed[f.name] {
+				fmt.Fprintf(w, "	case %d:\n", i)
+				// v may be a nil interface value.
+				fmt.Fprintf(w, "		stateV, _ := stateValue.(%s)\n", f.valueType)
+				fmt.Fprintf(w, "		%s.load%s(ctx, stateV)\n", recv, camelCased(f.name))
+			}
+		}
+		fmt.Fprintf(w, "	}\n")
+		fmt.Fprintf(w, "}\n\n")
+	}
+	if hasAfterLoad {
+		fmt.Fprintf(w, "// StateAfterLoad is called by the state package after the object is loaded.\n")
+		fmt.Fprintf(w, "func (%s *%s) StateAfterLoad(ctx context.Context) {\n", recv, name)
+		fmt.Fprintf(w, "	%s.afterLoad(ctx)\n", recv)
+		fmt.Fprintf(w, "}\n\n")
+	}
 }
 
 // emitIdentCodec emits the Codec methods of a type identical to typeName.

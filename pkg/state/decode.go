@@ -24,19 +24,61 @@ import (
 	"gvisor.dev/gvisor/pkg/state/wire"
 )
 
-// callback is called on object completion: it is either a dependent object
-// (waiter) or a user callback (fn).
+// afterLoader is implemented by Codec structs with an afterLoad method.
+type afterLoader interface {
+	StateAfterLoad(context.Context)
+}
+
+// valueLoader is implemented by generated Codec structs with fields saved
+// through values. StateLoadValue loads the value v of the field with the given
+// index.
+type valueLoader interface {
+	StateLoadValue(ctx context.Context, field int, v any)
+}
+
+// callback is called on object completion. obj is one of:
+//   - a dependent *objectDecodeState, which is unblocked;
+//   - a user callback func();
+//   - a *valueCallback;
+//   - an afterLoader.
+//
+// It is not an interface, so that adding one doesn't allocate.
 type callback struct {
-	waiter *objectDecodeState
-	fn     func()
+	obj any
+}
+
+// valueCallback loads v into the field with the given index of x, saved
+// through a value.
+type valueCallback struct {
+	x     valueLoader
+	field int
+	v     any
+}
+
+// fnCallback returns a callback calling fn, which may be nil.
+func fnCallback(fn func()) callback {
+	if fn == nil {
+		return callback{}
+	}
+	return callback{obj: fn}
+}
+
+// empty returns true if c does nothing.
+func (c *callback) empty() bool {
+	return c.obj == nil
 }
 
 // run runs the callback.
 func (c *callback) run(ds *decodeState) {
-	if c.waiter != nil {
-		c.waiter.callbackRun(ds)
-	} else {
-		c.fn()
+	switch x := c.obj.(type) {
+	case *objectDecodeState:
+		x.callbackRun(ds)
+	case func():
+		x()
+	case *valueCallback:
+		x.x.StateLoadValue(ds.ctx, x.field, x.v)
+	default:
+		x.(afterLoader).StateAfterLoad(ds.ctx)
 	}
 }
 
@@ -94,9 +136,20 @@ type odsListElem struct {
 }
 
 // addCallback adds a callback to the objectDecodeState.
-func (ods *objectDecodeState) addCallback(c callback) {
+func (ods *objectDecodeState) addCallback(ds *decodeState, c callback) {
 	if ods.callbacks == nil {
 		ods.callbacks = ods.callbacksInline[:0]
+	}
+	if len(ods.callbacks) == cap(ods.callbacks) {
+		// Grow from an arena, rather than allocating.
+		n := 2 * cap(ods.callbacks)
+		if n > len(ds.callbackArena) {
+			ds.callbackArena = make([]callback, max(n, 128))
+		}
+		cbs := ds.callbackArena[:len(ods.callbacks):n]
+		ds.callbackArena = ds.callbackArena[n:]
+		copy(cbs, ods.callbacks)
+		ods.callbacks = cbs
 	}
 	ods.callbacks = append(ods.callbacks, c)
 }
@@ -154,8 +207,26 @@ type decodeState struct {
 	// are not known yet (see loadStandalone).
 	standalone map[objectID][]byte
 
+	// callbackArena is storage for callbacks (see addCallback).
+	callbackArena []callback
+
+	// valueCallbacks is storage for valueCallbacks.
+	valueCallbacks []valueCallback
+
+	// mapScratch holds a *mapEntry for some map types, for mapDecoder.
+	mapScratch map[reflect.Type]any
+
+	// pointerArena is storage for pointer-shaped objects.
+	pointerArena pointerArena
+
+	// fields caches struct field indices for reference dots.
+	fields map[fieldKey]int
+
 	// typedNames are the names of types by TypeIndex, for stats.
 	typedNames []string
+
+	// objectArena allocates objectDecodeStates.
+	objectArena []objectDecodeState
 
 	// dec is the Decoder used for top-level objects.
 	dec Decoder
@@ -204,14 +275,20 @@ func (ds *decodeState) checkComplete(ods *objectDecodeState) bool {
 // decoding object because it may have fields that are already decoded. We also
 // allow trivial self reference, since they can be handled internally.
 func (ds *decodeState) wait(waiter *objectDecodeState, id objectID, fn func()) {
+	ds.waitCallback(waiter, id, fnCallback(fn))
+}
+
+// waitCallback is wait, with the callback c (which may be empty) instead of
+// fn. Self and root references run c immediately.
+func (ds *decodeState) waitCallback(waiter *objectDecodeState, id objectID, c callback) {
 	switch id {
 	case waiter.id:
 		// Trivial self reference.
 		fallthrough
 	case 1:
 		// Root object; see above.
-		if fn != nil {
-			fn()
+		if !c.empty() {
+			c.run(ds)
 		}
 		return
 	}
@@ -224,13 +301,13 @@ func (ds *decodeState) wait(waiter *objectDecodeState, id objectID, fn func()) {
 
 	// No nil can be returned here.
 	other := ds.lookup(id)
-	if fn != nil {
+	if !c.empty() {
 		// Add the additional user callback.
-		other.addCallback(callback{fn: fn})
+		other.addCallback(ds, c)
 	}
 
 	// Mark waiter as unblocked.
-	other.addCallback(callback{waiter: waiter})
+	other.addCallback(ds, callback{obj: waiter})
 }
 
 // waitObject notes a blocking relationship.
@@ -285,7 +362,11 @@ func (ds *decodeState) growObjectsByID(id objectID) {
 }
 
 func (ds *decodeState) addObject(id objectID, obj reflect.Value) *objectDecodeState {
-	ods := &objectDecodeState{}
+	if len(ds.objectArena) == cap(ds.objectArena) {
+		ds.objectArena = make([]objectDecodeState, 0, min(max(2*cap(ds.objectArena), 16), 256))
+	}
+	ds.objectArena = ds.objectArena[:len(ds.objectArena)+1]
+	ods := &ds.objectArena[len(ds.objectArena)-1]
 	ods.id = id
 	ods.obj = obj
 	ods.ptr = obj.Addr().UnsafePointer()
@@ -364,7 +445,7 @@ func (od *objectDecoder) load(slot int, objPtr reflect.Value, wait bool, fn func
 func (od *objectDecoder) afterLoad(fn func()) {
 	// Queue the local callback; this will execute when all of the above
 	// data dependencies have been cleared.
-	od.ods.addCallback(callback{fn: fn})
+	od.ods.addCallback(od.ds, fnCallback(fn))
 }
 
 // decodeStruct decodes a struct value.
@@ -629,7 +710,7 @@ func (ds *decodeState) findCycle() []*objectDecodeState {
 	for elem := ds.pending.Front(); elem != nil; elem = elem.Next() {
 		for _, callback := range elem.ods.callbacks {
 			// User callbacks do not represent blocking dependencies.
-			if waiter := callback.waiter; waiter != nil {
+			if waiter, ok := callback.obj.(*objectDecodeState); ok {
 				blockers[waiter] = elem.ods
 			}
 		}

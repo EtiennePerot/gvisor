@@ -449,10 +449,28 @@ func (me mapEncoder[M, K, V]) encode(e *Encoder, oes *objectEncodeState) {
 	val := oes.encArg.(func(*Encoder, *V))
 	m := oes.obj.Interface().(M)
 	e.buf = wire.AppendUint(e.buf, uint64(len(m)))
-	for k, v := range m {
-		me.key(e, &k)
-		val(e, &v)
+	// Reuse the same variables, which escape since the encoders take their
+	// addresses, across maps of the same type. Map encoding is not
+	// reentrant: map elements refer to other maps.
+	kv, _ := e.es.mapScratch[oes.obj.Type()].(*mapEntry[K, V])
+	if kv == nil {
+		kv = new(mapEntry[K, V])
+		if e.es.mapScratch == nil {
+			e.es.mapScratch = make(map[reflect.Type]any)
+		}
+		e.es.mapScratch[oes.obj.Type()] = kv
 	}
+	for kv.k, kv.v = range m {
+		me.key(e, &kv.k)
+		val(e, &kv.v)
+	}
+	*kv = mapEntry[K, V]{}
+}
+
+// mapEntry holds a map key and value.
+type mapEntry[K, V any] struct {
+	k K
+	v V
 }
 
 // EncodeMap encodes a map whose keys and values are encoded by key and val: a
@@ -706,4 +724,11 @@ func (es *encodeState) writeTyped(oes *objectEncodeState, standalone bool) {
 		wire.SaveUint(&es.w, uint64(es.standaloneBuf.Len()))
 		es.w.WriteBytes(es.standaloneBuf.Bytes())
 	}
+}
+
+// copyMap returns a copy of the map value obj, which doesn't alias obj.
+func copyMap(obj reflect.Value) reflect.Value {
+	p := new(unsafe.Pointer)
+	*p = obj.UnsafePointer()
+	return reflect.NewAt(obj.Type(), unsafe.Pointer(p)).Elem()
 }
