@@ -228,8 +228,9 @@ func TestStateEncodingCorrupt(t *testing.T) {
 	}
 }
 
-// TestStateFileSaveLoad checks saving and loading through the state file,
-// and loading JSON state files written by older versions of runsc.
+// TestStateFileSaveLoad checks that state files are saved with CBOR and
+// loaded, and that JSON state files written by older versions of runsc are
+// loaded.
 func TestStateFileSaveLoad(t *testing.T) {
 	rootDir := t.TempDir()
 	want := testContainer(t, rootDir)
@@ -240,6 +241,13 @@ func TestStateFileSaveLoad(t *testing.T) {
 		t.Fatalf("SaveLocked: %v", err)
 	}
 	want.Saver.UnlockOrDie()
+	data, err := os.ReadFile(want.Saver.statePath())
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !bytes.HasPrefix(data, stateFileMagic) {
+		t.Errorf("state file %x doesn't start with %x", data, stateFileMagic)
+	}
 
 	load := func() *Container {
 		t.Helper()

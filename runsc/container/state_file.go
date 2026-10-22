@@ -384,7 +384,7 @@ func (s *StateFile) UnlockOrDie() {
 	}
 }
 
-// SaveLocked saves 'v' to the state file.
+// SaveLocked saves 'v' to the state file, encoded with CBOR.
 //
 // Preconditions: lock(*) must been called before.
 func (s *StateFile) SaveLocked(v any) error {
@@ -392,7 +392,7 @@ func (s *StateFile) SaveLocked(v any) error {
 		panic("saveLocked called without lock held")
 	}
 
-	meta, err := json.Marshal(v)
+	meta, err := encodeState(v)
 	if err != nil {
 		return err
 	}
