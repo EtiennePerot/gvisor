@@ -48,10 +48,135 @@ const (
 	tcpWMem
 )
 
-// newSysDir returns the dentry corresponding to /proc/sys directory.
+// lazySysDir is a /proc/sys directory whose children are created on first
+// use.
+//
+// Each procfs instance has about 100 /proc/sys inodes, and most workloads only
+// access a few of them. Creating them lazily keeps unused ones out of memory
+// and out of checkpoints: directories that were never populated are saved
+// empty, and are populated after restore if needed.
+//
+// A lazySysDir is only used for directories that have children, so that
+// HasChildren doesn't need to populate it.
+//
+// +stateify savable
+type lazySysDir struct {
+	kernfs.StaticDirectory
+
+	fs    *filesystem
+	k     *kernel.Kernel
+	creds *auth.Credentials
+
+	// path is the path of the directory relative to /proc/sys, e.g.
+	// "net/core". It identifies the children to create, see
+	// filesystem.sysDirChildren. Immutable.
+	path string
+
+	// populateMu serializes populate calls.
+	populateMu sync.Mutex `state:"nosave"`
+
+	// populated is true once the children of the directory have been
+	// created.
+	populated atomicbitops.Bool
+}
+
+var _ kernfs.Inode = (*lazySysDir)(nil)
+
+func (fs *filesystem) newLazySysDir(ctx context.Context, creds *auth.Credentials, k *kernel.Kernel, path string) kernfs.Inode {
+	d := &lazySysDir{
+		fs:    fs,
+		k:     k,
+		creds: creds,
+		path:  path,
+	}
+	d.StaticDirectory.Init(ctx, creds, linux.UNNAMED_MAJOR, fs.devMinor, fs.NextIno(), 0555, kernfs.GenericDirectoryFDOptions{
+		SeekEnd: kernfs.SeekEndZero,
+	})
+	d.InitRefs()
+	d.OrderedChildren.Init(kernfs.OrderedChildrenOptions{})
+	return d
+}
+
+// populate creates the children of d, unless that has already been done.
+func (d *lazySysDir) populate(ctx context.Context) {
+	if d.populated.Load() {
+		return
+	}
+	d.populateMu.Lock()
+	defer d.populateMu.Unlock()
+	if d.populated.Load() {
+		return
+	}
+	links := d.OrderedChildren.Populate(d.fs.sysDirChildren(ctx, d.creds, d.k, d.path))
+	d.IncLinks(links)
+	d.populated.Store(true)
+}
+
+// Lookup implements kernfs.Inode.Lookup.
+func (d *lazySysDir) Lookup(ctx context.Context, name string) (kernfs.Inode, error) {
+	d.populate(ctx)
+	return d.StaticDirectory.Lookup(ctx, name)
+}
+
+// Open implements kernfs.Inode.Open.
+func (d *lazySysDir) Open(ctx context.Context, rp *vfs.ResolvingPath, kd *kernfs.Dentry, opts vfs.OpenOptions) (*vfs.FileDescription, error) {
+	d.populate(ctx)
+	return d.StaticDirectory.Open(ctx, rp, kd, opts)
+}
+
+// IterDirents implements kernfs.Inode.IterDirents.
+func (d *lazySysDir) IterDirents(ctx context.Context, mnt *vfs.Mount, cb vfs.IterDirentsCallback, offset, relOffset int64) (int64, error) {
+	d.populate(ctx)
+	return d.StaticDirectory.IterDirents(ctx, mnt, cb, offset, relOffset)
+}
+
+// Stat implements kernfs.Inode.Stat.
+func (d *lazySysDir) Stat(ctx context.Context, vfsfs *vfs.Filesystem, opts vfs.StatOptions) (linux.Statx, error) {
+	// The link count depends on the number of child directories.
+	d.populate(ctx)
+	return d.StaticDirectory.Stat(ctx, vfsfs, opts)
+}
+
+// HasChildren implements kernfs.Inode.HasChildren.
+func (d *lazySysDir) HasChildren() bool {
+	// Every lazySysDir has children once populated.
+	return !d.populated.Load() || d.StaticDirectory.HasChildren()
+}
+
+// newSysDir returns the inode for the /proc/sys directory.
 func (fs *filesystem) newSysDir(ctx context.Context, root *auth.Credentials, k *kernel.Kernel) kernfs.Inode {
-	return fs.newStaticDir(ctx, root, map[string]kernfs.Inode{
-		"kernel": fs.newStaticDir(ctx, root, map[string]kernfs.Inode{
+	return fs.newLazySysDir(ctx, root, k, "")
+}
+
+// sysDirChildren returns the children of the /proc/sys directory at path,
+// which is relative to /proc/sys.
+func (fs *filesystem) sysDirChildren(ctx context.Context, root *auth.Credentials, k *kernel.Kernel, path string) map[string]kernfs.Inode {
+	dir := func(name string) kernfs.Inode {
+		if path != "" {
+			name = path + "/" + name
+		}
+		return fs.newLazySysDir(ctx, root, k, name)
+	}
+	// TODO(gvisor.dev/issue/1833): Support for using the network stack in the
+	// network namespace of the calling process.
+	stack := k.RootNetworkNamespace().Stack()
+
+	switch path {
+	case "":
+		children := map[string]kernfs.Inode{
+			"kernel": dir("kernel"),
+			"fs":     dir("fs"),
+			"vm":     dir("vm"),
+			"user":   dir("user"),
+		}
+		if stack != nil {
+			children["net"] = dir("net")
+		} else {
+			children["net"] = fs.newStaticDir(ctx, root, nil)
+		}
+		return children
+	case "kernel":
+		return map[string]kernfs.Inode{
 			"cap_last_cap":       fs.newInode(ctx, root, 0444, newStaticFile(fmt.Sprintf("%d\n", linux.CAP_LAST_CAP))),
 			"hostname":           fs.newInode(ctx, root, 0444, &hostnameData{}),
 			"domainname":         fs.newInode(ctx, root, 0444, &domainnameData{}),
@@ -59,144 +184,156 @@ func (fs *filesystem) newSysDir(ctx context.Context, root *auth.Credentials, k *
 			"overflowuid":        fs.newInode(ctx, root, 0444, newStaticFile(fmt.Sprintf("%d\n", auth.OverflowUID))),
 			"pid_max":            fs.newInode(ctx, root, 0644, newStaticFile(fmt.Sprintf("%d\n", kernel.TasksLimit))),
 			"randomize_va_space": fs.newInode(ctx, root, 0644, newStaticFile("2\n")),
-			"random": fs.newStaticDir(ctx, root, map[string]kernfs.Inode{
-				"boot_id": fs.newInode(ctx, root, 0444, newStaticFile(randUUID())),
-				"uuid":    fs.newInode(ctx, root, 0444, &uuidData{}),
-			}),
-			"sem":    fs.newInode(ctx, root, 0444, newStaticFile(fmt.Sprintf("%d\t%d\t%d\t%d\n", linux.SEMMSL, linux.SEMMNS, linux.SEMOPM, linux.SEMMNI))),
-			"shmall": fs.newInode(ctx, root, 0444, ipcData(linux.SHMALL)),
-			"shmmax": fs.newInode(ctx, root, 0444, ipcData(linux.SHMMAX)),
-			"shmmni": fs.newInode(ctx, root, 0444, ipcData(linux.SHMMNI)),
-			"msgmni": fs.newInode(ctx, root, 0444, ipcData(linux.MSGMNI)),
-			"msgmax": fs.newInode(ctx, root, 0444, ipcData(linux.MSGMAX)),
-			"msgmnb": fs.newInode(ctx, root, 0444, ipcData(linux.MSGMNB)),
-			"yama": fs.newStaticDir(ctx, root, map[string]kernfs.Inode{
-				"ptrace_scope": fs.newYAMAPtraceScopeFile(ctx, k, root),
-			}),
-			"keys": fs.newStaticDir(ctx, root, map[string]kernfs.Inode{
-				"maxkeys": fs.newMaxKeySizeFile(ctx, k, root),
-			}),
-			"osrelease": fs.newInode(ctx, root, 0444, newStaticFile(version.LinuxRelease())),
-			"ostype":    fs.newInode(ctx, root, 0444, newStaticFile(version.LinuxSysname)),
-			"version":   fs.newInode(ctx, root, 0444, newStaticFile(version.LinuxVersion)),
-		}),
-		"fs": fs.newStaticDir(ctx, root, map[string]kernfs.Inode{
+			"random":             dir("random"),
+			"sem":                fs.newInode(ctx, root, 0444, newStaticFile(fmt.Sprintf("%d\t%d\t%d\t%d\n", linux.SEMMSL, linux.SEMMNS, linux.SEMOPM, linux.SEMMNI))),
+			"shmall":             fs.newInode(ctx, root, 0444, ipcData(linux.SHMALL)),
+			"shmmax":             fs.newInode(ctx, root, 0444, ipcData(linux.SHMMAX)),
+			"shmmni":             fs.newInode(ctx, root, 0444, ipcData(linux.SHMMNI)),
+			"msgmni":             fs.newInode(ctx, root, 0444, ipcData(linux.MSGMNI)),
+			"msgmax":             fs.newInode(ctx, root, 0444, ipcData(linux.MSGMAX)),
+			"msgmnb":             fs.newInode(ctx, root, 0444, ipcData(linux.MSGMNB)),
+			"yama":               dir("yama"),
+			"keys":               dir("keys"),
+			"osrelease":          fs.newInode(ctx, root, 0444, newStaticFile(version.LinuxRelease())),
+			"ostype":             fs.newInode(ctx, root, 0444, newStaticFile(version.LinuxSysname)),
+			"version":            fs.newInode(ctx, root, 0444, newStaticFile(version.LinuxVersion)),
+		}
+	case "kernel/random":
+		return map[string]kernfs.Inode{
+			"boot_id": fs.newInode(ctx, root, 0444, newStaticFile(randUUID())),
+			"uuid":    fs.newInode(ctx, root, 0444, &uuidData{}),
+		}
+	case "kernel/yama":
+		return map[string]kernfs.Inode{
+			"ptrace_scope": fs.newYAMAPtraceScopeFile(ctx, k, root),
+		}
+	case "kernel/keys":
+		return map[string]kernfs.Inode{
+			"maxkeys": fs.newMaxKeySizeFile(ctx, k, root),
+		}
+	case "fs":
+		return map[string]kernfs.Inode{
 			"file-max":      fs.newInode(ctx, root, 0444, newStaticFile(fmt.Sprintf("%d\n", int64(math.MaxInt64)))),
 			"file-nr":       fs.newInode(ctx, root, 0444, &fileNrData{vfs: k.VFS()}),
 			"mount-max":     fs.newInode(ctx, root, 0644, &atomicInt32File{val: &k.VFS().MountMax, min: 1, max: math.MaxInt32}),
 			"nr_open":       fs.newInode(ctx, root, 0644, &atomicInt32File{val: &k.MaxFDLimit, min: 8, max: kernel.MaxFdLimit}),
 			"pipe-max-size": fs.newInode(ctx, root, 0644, newStaticFile(fmt.Sprintf("%d\n", pipe.MaximumPipeSize))),
-		}),
-		"vm": fs.newStaticDir(ctx, root, map[string]kernfs.Inode{
+		}
+	case "vm":
+		return map[string]kernfs.Inode{
 			"max_map_count":     fs.newInode(ctx, root, 0444, newStaticFile("2147483647\n")),
 			"mmap_min_addr":     fs.newInode(ctx, root, 0444, &mmapMinAddrData{k: k}),
 			"overcommit_memory": fs.newInode(ctx, root, 0444, newStaticFile("0\n")),
-		}),
-		"net": fs.newSysNetDir(ctx, root, k),
-		"user": fs.newStaticDir(ctx, root, map[string]kernfs.Inode{
+		}
+	case "user":
+		return map[string]kernfs.Inode{
 			"max_user_namespaces": fs.newInode(ctx, root, 0644, &maxUserNamespacesData{}),
-		}),
-	})
-}
+		}
+	case "net":
+		return map[string]kernfs.Inode{
+			"ipv4": dir("ipv4"),
+			"core": dir("core"),
+			"ipv6": dir("ipv6"),
+		}
+	case "net/ipv4":
+		return map[string]kernfs.Inode{
+			"ip_forward":          fs.newInode(ctx, root, 0644, &ipForwarding{stack: stack, protocol: ipv4.ProtocolNumber}),
+			"ip_local_port_range": fs.newInode(ctx, root, 0644, &portRange{stack: stack}),
+			"tcp_recovery":        fs.newInode(ctx, root, 0644, &tcpRecoveryData{stack: stack}),
+			"tcp_rmem":            fs.newInode(ctx, root, 0644, &tcpMemData{stack: stack, dir: tcpRMem}),
+			"tcp_sack":            fs.newInode(ctx, root, 0644, &tcpSackData{stack: stack}),
+			"tcp_wmem":            fs.newInode(ctx, root, 0644, &tcpMemData{stack: stack, dir: tcpWMem}),
 
-// newSysNetDir returns the dentry corresponding to /proc/sys/net directory.
-func (fs *filesystem) newSysNetDir(ctx context.Context, root *auth.Credentials, k *kernel.Kernel) kernfs.Inode {
-	var contents map[string]kernfs.Inode
+			// conf/{all,default}/route_localnet toggles acceptance of martian
+			// loopback packets on non-loopback NICs (kube-proxy enables this). It
+			// is backed by the IPv4 protocol's AllowExternalLoopbackTraffic option.
+			"conf": dir("conf"),
 
-	// TODO(gvisor.dev/issue/1833): Support for using the network stack in the
-	// network namespace of the calling process.
-	if stack := k.RootNetworkNamespace().Stack(); stack != nil {
-		contents = map[string]kernfs.Inode{
-			"ipv4": fs.newStaticDir(ctx, root, map[string]kernfs.Inode{
-				"ip_forward":          fs.newInode(ctx, root, 0644, &ipForwarding{stack: stack, protocol: ipv4.ProtocolNumber}),
-				"ip_local_port_range": fs.newInode(ctx, root, 0644, &portRange{stack: stack}),
-				"tcp_recovery":        fs.newInode(ctx, root, 0644, &tcpRecoveryData{stack: stack}),
-				"tcp_rmem":            fs.newInode(ctx, root, 0644, &tcpMemData{stack: stack, dir: tcpRMem}),
-				"tcp_sack":            fs.newInode(ctx, root, 0644, &tcpSackData{stack: stack}),
-				"tcp_wmem":            fs.newInode(ctx, root, 0644, &tcpMemData{stack: stack, dir: tcpWMem}),
+			// The following files are simple stubs until they are implemented in
+			// netstack, most of these files are configuration related. We use the
+			// value closest to the actual netstack behavior or any empty file, all
+			// of these files will have mode 0444 (read-only for all users).
+			"ip_local_reserved_ports": fs.newInode(ctx, root, 0444, newStaticFile("")),
+			"ipfrag_time":             fs.newInode(ctx, root, 0444, newStaticFile("30")),
+			"ip_nonlocal_bind":        fs.newInode(ctx, root, 0444, newStaticFile("0")),
+			"ip_no_pmtu_disc":         fs.newInode(ctx, root, 0444, newStaticFile("1")),
 
-				// conf/{all,default}/route_localnet toggles acceptance of martian
-				// loopback packets on non-loopback NICs (kube-proxy enables this). It
-				// is backed by the IPv4 protocol's AllowExternalLoopbackTraffic option.
-				"conf": fs.newStaticDir(ctx, root, map[string]kernfs.Inode{
-					"all": fs.newStaticDir(ctx, root, map[string]kernfs.Inode{
-						"route_localnet": fs.newInode(ctx, root, 0644, &routeLocalnetData{stack: stack}),
-					}),
-					"default": fs.newStaticDir(ctx, root, map[string]kernfs.Inode{
-						"route_localnet": fs.newInode(ctx, root, 0644, &routeLocalnetData{stack: stack}),
-					}),
-				}),
+			// tcp_allowed_congestion_control tell the user what they are able to
+			// do as an unprivledged process so we leave it empty.
+			"tcp_allowed_congestion_control":   fs.newInode(ctx, root, 0444, newStaticFile("")),
+			"tcp_available_congestion_control": fs.newInode(ctx, root, 0444, newStaticFile("reno")),
+			"tcp_congestion_control":           fs.newInode(ctx, root, 0444, newStaticFile("reno")),
 
-				// The following files are simple stubs until they are implemented in
-				// netstack, most of these files are configuration related. We use the
-				// value closest to the actual netstack behavior or any empty file, all
-				// of these files will have mode 0444 (read-only for all users).
-				"ip_local_reserved_ports": fs.newInode(ctx, root, 0444, newStaticFile("")),
-				"ipfrag_time":             fs.newInode(ctx, root, 0444, newStaticFile("30")),
-				"ip_nonlocal_bind":        fs.newInode(ctx, root, 0444, newStaticFile("0")),
-				"ip_no_pmtu_disc":         fs.newInode(ctx, root, 0444, newStaticFile("1")),
-
-				// tcp_allowed_congestion_control tell the user what they are able to
-				// do as an unprivledged process so we leave it empty.
-				"tcp_allowed_congestion_control":   fs.newInode(ctx, root, 0444, newStaticFile("")),
-				"tcp_available_congestion_control": fs.newInode(ctx, root, 0444, newStaticFile("reno")),
-				"tcp_congestion_control":           fs.newInode(ctx, root, 0444, newStaticFile("reno")),
-
-				// Many of the following stub files are features netstack doesn't
-				// support. The unsupported features return "0" to indicate they are
-				// disabled.
-				"tcp_base_mss":              fs.newInode(ctx, root, 0444, newStaticFile("1280")),
-				"tcp_dsack":                 fs.newInode(ctx, root, 0444, newStaticFile("0")),
-				"tcp_early_retrans":         fs.newInode(ctx, root, 0444, newStaticFile("0")),
-				"tcp_fack":                  fs.newInode(ctx, root, 0444, newStaticFile("0")),
-				"tcp_fastopen":              fs.newInode(ctx, root, 0444, newStaticFile("0")),
-				"tcp_fastopen_key":          fs.newInode(ctx, root, 0444, newStaticFile("")),
-				"tcp_invalid_ratelimit":     fs.newInode(ctx, root, 0444, newStaticFile("0")),
-				"tcp_keepalive_intvl":       fs.newInode(ctx, root, 0444, newStaticFile("0")),
-				"tcp_keepalive_probes":      fs.newInode(ctx, root, 0444, newStaticFile("0")),
-				"tcp_keepalive_time":        fs.newInode(ctx, root, 0444, newStaticFile("7200")),
-				"tcp_mtu_probing":           fs.newInode(ctx, root, 0444, newStaticFile("0")),
-				"tcp_no_metrics_save":       fs.newInode(ctx, root, 0444, newStaticFile("1")),
-				"tcp_probe_interval":        fs.newInode(ctx, root, 0444, newStaticFile("0")),
-				"tcp_probe_threshold":       fs.newInode(ctx, root, 0444, newStaticFile("0")),
-				"tcp_retries1":              fs.newInode(ctx, root, 0444, newStaticFile("3")),
-				"tcp_retries2":              fs.newInode(ctx, root, 0444, newStaticFile("15")),
-				"tcp_rfc1337":               fs.newInode(ctx, root, 0444, newStaticFile("1")),
-				"tcp_slow_start_after_idle": fs.newInode(ctx, root, 0444, newStaticFile("1")),
-				"tcp_synack_retries":        fs.newInode(ctx, root, 0444, newStaticFile("5")),
-				"tcp_syn_retries":           fs.newInode(ctx, root, 0444, newStaticFile("3")),
-				"tcp_timestamps":            fs.newInode(ctx, root, 0444, newStaticFile("1")),
-			}),
-			"core": fs.newStaticDir(ctx, root, map[string]kernfs.Inode{
-				"default_qdisc": fs.newInode(ctx, root, 0444, newStaticFile("pfifo_fast")),
-				"message_burst": fs.newInode(ctx, root, 0444, newStaticFile("10")),
-				"message_cost":  fs.newInode(ctx, root, 0444, newStaticFile("5")),
-				"optmem_max":    fs.newInode(ctx, root, 0444, newStaticFile("0")),
-				"rmem_default":  fs.newInode(ctx, root, 0444, newStaticFile("212992")),
-				"rmem_max":      fs.newInode(ctx, root, 0444, newStaticFile("212992")),
-				"somaxconn":     fs.newInode(ctx, root, 0444, newStaticFile("1024")),
-				"wmem_default":  fs.newInode(ctx, root, 0444, newStaticFile("212992")),
-				"wmem_max":      fs.newInode(ctx, root, 0444, newStaticFile("212992")),
-			}),
-			"ipv6": fs.newStaticDir(ctx, root, map[string]kernfs.Inode{
-				"bindv6only":       fs.newInode(ctx, root, 0444, newStaticFile("0")),
-				"ip6frag_time":     fs.newInode(ctx, root, 0444, newStaticFile("60")),
-				"ip_nonlocal_bind": fs.newInode(ctx, root, 0444, newStaticFile("0")),
-				"auto_flowlabels":  fs.newInode(ctx, root, 0444, newStaticFile("1")),
-				"conf": fs.newStaticDir(ctx, root, map[string]kernfs.Inode{
-					"all": fs.newStaticDir(ctx, root, map[string]kernfs.Inode{
-						"forwarding": fs.newInode(ctx, root, 0644, &ipForwarding{stack: stack, protocol: ipv6.ProtocolNumber}),
-					}),
-					// Stub for conf/default/forwarding; doesn't affect behavior.
-					"default": fs.newStaticDir(ctx, root, map[string]kernfs.Inode{
-						"forwarding": fs.newInode(ctx, root, 0644, &atomicInt32File{val: new(atomicbitops.Int32), min: 0, max: 1}),
-					}),
-				}),
-			}),
+			// Many of the following stub files are features netstack doesn't
+			// support. The unsupported features return "0" to indicate they are
+			// disabled.
+			"tcp_base_mss":              fs.newInode(ctx, root, 0444, newStaticFile("1280")),
+			"tcp_dsack":                 fs.newInode(ctx, root, 0444, newStaticFile("0")),
+			"tcp_early_retrans":         fs.newInode(ctx, root, 0444, newStaticFile("0")),
+			"tcp_fack":                  fs.newInode(ctx, root, 0444, newStaticFile("0")),
+			"tcp_fastopen":              fs.newInode(ctx, root, 0444, newStaticFile("0")),
+			"tcp_fastopen_key":          fs.newInode(ctx, root, 0444, newStaticFile("")),
+			"tcp_invalid_ratelimit":     fs.newInode(ctx, root, 0444, newStaticFile("0")),
+			"tcp_keepalive_intvl":       fs.newInode(ctx, root, 0444, newStaticFile("0")),
+			"tcp_keepalive_probes":      fs.newInode(ctx, root, 0444, newStaticFile("0")),
+			"tcp_keepalive_time":        fs.newInode(ctx, root, 0444, newStaticFile("7200")),
+			"tcp_mtu_probing":           fs.newInode(ctx, root, 0444, newStaticFile("0")),
+			"tcp_no_metrics_save":       fs.newInode(ctx, root, 0444, newStaticFile("1")),
+			"tcp_probe_interval":        fs.newInode(ctx, root, 0444, newStaticFile("0")),
+			"tcp_probe_threshold":       fs.newInode(ctx, root, 0444, newStaticFile("0")),
+			"tcp_retries1":              fs.newInode(ctx, root, 0444, newStaticFile("3")),
+			"tcp_retries2":              fs.newInode(ctx, root, 0444, newStaticFile("15")),
+			"tcp_rfc1337":               fs.newInode(ctx, root, 0444, newStaticFile("1")),
+			"tcp_slow_start_after_idle": fs.newInode(ctx, root, 0444, newStaticFile("1")),
+			"tcp_synack_retries":        fs.newInode(ctx, root, 0444, newStaticFile("5")),
+			"tcp_syn_retries":           fs.newInode(ctx, root, 0444, newStaticFile("3")),
+			"tcp_timestamps":            fs.newInode(ctx, root, 0444, newStaticFile("1")),
+		}
+	case "net/ipv4/conf":
+		return map[string]kernfs.Inode{
+			"all":     dir("all"),
+			"default": dir("default"),
+		}
+	case "net/ipv4/conf/all", "net/ipv4/conf/default":
+		return map[string]kernfs.Inode{
+			"route_localnet": fs.newInode(ctx, root, 0644, &routeLocalnetData{stack: stack}),
+		}
+	case "net/core":
+		return map[string]kernfs.Inode{
+			"default_qdisc": fs.newInode(ctx, root, 0444, newStaticFile("pfifo_fast")),
+			"message_burst": fs.newInode(ctx, root, 0444, newStaticFile("10")),
+			"message_cost":  fs.newInode(ctx, root, 0444, newStaticFile("5")),
+			"optmem_max":    fs.newInode(ctx, root, 0444, newStaticFile("0")),
+			"rmem_default":  fs.newInode(ctx, root, 0444, newStaticFile("212992")),
+			"rmem_max":      fs.newInode(ctx, root, 0444, newStaticFile("212992")),
+			"somaxconn":     fs.newInode(ctx, root, 0444, newStaticFile("1024")),
+			"wmem_default":  fs.newInode(ctx, root, 0444, newStaticFile("212992")),
+			"wmem_max":      fs.newInode(ctx, root, 0444, newStaticFile("212992")),
+		}
+	case "net/ipv6":
+		return map[string]kernfs.Inode{
+			"bindv6only":       fs.newInode(ctx, root, 0444, newStaticFile("0")),
+			"ip6frag_time":     fs.newInode(ctx, root, 0444, newStaticFile("60")),
+			"ip_nonlocal_bind": fs.newInode(ctx, root, 0444, newStaticFile("0")),
+			"auto_flowlabels":  fs.newInode(ctx, root, 0444, newStaticFile("1")),
+			"conf":             dir("conf"),
+		}
+	case "net/ipv6/conf":
+		return map[string]kernfs.Inode{
+			"all":     dir("all"),
+			"default": dir("default"),
+		}
+	case "net/ipv6/conf/all":
+		return map[string]kernfs.Inode{
+			"forwarding": fs.newInode(ctx, root, 0644, &ipForwarding{stack: stack, protocol: ipv6.ProtocolNumber}),
+		}
+	case "net/ipv6/conf/default":
+		// Stub for conf/default/forwarding; doesn't affect behavior.
+		return map[string]kernfs.Inode{
+			"forwarding": fs.newInode(ctx, root, 0644, &atomicInt32File{val: new(atomicbitops.Int32), min: 0, max: 1}),
 		}
 	}
-
-	return fs.newStaticDir(ctx, root, contents)
+	panic(fmt.Sprintf("unknown /proc/sys directory %q", path))
 }
 
 // mmapMinAddrData implements vfs.DynamicBytesSource for
