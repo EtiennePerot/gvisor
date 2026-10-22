@@ -26,6 +26,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"gvisor.dev/gvisor/pkg/abi/linux"
+	"gvisor.dev/gvisor/pkg/atomicbitops"
 	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/coverage"
 	"gvisor.dev/gvisor/pkg/errors/linuxerr"
@@ -35,6 +36,7 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
+	"gvisor.dev/gvisor/pkg/sync"
 )
 
 const (
@@ -260,29 +262,54 @@ func (fsType FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virt
 	return fs.VFSFilesystem(), rootD.VFSDentry(), nil
 }
 
+// cpuDir returns the inode for /sys/devices/system/cpu.
 func cpuDir(ctx context.Context, fs *filesystem, creds *auth.Credentials) kernfs.Inode {
 	k := kernel.KernelFromContext(ctx)
-	maxCPUCores := k.ApplicationCores()
+	return fs.newLazyDir(ctx, creds, &cpuDirContents{cores: k.ApplicationCores()})
+}
+
+// cpuDirContents creates the contents of /sys/devices/system/cpu.
+//
+// +stateify savable
+type cpuDirContents struct {
+	cores uint
+}
+
+// children implements lazyDirContents.children.
+func (c *cpuDirContents) children(ctx context.Context, fs *filesystem, creds *auth.Credentials) map[string]kernfs.Inode {
 	children := map[string]kernfs.Inode{
-		"online":   fs.newCPUFile(ctx, creds, maxCPUCores, defaultSysMode),
-		"possible": fs.newCPUFile(ctx, creds, maxCPUCores, defaultSysMode),
-		"present":  fs.newCPUFile(ctx, creds, maxCPUCores, defaultSysMode),
+		"online":   fs.newCPUFile(ctx, creds, c.cores, defaultSysMode),
+		"possible": fs.newCPUFile(ctx, creds, c.cores, defaultSysMode),
+		"present":  fs.newCPUFile(ctx, creds, c.cores, defaultSysMode),
 	}
+	for i := uint(0); i < c.cores; i++ {
+		children[fmt.Sprintf("cpu%d", i)] = fs.newLazyDir(ctx, creds, &cpuNDirContents{cpu: i, cores: c.cores})
+	}
+	return children
+}
+
+// cpuNDirContents creates the contents of /sys/devices/system/cpu/cpuN.
+//
+// +stateify savable
+type cpuNDirContents struct {
+	cpu   uint
+	cores uint
+}
+
+// children implements lazyDirContents.children.
+func (c *cpuNDirContents) children(ctx context.Context, fs *filesystem, creds *auth.Credentials) map[string]kernfs.Inode {
 	// For consistency with /proc/cpuinfo, pretend all CPUs are in the same
 	// socket and each CPU is a distinct core.
-	fullMask := fullCPUMask(maxCPUCores) + "\n"
-	for i := uint(0); i < maxCPUCores; i++ {
-		oneMask := oneCPUMask(i, maxCPUCores) + "\n"
-		children[fmt.Sprintf("cpu%d", i)] = fs.newDir(ctx, creds, defaultSysDirMode, map[string]kernfs.Inode{
-			"topology": fs.newDir(ctx, creds, defaultSysDirMode, map[string]kernfs.Inode{
-				"core_cpus":       fs.newStaticFile(ctx, creds, defaultSysMode, oneMask),
-				"core_siblings":   fs.newStaticFile(ctx, creds, defaultSysMode, fullMask),
-				"package_cpus":    fs.newStaticFile(ctx, creds, defaultSysMode, fullMask),
-				"thread_siblings": fs.newStaticFile(ctx, creds, defaultSysMode, oneMask),
-			}),
-		})
+	fullMask := fullCPUMask(c.cores) + "\n"
+	oneMask := oneCPUMask(c.cpu, c.cores) + "\n"
+	return map[string]kernfs.Inode{
+		"topology": fs.newDir(ctx, creds, defaultSysDirMode, map[string]kernfs.Inode{
+			"core_cpus":       fs.newStaticFile(ctx, creds, defaultSysMode, oneMask),
+			"core_siblings":   fs.newStaticFile(ctx, creds, defaultSysMode, fullMask),
+			"package_cpus":    fs.newStaticFile(ctx, creds, defaultSysMode, fullMask),
+			"thread_siblings": fs.newStaticFile(ctx, creds, defaultSysMode, oneMask),
+		}),
 	}
-	return fs.newDir(ctx, creds, defaultSysDirMode, children)
 }
 
 // fullCPUMask returns a "hex format ASCII string", consistent with Linux's
@@ -466,6 +493,98 @@ func (d *dir) DecRef(ctx context.Context) {
 // StatFS implements kernfs.Inode.StatFS.
 func (d *dir) StatFS(ctx context.Context, fs *vfs.Filesystem) (linux.Statfs, error) {
 	return vfs.GenericStatFS(linux.SYSFS_MAGIC), nil
+}
+
+// lazyDirContents creates the contents of a lazyDir.
+type lazyDirContents interface {
+	// children returns the children of the directory. It must return at
+	// least one child.
+	children(ctx context.Context, fs *filesystem, creds *auth.Credentials) map[string]kernfs.Inode
+}
+
+// lazyDir is a directory whose children are created on first use.
+//
+// It is used for directories that have many descendants which most workloads
+// never access, like the per-CPU directories in /sys/devices/system/cpu.
+// Creating them lazily keeps unused inodes out of memory and out of
+// checkpoints: directories that were never populated are saved empty, and are
+// populated after restore if needed.
+//
+// +stateify savable
+type lazyDir struct {
+	dir
+
+	fs    *filesystem
+	creds *auth.Credentials
+
+	// contents creates the children of the directory. Immutable.
+	contents lazyDirContents
+
+	// populateMu serializes populate calls.
+	populateMu sync.Mutex `state:"nosave"`
+
+	// populated is true once the children of the directory have been
+	// created.
+	populated atomicbitops.Bool
+}
+
+var _ kernfs.Inode = (*lazyDir)(nil)
+
+func (fs *filesystem) newLazyDir(ctx context.Context, creds *auth.Credentials, contents lazyDirContents) kernfs.Inode {
+	d := &lazyDir{
+		fs:       fs,
+		creds:    creds,
+		contents: contents,
+	}
+	d.InodeAttrs.Init(ctx, creds, linux.UNNAMED_MAJOR, fs.devMinor, fs.NextIno(), linux.ModeDirectory|defaultSysDirMode)
+	d.OrderedChildren.Init(kernfs.OrderedChildrenOptions{})
+	d.InitRefs()
+	return d
+}
+
+// populate creates the children of d, unless that has already been done.
+func (d *lazyDir) populate(ctx context.Context) {
+	if d.populated.Load() {
+		return
+	}
+	d.populateMu.Lock()
+	defer d.populateMu.Unlock()
+	if d.populated.Load() {
+		return
+	}
+	d.IncLinks(d.OrderedChildren.Populate(d.contents.children(ctx, d.fs, d.creds)))
+	d.populated.Store(true)
+}
+
+// Lookup implements kernfs.Inode.Lookup.
+func (d *lazyDir) Lookup(ctx context.Context, name string) (kernfs.Inode, error) {
+	d.populate(ctx)
+	return d.dir.Lookup(ctx, name)
+}
+
+// Open implements kernfs.Inode.Open.
+func (d *lazyDir) Open(ctx context.Context, rp *vfs.ResolvingPath, kd *kernfs.Dentry, opts vfs.OpenOptions) (*vfs.FileDescription, error) {
+	d.populate(ctx)
+	return d.dir.Open(ctx, rp, kd, opts)
+}
+
+// IterDirents implements kernfs.Inode.IterDirents.
+func (d *lazyDir) IterDirents(ctx context.Context, mnt *vfs.Mount, cb vfs.IterDirentsCallback, offset, relOffset int64) (int64, error) {
+	d.populate(ctx)
+	return d.dir.IterDirents(ctx, mnt, cb, offset, relOffset)
+}
+
+// Stat implements kernfs.Inode.Stat.
+func (d *lazyDir) Stat(ctx context.Context, vfsfs *vfs.Filesystem, opts vfs.StatOptions) (linux.Statx, error) {
+	// The link count depends on the number of child directories.
+	d.populate(ctx)
+	return d.dir.Stat(ctx, vfsfs, opts)
+}
+
+// HasChildren implements kernfs.Inode.HasChildren.
+func (d *lazyDir) HasChildren() bool {
+	// lazyDirContents.children never returns an empty map.
+	return !d.populated.Load() || d.dir.HasChildren()
 }
 
 // cgroupDir implements kernfs.Inode.

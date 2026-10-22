@@ -47,6 +47,7 @@ go_library(
         "//pkg/sentry/kernel/auth",
         "//pkg/sentry/memmap",
         "//pkg/sentry/vfs",
+        "//pkg/sync",
         "//pkg/usermem",
         "@org_golang_x_sys//unix:go_default_library",
     ],
@@ -64,6 +65,7 @@ go_test(
     deps = [
         ":sys",
         "//pkg/abi/linux",
+        "//pkg/errors/linuxerr",
         "//pkg/rdma",
         "//pkg/sentry/fsimpl/testutil",
         "//pkg/sentry/kernel",
