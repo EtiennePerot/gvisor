@@ -793,6 +793,8 @@ func (es *encodeState) Save(obj reflect.Value) {
 		Failf("pending is empty?")
 	}
 
+	// Buffer writes.
+	es.w.Buffer(64 * len(es.pending))
 	// Write the header with the number of objects.
 	if err := WriteHeader(&es.w, uint64(len(es.pending)), true); err != nil {
 		Failf("error writing header: %w", err)
@@ -821,6 +823,9 @@ func (es *encodeState) Save(obj reflect.Value) {
 			// Marshal the object.
 			oes = es.pending[id]
 			wire.Save(&es.w, oes.encoded)
+		}
+		if err := es.w.Flush(); err != nil {
+			panic(err)
 		}
 	}); err != nil {
 		if oes != nil {
