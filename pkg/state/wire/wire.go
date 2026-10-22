@@ -76,6 +76,56 @@ type Writer struct {
 
 	// buf is used by Uint as a scratch buffer.
 	buf [10]byte
+
+	// out, if non-nil, buffers writes to Writer until Flush. See Buffer.
+	out []byte
+}
+
+// maxWriterBufferSize is the maximum size of the buffer of a Writer.
+const maxWriterBufferSize = 64 << 10
+
+// Buffer makes w buffer writes, using a buffer of up to size bytes, until
+// Flush is called. Callers that interleave their own writes to the underlying
+// io.Writer must call Flush first.
+func (w *Writer) Buffer(size int) {
+	if w.out == nil {
+		w.out = make([]byte, 0, min(max(size, 512), maxWriterBufferSize))
+	}
+}
+
+// Flush writes buffered data, if any, to the underlying io.Writer.
+func (w *Writer) Flush() error {
+	if len(w.out) == 0 {
+		return nil
+	}
+	_, err := w.Writer.Write(w.out)
+	w.out = w.out[:0]
+	return err
+}
+
+// write writes p, buffering it if Buffer was called. It panics on error.
+func (w *Writer) write(p []byte) {
+	if w.out != nil {
+		if len(w.out)+len(p) > cap(w.out) {
+			if err := w.Flush(); err != nil {
+				panic(err)
+			}
+			if len(p) > cap(w.out) {
+				if _, err := w.Writer.Write(p); err != nil {
+					panic(err)
+				}
+				return
+			}
+		}
+		// Don't use append, which checkescape considers allocating.
+		n := len(w.out)
+		w.out = w.out[:n+len(p)]
+		copy(w.out[n:], p)
+		return
+	}
+	if _, err := w.Writer.Write(p); err != nil {
+		panic(err)
+	}
 }
 
 // readFull is a utility. The equivalent is not needed for Write, but the API
@@ -187,9 +237,7 @@ func (u Uint) save(w *Writer) {
 		u >>= 7
 	}
 	w.buf[i] = byte(u)
-	if _, err := w.Write(w.buf[:i+1]); err != nil {
-		panic(err)
-	}
+	w.write(w.buf[:i+1])
 }
 
 // load implements Object.load.
@@ -294,11 +342,7 @@ func loadString(r *Reader) String {
 func (s *String) save(w *Writer) {
 	l := Uint(len(*s))
 	l.save(w)
-	p := gohacks.ImmutableBytesFromString(string(*s))
-	_, err := w.Write(p) // Must write all bytes.
-	if err != nil {
-		panic(err)
-	}
+	w.write(gohacks.ImmutableBytesFromString(string(*s)))
 }
 
 // load implements Object.load.
@@ -380,10 +424,7 @@ func (r *Ref) save(w *Writer) {
 		case *FieldName:
 			d := Int(-len(*x))
 			d.save(w)
-			p := gohacks.ImmutableBytesFromString(string(*x))
-			if _, err := w.Write(p); err != nil {
-				panic(err)
-			}
+			w.write(gohacks.ImmutableBytesFromString(string(*x)))
 		default:
 			panic("unknown dot implementation")
 		}
