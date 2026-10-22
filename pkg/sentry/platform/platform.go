@@ -207,6 +207,25 @@ func (u UseHostProcessMemoryBarrier) GlobalMemoryBarrier() error {
 	return u.MemBarrier.GlobalMemoryBarrier()
 }
 
+// UseLazyHostProcessMemoryBarrier is UseHostProcessMemoryBarrier, but only
+// waits for the host membarrier probe (and private-expedited registration)
+// when the application first needs a memory barrier.
+// Platforms must populate `MemBarrier` from `hostmm.NewLazyHostMemBarrier(true)`
+// and allow the probe's syscalls in their seccomp filters.
+type UseLazyHostProcessMemoryBarrier struct {
+	MemBarrier *hostmm.LazyHostMemBarrier
+}
+
+// HaveGlobalMemoryBarrier implements Platform.HaveGlobalMemoryBarrier.
+func (u UseLazyHostProcessMemoryBarrier) HaveGlobalMemoryBarrier() bool {
+	return UseHostProcessMemoryBarrier{MemBarrier: u.MemBarrier.Get()}.HaveGlobalMemoryBarrier()
+}
+
+// GlobalMemoryBarrier implements Platform.GlobalMemoryBarrier.
+func (u UseLazyHostProcessMemoryBarrier) GlobalMemoryBarrier() error {
+	return UseHostProcessMemoryBarrier{MemBarrier: u.MemBarrier.Get()}.GlobalMemoryBarrier()
+}
+
 // MemoryManager represents an abstraction above the platform address space
 // which manages memory mappings and their contents.
 type MemoryManager interface {

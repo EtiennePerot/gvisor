@@ -66,7 +66,7 @@ type runData struct {
 // KVM represents a lightweight VM context.
 type KVM struct {
 	// KVM never changes mm_structs.
-	platform.UseHostProcessMemoryBarrier
+	platform.UseLazyHostProcessMemoryBarrier
 
 	// machine is the backing VM.
 	machine *machine
@@ -82,7 +82,10 @@ func New(deviceFile *fd.FD, config Config) (*KVM, error) {
 	if hostPageSize := unix.Getpagesize(); hostPageSize != hostarch.PageSize {
 		return nil, fmt.Errorf("KVM platform requires a %d-byte page host, but the host page size is %d bytes", hostarch.PageSize, hostPageSize)
 	}
-	mbCh := hostmm.Probe(true)
+	// Registering for private-expedited membarrier waits for an RCU grace
+	// period (10-20 ms). It is only needed if the application calls
+	// membarrier(2), so it is not waited for here; see LazyHostMemBarrier.
+	memBarrier := hostmm.NewLazyHostMemBarrier(true)
 	fd := deviceFile.FD()
 
 	// Ensure global initialization is done.
@@ -124,13 +127,9 @@ func New(deviceFile *fd.FD, config Config) (*KVM, error) {
 	}
 	config.StartupTimer.Reached("kvm machine created")
 
-	config.StartupTimer.Reached("waiting for membarrier")
-	memBarrier := <-mbCh
-	config.StartupTimer.Reached("host membarrier probed")
-
 	return &KVM{
-		UseHostProcessMemoryBarrier: platform.UseHostProcessMemoryBarrier{MemBarrier: memBarrier},
-		machine:                     machine,
+		UseLazyHostProcessMemoryBarrier: platform.UseLazyHostProcessMemoryBarrier{MemBarrier: memBarrier},
+		machine:                         machine,
 	}, nil
 }
 

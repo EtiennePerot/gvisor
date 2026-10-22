@@ -49,9 +49,22 @@ func (k *KVM) SeccompInfo() platform.SeccompInfo {
 					seccomp.EqualTo(KVM_SET_REGS),
 				},
 			},
-			unix.SYS_MEMBARRIER: seccomp.PerArg{
-				seccomp.EqualTo(linux.MEMBARRIER_CMD_PRIVATE_EXPEDITED),
-				seccomp.EqualTo(0),
+			unix.SYS_MEMBARRIER: seccomp.Or{
+				seccomp.PerArg{
+					seccomp.EqualTo(linux.MEMBARRIER_CMD_PRIVATE_EXPEDITED),
+					seccomp.EqualTo(0),
+				},
+				// The host membarrier probe may still be running when
+				// seccomp filters are installed: see
+				// hostmm.LazyHostMemBarrier.
+				seccomp.PerArg{
+					seccomp.EqualTo(linux.MEMBARRIER_CMD_QUERY),
+					seccomp.EqualTo(0),
+				},
+				seccomp.PerArg{
+					seccomp.EqualTo(linux.MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED),
+					seccomp.EqualTo(0),
+				},
 			},
 			unix.SYS_MMAP:            seccomp.MatchAll{},
 			unix.SYS_RT_SIGSUSPEND:   seccomp.MatchAll{},
