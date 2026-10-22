@@ -366,3 +366,19 @@ func TestCodecStandalone(t *testing.T) {
 		t.Errorf("got node %+v, want LinkS[0] at LinkPtr referring to the node", n)
 	}
 }
+
+// TestCodecNestedMaps checks maps whose values are maps.
+func TestCodecNestedMaps(t *testing.T) {
+	root := &nestedMaps{M: map[int]map[int32]struct{}{0: {1: {}, 5: {}}, 15: {7: {}}, 3: {}}}
+	data, _, err := save(root, true)
+	if err != nil {
+		t.Fatalf("save failed: %v", err)
+	}
+	loaded, _, err := load(reflect.TypeOf(root), data, true)
+	if err != nil {
+		t.Fatalf("load failed: %v", err)
+	}
+	if got := loaded.(*nestedMaps); !reflect.DeepEqual(got, root) {
+		t.Errorf("got %v, want %v", got.M, root.M)
+	}
+}

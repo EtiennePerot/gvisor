@@ -124,6 +124,9 @@ type encodeState struct {
 	// by zeroValues below.
 	values addrSet
 
+	// mapScratch holds a *mapEntry for each map type, for mapEncoder.
+	mapScratch map[reflect.Type]any
+
 	// queue holds the objects to write, in order (see Save).
 	queue []*objectEncodeState
 
@@ -132,6 +135,9 @@ type encodeState struct {
 
 	// standaloneBuf holds the body of a standalone object.
 	standaloneBuf bytes.Buffer
+
+	// elems is scratch space for resolve.
+	elems []elementEncodeState
 
 	// traversals caches the results of findTraversal.
 	traversals map[traversalKey]traversal
@@ -175,6 +181,9 @@ type encodeState struct {
 
 	// embedded holds the embedded objects of objects encoded by enc.
 	embedded []embedded
+
+	// objectArena allocates objectEncodeStates.
+	objectArena []objectEncodeState
 
 	// refBuf and refOffs hold the references of the object being written.
 	refBuf  []byte
@@ -319,7 +328,11 @@ func (es *encodeState) resolve(obj reflect.Value, ref *wire.Ref, enc typedEncode
 			return existing
 		}
 
-		// Record the map.
+		// Record the map. obj may be a variable that the caller
+		// reuses (see mapEncoder), so keep a copy.
+		if obj.CanAddr() {
+			obj = copyMap(obj)
+		}
 		r := addrRange{addr, addr + 1}
 		oes := es.newObject()
 		*oes = objectEncodeState{
@@ -442,10 +455,8 @@ func (es *encodeState) resolve(obj reflect.Value, ref *wire.Ref, enc typedEncode
 			enc:    enc,
 			encArg: encArg,
 		}
-		var (
-			elems []elementEncodeState
-			gap   addrGapIterator
-		)
+		elems := es.elems[:0]
+		var gap addrGapIterator
 		for {
 			// Each contained object should be completely contained within
 			// this one.
@@ -477,6 +488,8 @@ func (es *encodeState) resolve(obj reflect.Value, ref *wire.Ref, enc typedEncode
 			}
 			oes.refs = append(oes.refs, elem.refs...)
 		}
+		clear(elems)
+		es.elems = elems[:0]
 		// Finally register the new containing object.
 		if !raceEnabled {
 			es.values.InsertWithoutMergingUnchecked(gap, r, oes)
@@ -522,7 +535,11 @@ func (es *encodeState) resolve(obj reflect.Value, ref *wire.Ref, enc typedEncode
 
 // newObject allocates an objectEncodeState.
 func (es *encodeState) newObject() *objectEncodeState {
-	return new(objectEncodeState)
+	if len(es.objectArena) == cap(es.objectArena) {
+		es.objectArena = make([]objectEncodeState, 0, min(max(2*cap(es.objectArena), 16), 256))
+	}
+	es.objectArena = es.objectArena[:len(es.objectArena)+1]
+	return &es.objectArena[len(es.objectArena)-1]
 }
 
 // traverse searches for a target object within a root object, where the target
