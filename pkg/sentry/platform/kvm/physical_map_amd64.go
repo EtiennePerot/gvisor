@@ -17,6 +17,7 @@ package kvm
 import (
 	"fmt"
 
+	"gvisor.dev/gvisor/pkg/hostarch"
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/ring0"
 )
@@ -66,7 +67,17 @@ func archSpecialRegions(vSize uintptr) (uintptr, []specialVirtualRegion) {
 	)
 
 	// Exclude all unmapped regions in the extended virtual address space.
-	start := defaultAddressSpaceSize
+	//
+	// The exclusion starts one page below the 47-bit boundary: Linux never
+	// maps the last page below 2^47 (TASK_SIZE_MAX on 4-level kernels and
+	// the default mmap limit on 5-level ones), and KVM rejects (EINVAL) a
+	// memory slot whose userspace range ends at 2^47 because it fails
+	// access_ok() on 4-level host kernels. Without this, on CPUs that
+	// advertise LA57 running a 4-level kernel (e.g. COS on Sapphire Rapids
+	// and nested GCE VMs), the last physical region ends at 2^47 and the
+	// sentry dies with "set memory region failed; out of slots" whenever
+	// its stack lands in the last fault block (ASLR dependent).
+	start := defaultAddressSpaceSize - hostarch.PageSize
 	for _, vr := range regionsInExtendedSpace {
 		if start > vr.virtual {
 			panic(fmt.Sprintf("start(%x) is greater than next(%x)", start, vr.virtual))
