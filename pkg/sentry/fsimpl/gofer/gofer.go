@@ -241,18 +241,31 @@ type filesystem struct {
 	syncableDentries dentryList
 	specialFileFDs   specialFDList
 
-	// inoByKey maps previously-observed device ID and host inode numbers to
-	// internal inode numbers assigned to those files. inoByKey is not preserved
-	// across checkpoint/restore because inode numbers may be reused between
-	// different gofer processes, so inode numbers may be repeated for different
-	// files across checkpoint/restore. inoByKey is protected by inoMu.
-	inoMu    sync.Mutex        `state:"nosave"`
-	inoByKey map[inoKey]uint64 `state:"nosave"`
+	// inoMapper derives inode numbers from remote inode keys. It is not
+	// preserved across checkpoint/restore because remote inode numbers may be
+	// reused for different files after restore (e.g. on a different host), so
+	// a new key is generated on restore. inoMapper is immutable, except during
+	// restore.
+	inoMapper inoMapper `state:"nosave"`
+
+	// inoByKey maps remote inode keys to inode numbers that are not given by
+	// inoMapper: remote files whose inode numbers are too large for inoMapper
+	// (each of which costs an entry, as for all files before inoMapper), files
+	// that were restored with the inode number they had at checkpoint, and
+	// files whose mapped inode number is reserved. reservedInos contains the
+	// mapped-range inode numbers of restored files, which inoMapper may also
+	// return for other files after restore. Both are protected by inoMu.
+	// hasRestoredInos is true if inoByKey contains restored files, and is
+	// accessed using atomic memory operations.
+	inoMu           sync.Mutex          `state:"nosave"`
+	inoByKey        map[inoKey]uint64   `state:"nosave"`
+	reservedInos    map[uint64]struct{} `state:"nosave"`
+	hasRestoredInos atomicbitops.Bool   `state:"nosave"`
+
 	// inodeByKey maps inoKey to non-directory inodes. inodeByKey is protected by
-	// inodeMu. inodeByKey is similar to inoByKey, except that is not an
-	// ever-growing map. This is to allow for the sharing of inodes across
-	// dentries. As non-directory dentries are destroyed, their associated inode
-	// entry in this map is cleared.
+	// inodeMu. This is to allow for the sharing of inodes across dentries. As
+	// non-directory dentries are destroyed, their associated inode entry in
+	// this map is cleared.
 	inodeMu    sync.Mutex        `state:"nosave"`
 	inodeByKey map[inoKey]*inode `state:"nosave"`
 
@@ -638,13 +651,15 @@ func (fstype FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virt
 		return nil, nil, err
 	}
 	fs := &filesystem{
-		mf:         mf,
-		opts:       fsopts,
-		iopts:      iopts,
-		clock:      ktime.RealtimeClockFromContext(ctx),
-		devMinor:   devMinor,
-		inoByKey:   make(map[inoKey]uint64),
-		inodeByKey: make(map[inoKey]*inode),
+		mf:           mf,
+		opts:         fsopts,
+		iopts:        iopts,
+		clock:        ktime.RealtimeClockFromContext(ctx),
+		devMinor:     devMinor,
+		inoMapper:    newInoMapper(),
+		inoByKey:     make(map[inoKey]uint64),
+		reservedInos: make(map[uint64]struct{}),
+		inodeByKey:   make(map[inoKey]*inode),
 	}
 
 	// Did the user configure a global dentry cache?
@@ -1249,20 +1264,50 @@ type dentryListElem struct {
 	dentryEntry
 }
 
+// inoFromKey returns the inode number for the remote file identified by key.
 func (fs *filesystem) inoFromKey(key inoKey) uint64 {
+	if key.ino < inoMappedBit && !fs.hasRestoredInos.Load() {
+		return fs.inoMapper.ino(key)
+	}
+	return fs.inoFromKeySlow(key)
+}
+
+func (fs *filesystem) inoFromKeySlow(key inoKey) uint64 {
 	fs.inoMu.Lock()
 	defer fs.inoMu.Unlock()
-
 	if ino, ok := fs.inoByKey[key]; ok {
 		return ino
+	}
+	if key.ino < inoMappedBit {
+		ino := fs.inoMapper.ino(key)
+		if _, ok := fs.reservedInos[ino]; !ok {
+			return ino
+		}
 	}
 	ino := fs.nextIno()
 	fs.inoByKey[key] = ino
 	return ino
 }
 
+// setRestoredInoLocked causes inoFromKey(key) to return ino, which a restored
+// file had at checkpoint time.
+//
+// Preconditions: fs.inoMu is locked.
+func (fs *filesystem) setRestoredInoLocked(key inoKey, ino uint64) {
+	fs.inoByKey[key] = ino
+	if ino&inoMappedBit != 0 {
+		fs.reservedInos[ino] = struct{}{}
+	}
+	fs.hasRestoredInos.Store(true)
+}
+
+// nextIno returns a new inode number below 2^52.
 func (fs *filesystem) nextIno() uint64 {
-	return fs.lastIno.Add(1)
+	ino := fs.lastIno.Add(1)
+	if ino >= inoMappedBit {
+		panic("gofer: exhausted inode numbers")
+	}
+	return ino
 }
 
 // init must be called before first use of d.

@@ -919,7 +919,7 @@ func (i *directfsInode) restoreFile(ctx context.Context, controlFD int, opts *vf
 	//	- We need to associate the new inoKey with the existing d.ino.
 	i.inoKey = inoKeyFromUnixStatx(&stat)
 	i.fs.inoMu.Lock()
-	i.fs.inoByKey[i.inoKey] = i.ino
+	i.fs.setRestoredInoLocked(i.inoKey, i.ino)
 	i.fs.inoMu.Unlock()
 	// inodeByKey contains non-directory inodes only.
 	if !d.isDir() {
