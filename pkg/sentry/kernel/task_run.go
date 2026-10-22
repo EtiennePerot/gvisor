@@ -269,6 +269,9 @@ func (app *runApp) execute(t *Task) taskRunState {
 	}
 
 	region := trace.StartRegion(t.traceContext, runRegion)
+	if t.serveThreadCPUClock.Load() {
+		t.p.(platform.ThreadCPUClockServer).EnableThreadCPUClock(t.appMayServeThreadCPUClock())
+	}
 	t.accountTaskGoroutineEnter(TaskGoroutineRunningApp)
 	info, at, err := t.p.Switch(t, t.MemoryManager(), t.Arch(), t.rseqCPU)
 	t.accountTaskGoroutineLeave(TaskGoroutineRunningApp)

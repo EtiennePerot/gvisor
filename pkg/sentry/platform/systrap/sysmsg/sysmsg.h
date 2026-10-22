@@ -102,6 +102,14 @@ struct thread_context {
   uint64_t gs_used_by_app;
   uint64_t debug;
   uint64_t err;
+  // thread_cpu_clock_ns is the thread's CPU clock in nanoseconds, as last
+  // published by the Sentry.
+  int64_t thread_cpu_clock_ns;
+  // If thread_cpu_clock_enabled is non-zero, the stub may handle
+  // clock_gettime(CLOCK_THREAD_CPUTIME_ID) by returning thread_cpu_clock_ns,
+  // without switching to the Sentry.
+  uint32_t thread_cpu_clock_enabled;
+  uint32_t thread_cpu_clock_pad;
 };
 
 enum stub_error {

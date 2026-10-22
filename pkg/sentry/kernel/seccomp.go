@@ -66,6 +66,13 @@ func (ts *taskSeccomp) copy() *taskSeccomp {
 	}
 }
 
+// alwaysAllows returns true if ts allows all invocations of system call sysno
+// for architecture arch, regardless of arguments.
+func (ts *taskSeccomp) alwaysAllows(arch uint32, sysno int32) bool {
+	return arch == ts.cacheAuditNumber && sysno >= 0 && sysno <= sentry.MaxSyscallNum &&
+		ts.cache[sysno] == linux.SECCOMP_RET_ALLOW
+}
+
 // dataAsBPFInput returns a serialized BPF program, only valid on the current task
 // goroutine.
 //
@@ -338,6 +345,16 @@ func (t *Task) AppendSyscallFilter(p bpf.Program, syncAll bool) error {
 				seccompCopy := newSeccomp.copy()
 				seccompCopy.populateCache(ot)
 				ot.seccomp.Store(seccompCopy)
+				// If ot is running, its platform context may be serving
+				// clock_gettime(CLOCK_THREAD_CPUTIME_ID) without consulting
+				// the filters; interrupt it so that it re-evaluates this
+				// before returning to application code. See
+				// Task.appMayServeThreadCPUClock.
+				if ot.serveThreadCPUClock.Load() {
+					if s := ot.TaskGoroutineState(); s == TaskGoroutineRunningApp || s == TaskGoroutineRunningSys {
+						ot.interrupt()
+					}
+				}
 			}
 		}
 	}

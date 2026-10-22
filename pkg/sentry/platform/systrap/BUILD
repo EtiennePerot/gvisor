@@ -113,6 +113,7 @@ go_test(
     srcs = [
         "context_queue_test.go",
         "shared_context_test.go",
+        "systrap_amd64_test.go",
         "systrap_test.go",
     ],
     embed = [":systrap"],

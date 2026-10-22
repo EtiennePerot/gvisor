@@ -26,6 +26,7 @@
 #include <stdlib.h>
 #include <sys/prctl.h>
 #include <sys/ucontext.h>
+#include <time.h>
 
 #include "atomic.h"
 #include "sysmsg.h"
@@ -232,6 +233,51 @@ struct thread_context* switch_context_amd64(
 static void prep_fpstate_for_sigframe(void* buf, uint32_t user_size,
                                       bool use_xsave);
 
+// store_u64 stores val at addr, which is an application address. It returns
+// false if the store faulted.
+static bool store_u64(struct sysmsg* sysmsg, uint64_t addr, uint64_t val) {
+  uint32_t ok = 0;
+  // If the store faults, __export_sighandler skips fault_jump bytes, which
+  // covers both the store and the instruction that sets ok.
+  asm volatile(
+      "movl $(2f - 1f), %[fault_jump]\n"
+      "1: movq %[val], (%[addr])\n"
+      "movl $1, %[ok]\n"
+      "2: movl $0, %[fault_jump]\n"
+      : [ok] "+r"(ok), [fault_jump] "+m"(sysmsg->fault_jump)
+      : [val] "r"(val), [addr] "r"(addr)
+      : "memory");
+  return ok != 0;
+}
+
+// try_thread_cpu_clock_gettime handles the system call sysno(arg0, arg1) if it
+// is clock_gettime(CLOCK_THREAD_CPUTIME_ID, arg1) and the Sentry allows the stub
+// to serve it, using the thread CPU clock value published by the Sentry. It
+// returns true if it handled the system call, in which case its return value
+// is 0.
+//
+// The value served is identical to what the Sentry would return, since the
+// Sentry publishes the thread CPU clock every time it advances. Pending
+// interrupts must be handled by the Sentry, so the system call is not handled
+// if one is pending. If the application's timespec can't be written, the
+// system call is left to the Sentry, which returns EFAULT if appropriate.
+static bool try_thread_cpu_clock_gettime(struct sysmsg* sysmsg,
+                                         struct thread_context* ctx,
+                                         uint64_t sysno, uint64_t arg0,
+                                         uint64_t arg1) {
+  if (sysno != __NR_clock_gettime || arg0 != CLOCK_THREAD_CPUTIME_ID ||
+      atomic_load(&ctx->thread_cpu_clock_enabled) == 0 ||
+      atomic_load(&ctx->interrupt) != 0) {
+    return false;
+  }
+  int64_t ns = atomic_load(&ctx->thread_cpu_clock_ns);
+  if (ns < 0) {
+    return false;
+  }
+  return store_u64(sysmsg, arg1, ns / 1000000000) &&
+         store_u64(sysmsg, arg1 + 8, ns % 1000000000);
+}
+
 void __export_sighandler(int signo, siginfo_t* siginfo, void* _ucontext) {
   ucontext_t* ucontext = _ucontext;
   void* sp = sysmsg_sp();
@@ -365,6 +411,16 @@ void __export_sighandler(int signo, siginfo_t* siginfo, void* _ucontext) {
           ctx_state = CONTEXT_STATE_SYSCALL_NEED_TRAP;
         }
       }
+      // If this syscall can be patched, let the Sentry patch it; __syshandler
+      // can then handle clock_gettime(CLOCK_THREAD_CPUTIME_ID) faster.
+      if (ctx_state == CONTEXT_STATE_SYSCALL &&
+          siginfo->si_arch == AUDIT_ARCH_X86_64 &&
+          try_thread_cpu_clock_gettime(sysmsg, ctx, siginfo->si_syscall,
+                                       ucontext->uc_mcontext.gregs[REG_RDI],
+                                       ucontext->uc_mcontext.gregs[REG_RSI])) {
+        ucontext->uc_mcontext.gregs[REG_RAX] = 0;
+        return;
+      }
       ctx->ptregs.orig_rax = ctx->ptregs.rax;
       ctx->ptregs.rax = (unsigned long)-ENOSYS;
       if (siginfo->si_arch != AUDIT_ARCH_X86_64)
@@ -455,6 +511,23 @@ void __syshandler() {
   ctx->ptregs.fs_base = fs_base;
 
   atomic_store(&ctx->fpstate_changed, 0);
+
+  if (try_thread_cpu_clock_gettime(sysmsg, ctx, ctx->siginfo.si_syscall,
+                                   ctx->ptregs.rdi, ctx->ptregs.rsi)) {
+    // Return to the application, as switch_context_amd64 would. After
+    // THREAD_STATE_NONE is set, an interrupt can be handled by
+    // __export_sighandler, which takes over ctx as is; so ctx must be
+    // complete by then, and an interrupt that arrived before must be handled
+    // here.
+    ctx->ptregs.rax = 0;
+    atomic_store(&sysmsg->state, THREAD_STATE_NONE);
+    if (atomic_load(&ctx->interrupt) == 0) {
+      return;
+    }
+    atomic_store(&sysmsg->state, THREAD_STATE_PREP);
+    ctx->ptregs.rax = (unsigned long)-ENOSYS;
+  }
+
   ctx = switch_context_amd64(sysmsg, ctx, ctx_state);
   // switch_context_amd64 changed sysmsg->state to THREAD_STATE_NONE, so we can
   // only resume the current process, all other actions are

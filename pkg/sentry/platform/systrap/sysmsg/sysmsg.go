@@ -292,6 +292,14 @@ type ThreadContext struct {
 	Debug uint64
 	// SigError is an error code that clarifies the nature of the signal.
 	SigError uint64
+	// ThreadCPUClockNS is the thread's CPU clock in nanoseconds, as last
+	// published by the Sentry.
+	ThreadCPUClockNS int64
+	// If ThreadCPUClockEnabled is non-zero, the stub thread may handle
+	// clock_gettime(CLOCK_THREAD_CPUTIME_ID) by returning ThreadCPUClockNS,
+	// without switching to the Sentry.
+	ThreadCPUClockEnabled uint32
+	_                     uint32
 }
 
 // StubError are values that represent known stub-thread failure modes.
@@ -338,6 +346,8 @@ func (c *ThreadContext) Init(initialThreadID uint32) {
 	c.SignalInfo = linux.SignalInfo{}
 	c.State = ContextStateNone
 	c.ThreadID = initialThreadID
+	c.ThreadCPUClockNS = 0
+	c.ThreadCPUClockEnabled = 0
 }
 
 // ConvertSysmsgErr converts m.Err to platform.ContextError.

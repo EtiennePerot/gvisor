@@ -18,6 +18,7 @@ import (
 	"os"
 	"sync/atomic"
 	"testing"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 	pkgcontext "gvisor.dev/gvisor/pkg/context"
@@ -63,6 +64,12 @@ const userCodeAddr = hostarch.Addr(0x100000)
 // address space, and returns a context ready to Switch into it.
 func newSystrapTest(t *testing.T) (*Systrap, platform.AddressSpace, *platformContext, *arch.Context64) {
 	t.Helper()
+	return newSystrapTestWithCode(t, testutil.UserCode)
+}
+
+// newSystrapTestWithCode is like newSystrapTest, but maps the given user code.
+func newSystrapTestWithCode(t *testing.T, userCode []byte) (*Systrap, platform.AddressSpace, *platformContext, *arch.Context64) {
+	t.Helper()
 
 	s, err := New(platform.Options{
 		DisableSyscallPatching: true,
@@ -88,7 +95,7 @@ func newSystrapTest(t *testing.T) (*Systrap, platform.AddressSpace, *platformCon
 	if err != nil {
 		t.Fatalf("failed to map user code page: %v", err)
 	}
-	if _, err := safemem.CopySeq(bs, safemem.BlockSeqOf(safemem.BlockFromSafeSlice(testutil.UserCode))); err != nil {
+	if _, err := safemem.CopySeq(bs, safemem.BlockSeqOf(safemem.BlockFromSafeSlice(userCode))); err != nil {
 		t.Fatalf("failed to write user code: %v", err)
 	}
 	if err := as.MapFile(userCodeAddr, s.memoryFile, fr, hostarch.AccessType{Read: true, Execute: true}, false); err != nil {
@@ -161,5 +168,11 @@ func TestSpinningQueueLayout(t *testing.T) {
 	queueStart := stubContextQueueRegion + stubContextQueueRegionLen
 	if stubSpinningThreadQueueAddr < queueStart || stubSpinningThreadQueueAddr+sysmsg.SpinningQueueMemSize > stubContextRegion {
 		t.Errorf("spinning queue %#x not in [%#x, %#x)", stubSpinningThreadQueueAddr, queueStart, stubContextRegion)
+	}
+}
+
+func TestThreadContextSize(t *testing.T) {
+	if got, max := unsafe.Sizeof(sysmsg.ThreadContext{}), sysmsg.AllocatedSizeofThreadContextStruct; got > max {
+		t.Errorf("unsafe.Sizeof(sysmsg.ThreadContext{}) = %d, want <= %d", got, max)
 	}
 }

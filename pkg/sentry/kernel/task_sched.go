@@ -21,11 +21,13 @@ import (
 	"math/rand/v2"
 	"time"
 
+	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/errors/linuxerr"
 	"gvisor.dev/gvisor/pkg/sentry/hostcpu"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/sched"
 	"gvisor.dev/gvisor/pkg/sentry/ktime"
+	"gvisor.dev/gvisor/pkg/sentry/platform"
 	"gvisor.dev/gvisor/pkg/sentry/usage"
 )
 
@@ -327,6 +329,9 @@ func (k *Kernel) runCPUClockTicker() {
 				fallthrough
 			case TaskGoroutineRunningSys:
 				t.appSysCPUClock.Add(linux.ClockTick)
+				if t.serveThreadCPUClock.Load() {
+					t.publishThreadCPUClock()
+				}
 				t.tg.appSysCPUClockLast.Store(t)
 				t.tg.appSysCPUClock.Add(linux.ClockTick)
 				userSysTickInc++
@@ -553,4 +558,60 @@ func (t *Task) SetNumaPolicy(policy linux.NumaPolicy, nodeMask uint64) {
 	defer t.mu.Unlock()
 	t.numaPolicy = policy
 	t.numaNodeMask = nodeMask
+}
+
+// NoteThreadCPUClockRead is called when t reads its CPU clock with
+// clock_gettime(CLOCK_THREAD_CPUTIME_ID). If t's platform context can serve
+// these calls without switching to the Sentry, it starts doing so the next
+// time t switches to application code, as long as
+// Task.appMayServeThreadCPUClock allows it. Tasks that never read their CPU
+// clock this way don't pay for maintaining it in the platform context.
+//
+// Preconditions: The caller must be running on the task goroutine.
+func (t *Task) NoteThreadCPUClockRead() {
+	if t.serveThreadCPUClock.Load() {
+		return
+	}
+	if _, ok := t.p.(platform.ThreadCPUClockServer); !ok {
+		return
+	}
+	// From now on, Kernel.runCPUClockTicker publishes every advance of t's CPU
+	// clock. Publish the current value in case it doesn't see
+	// serveThreadCPUClock yet.
+	t.serveThreadCPUClock.Store(true)
+	t.publishThreadCPUClock()
+}
+
+// publishThreadCPUClock passes the current value of t's CPU clock to t's
+// platform context.
+//
+// Preconditions: t.serveThreadCPUClock is true.
+func (t *Task) publishThreadCPUClock() {
+	t.p.(platform.ThreadCPUClockServer).UpdateThreadCPUClock(t.appSysCPUClock.Now().Nanoseconds())
+}
+
+// appMayServeThreadCPUClock returns true if t's platform context may serve
+// the application's clock_gettime(CLOCK_THREAD_CPUTIME_ID) calls without
+// invoking the system call in the Sentry. This requires that nothing else
+// needs to observe or filter those calls.
+//
+// Preconditions: The caller must be running on the task goroutine.
+func (t *Task) appMayServeThreadCPUClock() bool {
+	st := t.SyscallTable()
+	// Strace, seccheck, and external hooks are enabled through FeatureEnable.
+	if st.FeatureEnable.Word(unix.SYS_CLOCK_GETTIME)&^syscallPresent != 0 {
+		return false
+	}
+	// Tracers may observe system calls. They can only start doing so while t
+	// is stopped, after which this function is called again.
+	if t.hasTracer() {
+		return false
+	}
+	// Seccomp filters are fine if they allow all clock_gettime calls. If
+	// another task installs filters on t with SECCOMP_FILTER_FLAG_TSYNC, it
+	// interrupts t so that this function is called again.
+	if ts := t.seccomp.Load(); ts != nil && !ts.alwaysAllows(st.AuditNumber, unix.SYS_CLOCK_GETTIME) {
+		return false
+	}
+	return true
 }

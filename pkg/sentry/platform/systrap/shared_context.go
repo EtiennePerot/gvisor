@@ -117,6 +117,21 @@ func (sc *sharedContext) release() {
 	sc.subprocess.DecRef(sc.subprocess.release)
 }
 
+// setThreadCPUClock publishes the thread's CPU clock value to the stub thread.
+func (sc *sharedContext) setThreadCPUClock(ns int64) {
+	atomic.StoreInt64(&sc.shared.ThreadCPUClockNS, ns)
+}
+
+// setThreadCPUClockEnabled sets whether the stub thread may handle
+// clock_gettime(CLOCK_THREAD_CPUTIME_ID) by itself.
+func (sc *sharedContext) setThreadCPUClockEnabled(enabled bool) {
+	var v uint32
+	if enabled {
+		v = 1
+	}
+	atomic.StoreUint32(&sc.shared.ThreadCPUClockEnabled, v)
+}
+
 func (sc *sharedContext) isActiveInSubprocess(s *subprocess) bool {
 	if sc == nil {
 		return false

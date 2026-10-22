@@ -140,9 +140,24 @@ type platformContext struct {
 
 	// sharedContext is everything related to this platformContext that is resident in
 	// shared memory with the stub thread.
-	// sharedContext is only written on the Task goroutine, but atomic because
-	// NotifyInterrupt may read it from any goroutines.
+	// sharedContext is only written on the Task goroutine with sharedContextMu
+	// held, but atomic because NotifyInterrupt may read it from any
+	// goroutines.
 	sharedContext atomic.Pointer[sharedContext]
+
+	// sharedContextMu serializes changes to sharedContext with
+	// UpdateThreadCPUClock, which may be called from any goroutine, so that
+	// UpdateThreadCPUClock never writes to a released sharedContext.
+	sharedContextMu sync.Mutex
+
+	// threadCPUClockNS is the largest value passed to UpdateThreadCPUClock.
+	//
+	// +checklocks:sharedContextMu
+	threadCPUClockNS int64
+
+	// threadCPUClockEnabled is the last value passed to EnableThreadCPUClock.
+	// It is only accessed on the task goroutine.
+	threadCPUClockEnabled bool
 
 	// needRestoreFPState indicates that the FPU state has been changed by
 	// the Sentry and has to be updated on the stub thread.
@@ -234,6 +249,8 @@ func (c *platformContext) NotifyInterrupt() {
 
 // Release releases all platform resources used by the platformContext.
 func (c *platformContext) Release() {
+	c.sharedContextMu.Lock()
+	defer c.sharedContextMu.Unlock()
 	if sc := c.sharedContext.Swap(nil); sc != nil {
 		sc.release()
 	}

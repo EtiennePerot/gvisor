@@ -319,6 +319,30 @@ type Context interface {
 	LastCPUNumber() int32
 }
 
+// ThreadCPUClockServer is an optional interface implemented by Contexts that
+// can serve the application's clock_gettime(CLOCK_THREAD_CPUTIME_ID) calls
+// without switching to the Sentry, from a clock value maintained by the
+// Sentry.
+type ThreadCPUClockServer interface {
+	// UpdateThreadCPUClock sets the value of the thread's CPU clock, in
+	// nanoseconds, that the Context serves to the application. Values smaller
+	// than a previously set value are ignored, so that the clock never goes
+	// backwards.
+	//
+	// UpdateThreadCPUClock may be called from any goroutine, including
+	// concurrently and while the Context is executing application code.
+	UpdateThreadCPUClock(ns int64)
+
+	// EnableThreadCPUClock sets whether the Context may serve the thread's
+	// CPU clock to the application. If enabled is false, the application's
+	// calls are reported to the Sentry as system calls by Switch, as usual.
+	// The setting takes effect at the next call to Switch.
+	//
+	// Preconditions: The caller must be running on the task goroutine, and
+	// there must be no concurrent call to Switch.
+	EnableThreadCPUClock(enabled bool)
+}
+
 // LastCPUNumber implements Context.LastCPUNumber.
 func (NoCPUNumbers) LastCPUNumber() int32 {
 	panic("context does not support last CPU number")

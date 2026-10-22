@@ -1337,6 +1337,8 @@ func (s *subprocess) UserModifiedGS(ctx pkgcontext.Context, mm platform.MemoryMa
 // deactivates it from its last subprocess.
 func (s *subprocess) activateContext(c *platformContext) error {
 	if !c.sharedContext.Load().isActiveInSubprocess(s) {
+		c.sharedContextMu.Lock()
+		defer c.sharedContextMu.Unlock()
 		if sc := c.sharedContext.Swap(nil); sc != nil {
 			sc.release()
 		}
@@ -1345,6 +1347,8 @@ func (s *subprocess) activateContext(c *platformContext) error {
 		if err != nil {
 			return err
 		}
+		shared.setThreadCPUClock(c.threadCPUClockNS)
+		shared.setThreadCPUClockEnabled(c.threadCPUClockEnabled)
 		c.sharedContext.Store(shared)
 	}
 	return nil

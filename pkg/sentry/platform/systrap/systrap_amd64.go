@@ -16,6 +16,7 @@ package systrap
 
 import (
 	"gvisor.dev/gvisor/pkg/sentry/arch"
+	"gvisor.dev/gvisor/pkg/sentry/platform"
 )
 
 func stackPointer(r *arch.Registers) uintptr {
@@ -59,3 +60,34 @@ func (t *thread) disablePointerAuth() error {
 // address space layout is fixed and does not require dynamic
 // configuration, so this is intentionally empty.
 func configureSystrapAddressSpace() {}
+
+// The amd64 stub serves clock_gettime(CLOCK_THREAD_CPUTIME_ID) when allowed
+// (see sysmsg/sighandler_amd64.c:try_thread_cpu_clock_gettime()), so
+// platformContext implements platform.ThreadCPUClockServer on amd64 only.
+var _ platform.ThreadCPUClockServer = (*platformContext)(nil)
+
+// UpdateThreadCPUClock implements platform.ThreadCPUClockServer.UpdateThreadCPUClock.
+func (c *platformContext) UpdateThreadCPUClock(ns int64) {
+	c.sharedContextMu.Lock()
+	defer c.sharedContextMu.Unlock()
+	if ns <= c.threadCPUClockNS {
+		return
+	}
+	c.threadCPUClockNS = ns
+	if sc := c.sharedContext.Load(); sc != nil {
+		sc.setThreadCPUClock(ns)
+	}
+}
+
+// EnableThreadCPUClock implements platform.ThreadCPUClockServer.EnableThreadCPUClock.
+func (c *platformContext) EnableThreadCPUClock(enabled bool) {
+	if c.threadCPUClockEnabled == enabled {
+		return
+	}
+	c.threadCPUClockEnabled = enabled
+	// Only the task goroutine changes c.sharedContext, so it can't be released
+	// concurrently.
+	if sc := c.sharedContext.Load(); sc != nil {
+		sc.setThreadCPUClockEnabled(enabled)
+	}
+}

@@ -152,6 +152,9 @@ func ClockGettime(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (ui
 	if err != nil {
 		return 0, nil, err
 	}
+	if clockID == linux.CLOCK_THREAD_CPUTIME_ID {
+		t.NoteThreadCPUClockRead()
+	}
 	ts := c.Now().Timespec()
 	return 0, nil, copyTimespecOut(t, addr, &ts)
 }

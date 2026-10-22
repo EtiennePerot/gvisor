@@ -143,6 +143,12 @@ type Task struct {
 	// spent in TaskGoroutineRunningApp or TaskGoroutineRunningSys.
 	appSysCPUClock ktime.SyntheticClock
 
+	// serveThreadCPUClock is true if the task's platform context should serve
+	// the task's clock_gettime(CLOCK_THREAD_CPUTIME_ID) calls when allowed.
+	// See Task.NoteThreadCPUClockRead. serveThreadCPUClock is only set by the
+	// task goroutine, but may be read from any goroutine.
+	serveThreadCPUClock atomicbitops.Bool `state:"nosave"`
+
 	// yieldCount is the number of times the task goroutine has called
 	// Task.InterruptibleSleepStart, Task.UninterruptibleSleepStart, or
 	// Task.Yield(), voluntarily ceasing execution.
