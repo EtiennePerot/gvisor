@@ -75,6 +75,14 @@ type objectDecodeState struct {
 	// distinct types.
 	obj reflect.Value
 
+	// ptr is the address of obj.
+	ptr objectAddr
+
+	// dec, if non-nil, decodes the object. It is provided by the typed
+	// decoder that created the object, along with decArg.
+	dec    objectDecodeFunc
+	decArg any
+
 	// blockedBy is the number of dependencies this object has.
 	blockedBy int
 
@@ -87,6 +95,9 @@ type objectDecodeState struct {
 	pendingEntry odsListElem
 	leafEntry    odsListElem
 }
+
+// objectDecodeFunc decodes the object ods, whose tag has been read, using d.
+type objectDecodeFunc func(d *Decoder, ods *objectDecodeState, tag Tag)
 
 type odsListElem struct {
 	ods *objectDecodeState
@@ -150,6 +161,12 @@ type decodeState struct {
 	// leaves is the set of objects that have no dependencies (blockedBy == 0).
 	// leaves are consumed from the front and appended to the back.
 	leaves odsList
+
+	// codecs is true if Codec methods are used.
+	codecs bool
+
+	// dec is the Decoder used for top-level objects.
+	dec Decoder
 
 	// stats tracks time data.
 	stats Stats
@@ -279,6 +296,7 @@ func (ds *decodeState) addObject(id objectID, obj reflect.Value) *objectDecodeSt
 	ods := &objectDecodeState{
 		id:  id,
 		obj: obj,
+		ptr: obj.Addr().UnsafePointer(),
 	}
 	ods.pendingEntry.ods = ods
 	ods.leafEntry.ods = ods
@@ -659,18 +677,18 @@ func (ds *decodeState) Load(obj reflect.Value) {
 		// decoding loop in state/pretty/pretty.printer.printStream().
 		for i := uint64(0); i < numObjects; {
 			// Unmarshal either a type object or object ID.
-			encoded = wire.Load(&ds.r)
-			switch we := encoded.(type) {
-			case *wire.Type:
-				ds.types.Register(we)
-				encoded = nil
-				continue
-			case wire.Uint:
-				id = objectID(we)
+			tag := wire.Tag(wire.ReadUint(&ds.r))
+			if tag == wire.TagUint {
+				id = objectID(wire.ReadUint(&ds.r))
 				i++
 				// Unmarshal and resolve the actual object.
-				encoded = wire.Load(&ds.r)
+				tag = wire.Tag(wire.ReadUint(&ds.r))
 				ods = ds.lookup(id)
+				if ods != nil && ds.codecs && ds.decodeTop(ods, tag) {
+					ods = nil
+					continue
+				}
+				encoded = wire.LoadTagged(&ds.r, tag)
 				if ods != nil {
 					// Decode the object.
 					ds.decodeObject(ods, ods.obj, encoded)
@@ -683,9 +701,15 @@ func (ds *decodeState) Load(obj reflect.Value) {
 				// For error handling.
 				ods = nil
 				encoded = nil
-			default:
+				continue
+			}
+			encoded = wire.LoadTagged(&ds.r, tag)
+			we, ok := encoded.(*wire.Type)
+			if !ok {
 				Failf("wanted type or object ID, got %T", encoded)
 			}
+			ds.types.Register(we)
+			encoded = nil
 		}
 	}); err != nil {
 		// Include as much information as we can, taking into account
