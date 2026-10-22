@@ -17,11 +17,13 @@
 package main
 
 import (
+	"bytes"
 	"flag"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -300,6 +302,22 @@ func main() {
 		}
 	}
 
+	// Codec methods are emitted at the end. See below.
+	var codecOut bytes.Buffer
+	var zeroCheckOut io.Writer = outputFile
+
+	// Record all type declarations, for codec generation.
+	cg := &codecGen{local: make(localTypes), statePrefix: statePrefix}
+	for _, f := range files {
+		for _, decl := range f.Decls {
+			if d, ok := decl.(*ast.GenDecl); ok && d.Tok == token.TYPE {
+				for _, gs := range d.Specs {
+					cg.add(gs.(*ast.TypeSpec))
+				}
+			}
+		}
+	}
+
 	for _, f := range files {
 		// Go over all named types.
 		for _, decl := range f.Decls {
@@ -386,7 +404,7 @@ func main() {
 						fmt.Fprintf(outputFile, "	stateSinkObject.Save(%d, &%s.%s)\n", fields[name], recv, name)
 					}
 					emitZeroCheck := func(name string) {
-						fmt.Fprintf(outputFile, "	if !%sIsZeroValue(&%s.%s) { %sFailf(\"%s is %%#v, expected zero\", &%s.%s) }\n", statePrefix, recv, name, statePrefix, name, recv, name)
+						fmt.Fprintf(zeroCheckOut, "	if !%sIsZeroValue(&%s.%s) { %sFailf(\"%s is %%#v, expected zero\", &%s.%s) }\n", statePrefix, recv, name, statePrefix, name, recv, name)
 					}
 
 					// Generate the type name method.
@@ -458,6 +476,13 @@ func main() {
 							fmt.Fprintf(outputFile, "	stateSourceObject.AfterLoad(func () { %s.afterLoad(ctx) })\n", recv)
 						}
 						fmt.Fprintf(outputFile, "}\n\n")
+
+						// Generate the typed codec methods.
+						zeroCheckOut = &codecOut
+						cg.emitCodec(&codecOut, recv, ts.Name.Name, x, hasAfterLoad, func() {
+							scanFields(x, scanFunctions{zerovalue: emitZeroCheck})
+						})
+						zeroCheckOut = outputFile
 					}
 
 					// Add to our registration.
@@ -503,6 +528,7 @@ func main() {
 							fmt.Fprintf(outputFile, "func (%s *%s) StateLoad(ctx context.Context, stateSourceObject %sSource) {\n", recv, ts.Name.Name, statePrefix)
 							fmt.Fprintf(outputFile, "	(*%s)(%s).StateLoad(ctx, stateSourceObject)\n", typeName, recv)
 							fmt.Fprintf(outputFile, "}\n\n")
+							cg.emitIdentCodec(&codecOut, recv, ts.Name.Name, typeName)
 						}
 					}
 
@@ -520,5 +546,11 @@ func main() {
 			fmt.Fprintf(outputFile, "	%s\n", ic)
 		}
 		fmt.Fprintf(outputFile, "}\n")
+	}
+
+	// Emit the codec methods last, leaving the code above unchanged.
+	if codecOut.Len() > 0 {
+		fmt.Fprintf(outputFile, "\n")
+		outputFile.Write(codecOut.Bytes())
 	}
 }

@@ -1,4 +1,4 @@
-load("//tools:defs.bzl", "bzl_library", "go_binary")
+load("//tools:defs.bzl", "bzl_library", "go_binary", "go_test")
 
 package(
     default_applicable_licenses = ["//:license"],
@@ -7,8 +7,22 @@ package(
 
 go_binary(
     name = "stateify",
-    srcs = ["main.go"],
+    srcs = [
+        "codec.go",
+        "main.go",
+    ],
     visibility = ["//:sandbox"],
+    deps = ["//tools/constraintutil"],
+)
+
+go_test(
+    name = "stateify_test",
+    size = "small",
+    srcs = [
+        "codec.go",
+        "codec_test.go",
+        "main.go",
+    ],
     deps = ["//tools/constraintutil"],
 )
 
