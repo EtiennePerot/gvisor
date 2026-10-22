@@ -149,6 +149,51 @@ func (r *SimpleReader) ReadByte() (byte, error) {
 	return b[0], nil
 }
 
+// Buffered returns the number of bytes that can be read without reading from
+// the underlying stream. Together with Peek and Discard, it lets callers
+// decode data in place.
+func (r *SimpleReader) Buffered() int {
+	if r.h == nil {
+		return r.bin.Buffered()
+	}
+	if r.err != nil {
+		return 0
+	}
+	return len(r.pending)
+}
+
+// Peek returns the next n bytes without advancing the reader. n must not be
+// greater than Buffered. The bytes stop being valid at the next read call.
+func (r *SimpleReader) Peek(n int) ([]byte, error) {
+	if r.h == nil {
+		return r.bin.Peek(n)
+	}
+	if r.err != nil {
+		return nil, r.err
+	}
+	if n > len(r.pending) {
+		return r.pending, bufio.ErrBufferFull
+	}
+	return r.pending[:n], nil
+}
+
+// Discard skips the next n bytes. n must not be greater than Buffered.
+func (r *SimpleReader) Discard(n int) (int, error) {
+	if r.h == nil {
+		return r.bin.Discard(n)
+	}
+	if r.err != nil {
+		return 0, r.err
+	}
+	if n > len(r.pending) {
+		n = len(r.pending)
+		r.pending = r.pending[n:]
+		return n, bufio.ErrBufferFull
+	}
+	r.pending = r.pending[n:]
+	return n, nil
+}
+
 // Read implements io.Reader.Read.
 func (r *SimpleReader) Read(p []byte) (int, error) {
 	if r.h == nil {

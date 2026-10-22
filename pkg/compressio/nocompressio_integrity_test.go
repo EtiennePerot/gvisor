@@ -395,3 +395,77 @@ func TestReadByteRejectsTamperedStream(t *testing.T) {
 		}
 	}
 }
+
+// TestPeekDiscard makes sure that data read through Buffered, Peek and Discard,
+// mixed with ReadByte and Read, is the data written.
+func TestPeekDiscard(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		key       []byte
+		size      int
+		chunkSize uint32
+	}{
+		{"keyed", integrityKey, 64 * 1024, 1024},
+		{"keyed-oversized-direct-write", integrityKey, 4 * maxVerifiedChunkSize, 1024},
+		{"unkeyed", nil, 64 * 1024, 1024},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := testData(tc.size)
+			var out bytes.Buffer
+			w := NewSimpleWriter(&out, tc.key, tc.chunkSize)
+			if _, err := w.Write(data); err != nil {
+				t.Fatalf("Write: %v", err)
+			}
+			if err := w.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			r := NewSimpleReader(io.NopCloser(bytes.NewReader(out.Bytes())), tc.key)
+			var got []byte
+			buf := make([]byte, 777)
+		loop:
+			for i := 0; ; i++ {
+				switch i % 3 {
+				case 0:
+					n := r.Buffered()
+					if n == 0 {
+						continue
+					}
+					n = min(n, 1+i%100)
+					p, err := r.Peek(n)
+					if err != nil || len(p) != n {
+						t.Fatalf("Peek(%d): got %d bytes, %v", n, len(p), err)
+					}
+					got = append(got, p...)
+					if d, err := r.Discard(n); err != nil || d != n {
+						t.Fatalf("Discard(%d): got %d, %v", n, d, err)
+					}
+					continue
+				case 1:
+					b, err := r.ReadByte()
+					if err == io.EOF {
+						break loop
+					}
+					if err != nil {
+						t.Fatalf("ReadByte: %v", err)
+					}
+					got = append(got, b)
+					continue
+				}
+				n, err := r.Read(buf)
+				got = append(got, buf[:n]...)
+				if err == io.EOF {
+					break loop
+				}
+				if err != nil {
+					t.Fatalf("Read: %v", err)
+				}
+			}
+			if !bytes.Equal(got, data) {
+				t.Fatalf("round-trip mismatch: got %d bytes, want %d", len(got), len(data))
+			}
+			if err := r.Verify(); err != nil {
+				t.Errorf("Verify: %v", err)
+			}
+		})
+	}
+}
