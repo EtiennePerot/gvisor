@@ -82,6 +82,9 @@ type encodeState struct {
 	// by zeroValues below.
 	values addrSet
 
+	// traversals caches the results of findTraversal.
+	traversals map[traversalKey]traversal
+
 	// zeroValues tracks zero-sized objects.
 	zeroValues map[reflect.Type]*objectEncodeState
 
@@ -141,8 +144,9 @@ type encodeState struct {
 // Similarly, &arr[0] and &arr[0].c have the exact same address range.
 //
 // Precondition: parent and child must occupy the same memory.
-func isSameSizeParent(parent reflect.Value, childType reflect.Type) bool {
-	return findTraversal(parent.Type(), childType, 0, nil)
+func (es *encodeState) isSameSizeParent(parent reflect.Value, childType reflect.Type) bool {
+	_, ok := es.findTraversal(parent.Type(), childType, 0)
+	return ok
 }
 
 // nextID returns the next valid ID.
@@ -264,11 +268,11 @@ func (es *encodeState) resolve(obj reflect.Value, ref *wire.Ref) {
 			return
 		}
 
-		if seg.Range().IsSupersetOf(r) && (seg.Range() != r || isSameSizeParent(existing.obj, typ)) {
+		if seg.Range().IsSupersetOf(r) && (seg.Range() != r || es.isSameSizeParent(existing.obj, typ)) {
 			// This object is contained within a previously-registered object.
 			// Perform traversal from the container to the new object.
 			ref.Root = wire.Uint(existing.id)
-			ref.Dots = traverse(existing.obj.Type(), typ, seg.Start(), addr)
+			ref.Dots = es.traverse(existing.obj.Type(), typ, seg.Start(), addr)
 			ref.Type = es.findType(existing.obj.Type())
 			existing.refs = append(existing.refs, ref)
 			return
@@ -312,7 +316,7 @@ func (es *encodeState) resolve(obj reflect.Value, ref *wire.Ref) {
 		}
 		wt := es.findType(typ)
 		for _, elem := range elems {
-			dots := traverse(typ, elem.typ, addr, elem.addr)
+			dots := es.traverse(typ, elem.typ, addr, elem.addr)
 			for _, ref := range elem.refs {
 				ref.Root = wire.Uint(oes.id)
 				ref.Dots = append(ref.Dots, dots...)
@@ -364,13 +368,45 @@ func (es *encodeState) resolve(obj reflect.Value, ref *wire.Ref) {
 //
 // Precondition: The target object must lie completely within the range defined
 // by [rootAddr, rootAddr + sizeof(rootType)].
-func traverse(rootType, targetType reflect.Type, rootAddr, targetAddr uintptr) []wire.Dot {
-	var dots []wire.Dot
-	if findTraversal(rootType, targetType, targetAddr-rootAddr, &dots) {
+//
+// The returned slice must not be modified, except by appending to it.
+func (es *encodeState) traverse(rootType, targetType reflect.Type, rootAddr, targetAddr uintptr) []wire.Dot {
+	if dots, ok := es.findTraversal(rootType, targetType, targetAddr-rootAddr); ok {
 		return dots
 	}
 	Failf("traverse failed for root type %v @%x and target type %v @%x", rootType, rootAddr, targetType, targetAddr)
 	panic("unreachable")
+}
+
+// traversalKey identifies a traversal.
+type traversalKey struct {
+	root, target reflect.Type
+	offset       uintptr
+}
+
+// traversal is the result of a traversal.
+type traversal struct {
+	dots []wire.Dot
+	ok   bool
+}
+
+// findTraversal is a cached version of findTraversal. Traversals are common
+// (pointers to embedded structs, to fields and to array elements) and each
+// one walks the fields of types by reflection.
+//
+// The returned slice must not be modified, except by appending to it.
+func (es *encodeState) findTraversal(rootType, targetType reflect.Type, offset uintptr) ([]wire.Dot, bool) {
+	key := traversalKey{rootType, targetType, offset}
+	t, ok := es.traversals[key]
+	if !ok {
+		t.ok = findTraversal(rootType, targetType, offset, &t.dots)
+		if es.traversals == nil {
+			es.traversals = make(map[traversalKey]traversal)
+		}
+		es.traversals[key] = t
+	}
+	// Limit the capacity, so that appending copies.
+	return t.dots[:len(t.dots):len(t.dots)], t.ok
 }
 
 // findTraversal searches for targetType at offset within rootType. If dots is
