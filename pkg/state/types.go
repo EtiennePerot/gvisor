@@ -74,6 +74,14 @@ func lookupTypeInfo(typ reflect.Type) (wire.Type, bool) {
 	if info, ok := reverseTypeDatabase[typ]; ok {
 		return info, true
 	}
+	switch typ.Kind() {
+	case reflect.Ptr, reflect.Slice, reflect.Array, reflect.Map:
+		if typ.Name() == "" {
+			// Pointers to unnamed composite types have no methods,
+			// so they don't implement Type.
+			return wire.Type{}, false
+		}
+	}
 	v := reflect.Zero(reflect.PointerTo(typ)).Interface()
 	t, ok := v.(Type)
 	if !ok {
@@ -109,12 +117,19 @@ func lookupTypeInfo(typ reflect.Type) (wire.Type, bool) {
 // interface.
 func (tdb *typeEncodeDatabase) Lookup(typ reflect.Type) (*typeEntry, bool) {
 	te, ok := tdb.byType[typ]
+	if ok && te == nil {
+		// A cached failed lookup; see below.
+		return nil, false
+	}
 	if !ok {
 		// Lookup the type information.
 		info, ok := lookupTypeInfo(typ)
 		if !ok {
 			// Empty structs may still be encoded, so let the
-			// caller decide what to do from here.
+			// caller decide what to do from here. Remember the
+			// failure: findType looks up pointer, slice, array
+			// and map types for every reference into them.
+			tdb.byType[typ] = nil
 			return nil, false
 		}
 
