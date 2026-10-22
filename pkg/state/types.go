@@ -34,6 +34,10 @@ type reconciledTypeEntry struct {
 	wire.Type
 	LocalType  reflect.Type
 	FieldOrder []int
+
+	// identity is true if the fields are in the same order locally and on
+	// the wire.
+	identity bool
 }
 
 // typeEncodeDatabase is an internal TypeInfo database for encoding.
@@ -236,11 +240,13 @@ func (tbd *typeDecodeDatabase) Lookup(id typeID, typ reflect.Type) *reconciledTy
 	}
 	if len(fields) == 0 {
 		tbd.byID[id-1] = rte // Save.
+		rte.identity = true
 		return rte
 	}
 	if len(fields) == 1 && fields[0] == pending.Fields[0] {
 		tbd.byID[id-1] = rte // Save.
 		rte.FieldOrder = singleFieldOrder
+		rte.identity = true
 		return rte
 	}
 	// Local field names are unique. Equal lengths and a match for every
@@ -269,6 +275,13 @@ func (tbd *typeDecodeDatabase) Lookup(id typeID, typ reflect.Type) *reconciledTy
 	}
 	// The type has been reeconciled.
 	rte.FieldOrder = fieldOrder
+	rte.identity = true
+	for i, j := range fieldOrder {
+		if i != j {
+			rte.identity = false
+			break
+		}
+	}
 	tbd.byID[id-1] = rte
 	return rte
 }

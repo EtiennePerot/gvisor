@@ -17,7 +17,6 @@ package state
 import (
 	"context"
 	"reflect"
-	"sort"
 
 	"gvisor.dev/gvisor/pkg/state/wire"
 )
@@ -48,8 +47,38 @@ type objectEncodeState struct {
 	// references may be updated directly and automatically.
 	refs []*wire.Ref
 
+	// addr is the address of the object (obj.Addr(), or the map pointer).
+	addr objectAddr
+
+	// enc, if non-nil, encodes the object. It is provided by the typed
+	// encoder that discovered the object, along with encArg.
+	enc    objectEncodeFunc
+	encArg any
+
+	// raw is the object's encoding by an Encoder, used if encoded is nil.
+	// raw.Data includes the object's tag.
+	raw wire.Raw
+
+	// spanStart and spanEnd are the range of es.spans recorded while
+	// encoding this object with an Encoder.
+	spanStart, spanEnd int
+
+	// encodedOnce is true once this object has been encoded.
+	encodedOnce bool
+
+	// absorbedWhileEncoding is true if this object was merged into a
+	// containing object while it was being encoded.
+	absorbedWhileEncoding bool
+
+	// containsEncoded is true if this object contains objects that were
+	// already encoded, whose struct encodings must be reused.
+	containsEncoded bool
+
 	deferredEntry
 }
+
+// objectEncodeFunc encodes the object oes using e.
+type objectEncodeFunc func(e *Encoder, oes *objectEncodeState)
 
 // encodeState is state used for encoding.
 //
@@ -96,15 +125,61 @@ type encodeState struct {
 	// serialized.
 	pendingTypes []wire.Type
 
-	// pending maps object IDs to objects to be serialized. Serialization does
-	// not actually occur until the full object graph is computed.
-	pending map[objectID]*objectEncodeState
+	// pending holds objects to be serialized, indexed by object ID - 1.
+	// Serialization does not actually occur until the full object graph is
+	// computed. Objects merged into other objects leave nil entries.
+	pending []*objectEncodeState
+
+	// pendingCount is the number of non-nil entries in pending.
+	pendingCount int
 
 	// encodedStructs maps reflect.Values representing structs to previous
 	// encodings of those structs. This is necessary to avoid duplicate calls
 	// to SaverLoader.StateSave() that may result in multiple calls to
 	// Sink.SaveValue() for a given field, resulting in object duplication.
-	encodedStructs map[reflect.Value]*wire.Struct
+	encodedStructs map[reflect.Value]wire.Object
+
+	// codecs is true if Codec methods are used.
+	codecs bool
+
+	// enc is the Encoder used for top-level objects.
+	enc Encoder
+
+	// encodedBytes is the size of the encodings of objects encoded by enc.
+	encodedBytes int
+
+	// arena holds the encodings of objects encoded by enc.
+	arena []byte
+
+	// embedded holds the embedded objects of objects encoded by enc.
+	embedded []wire.Embedded
+
+	// refArena allocates wire.Refs.
+	refArena []wire.Ref
+
+	// spans records struct encodings by enc. See objectEncodeState.spanStart.
+	spans []structSpan
+
+	// current is the object being encoded. currentIsArray is true if it is
+	// an array.
+	current        *objectEncodeState
+	currentIsArray bool
+
+	// checkEncoded is true while encoding an object for which
+	// encodedCodecStructs must be checked. See containsEncoded.
+	checkEncoded bool
+
+	// encodedCodecStructs holds previous encodings of Codec structs that may
+	// be encoded again as part of a containing object. It is the equivalent
+	// of encodedStructs for Codec structs.
+	encodedCodecStructs map[structKey]*wire.Raw
+
+	// typesByIndex caches type entries by TypeIndex.
+	typesByIndex []*typeEntry
+
+	// typeSpecs caches the encoding of type specifications of the dynamic
+	// types of interfaces.
+	typeSpecs map[reflect.Type][]byte
 
 	// binaryBuf holds temporary BinaryAppender output. Each saved value is
 	// copied into an immutable string before this buffer is reused.
@@ -158,8 +233,26 @@ func (es *encodeState) nextID() objectID {
 // dummyAddr points to the dummy zero-sized address.
 var dummyAddr = reflect.ValueOf(new(struct{})).Pointer()
 
+// addPending adds oes to the objects to be serialized.
+func (es *encodeState) addPending(oes *objectEncodeState) {
+	for int(oes.id) > len(es.pending) {
+		es.pending = append(es.pending, nil)
+	}
+	es.pending[oes.id-1] = oes
+	es.pendingCount++
+}
+
+// removePending removes the given object from the objects to be serialized.
+func (es *encodeState) removePending(id objectID) {
+	es.pending[id-1] = nil
+	es.pendingCount--
+}
+
 // resolve records the address range occupied by an object.
-func (es *encodeState) resolve(obj reflect.Value, ref *wire.Ref) {
+//
+// enc and encArg, if enc is non-nil, are used to encode the object if this
+// creates a new object. See objectEncodeState.enc.
+func (es *encodeState) resolve(obj reflect.Value, ref *wire.Ref, enc objectEncodeFunc, encArg any) {
 	addr := obj.Pointer()
 
 	// Is this a map pointer? Just record the single address. It is not
@@ -189,9 +282,12 @@ func (es *encodeState) resolve(obj reflect.Value, ref *wire.Ref) {
 		// Record the map.
 		r := addrRange{addr, addr + 1}
 		oes := &objectEncodeState{
-			id:  es.nextID(),
-			obj: obj,
-			how: encodeMapAsValue,
+			id:     es.nextID(),
+			obj:    obj,
+			how:    encodeMapAsValue,
+			addr:   obj.UnsafePointer(),
+			enc:    enc,
+			encArg: encArg,
 		}
 		// Use Insert instead of InsertWithoutMergingUnchecked when race
 		// detection is enabled to get additional sanity-checking from Merge.
@@ -200,7 +296,7 @@ func (es *encodeState) resolve(obj reflect.Value, ref *wire.Ref) {
 		} else {
 			es.values.Insert(gap, r, oes)
 		}
-		es.pending[oes.id] = oes
+		es.addPending(oes)
 		es.deferred.PushBack(oes)
 
 		// See above: no ref recording.
@@ -213,6 +309,7 @@ func (es *encodeState) resolve(obj reflect.Value, ref *wire.Ref) {
 		Failf("attempt to record non-map and non-pointer object %#v", obj)
 	}
 
+	uptr := obj.UnsafePointer()
 	obj = obj.Elem() // Value from here.
 
 	// Is this a zero-sized type?
@@ -230,11 +327,14 @@ func (es *encodeState) resolve(obj reflect.Value, ref *wire.Ref) {
 			oes, ok := es.zeroValues[typ]
 			if !ok {
 				oes = &objectEncodeState{
-					id:  es.nextID(),
-					obj: obj,
+					id:     es.nextID(),
+					obj:    obj,
+					addr:   uptr,
+					enc:    enc,
+					encArg: encArg,
 				}
 				es.zeroValues[typ] = oes
-				es.pending[oes.id] = oes
+				es.addPending(oes)
 				es.deferred.PushBack(oes)
 			}
 
@@ -282,8 +382,11 @@ func (es *encodeState) resolve(obj reflect.Value, ref *wire.Ref) {
 		// Remove them and update existing references to use the new one.
 		oes := &objectEncodeState{
 			// Reuse the root ID of the first contained element.
-			id:  existing.id,
-			obj: obj,
+			id:     existing.id,
+			obj:    obj,
+			addr:   uptr,
+			enc:    enc,
+			encArg: encArg,
 		}
 		type elementEncodeState struct {
 			addr uintptr
@@ -305,8 +408,9 @@ func (es *encodeState) resolve(obj reflect.Value, ref *wire.Ref) {
 				typ:  existing.obj.Type(),
 				refs: existing.refs,
 			})
-			delete(es.pending, existing.id)
+			es.removePending(existing.id)
 			es.deferred.Remove(existing)
+			es.absorb(oes, existing)
 			gap = es.values.Remove(seg)
 			seg = gap.NextSegment()
 			if !seg.Ok() || seg.Start() >= end {
@@ -330,7 +434,7 @@ func (es *encodeState) resolve(obj reflect.Value, ref *wire.Ref) {
 		} else {
 			es.values.Insert(gap, r, oes)
 		}
-		es.pending[oes.id] = oes
+		es.addPending(oes)
 		es.deferred.PushBack(oes)
 		ref.Root = wire.Uint(oes.id)
 		oes.refs = append(oes.refs, ref)
@@ -339,8 +443,11 @@ func (es *encodeState) resolve(obj reflect.Value, ref *wire.Ref) {
 
 	// No existing object overlaps this one. Register a new object.
 	oes = &objectEncodeState{
-		id:  es.nextID(),
-		obj: obj,
+		id:     es.nextID(),
+		obj:    obj,
+		addr:   uptr,
+		enc:    enc,
+		encArg: encArg,
 	}
 	if seg.Ok() {
 		gap = seg.PrevGap()
@@ -352,7 +459,7 @@ func (es *encodeState) resolve(obj reflect.Value, ref *wire.Ref) {
 	} else {
 		es.values.Insert(gap, r, oes)
 	}
-	es.pending[oes.id] = oes
+	es.addPending(oes)
 	es.deferred.PushBack(oes)
 	ref.Root = wire.Uint(oes.id)
 	oes.refs = append(oes.refs, ref)
@@ -526,6 +633,25 @@ func (es *encodeState) encodeStruct(obj reflect.Value, dest *wire.Object) {
 	if s, ok := es.encodedStructs[obj]; ok {
 		*dest = s
 		return
+	}
+	if es.codecs && obj.Kind() == reflect.Struct {
+		addrObj := obj
+		if !obj.CanAddr() {
+			addrObj = reflect.New(obj.Type()).Elem()
+			addrObj.Set(obj)
+		}
+		if c, ok := addrObj.Addr().Interface().(Codec); ok {
+			if obj.CanAddr() {
+				*dest = es.encodeCodecStruct(addrObj, c)
+				return
+			}
+			e := Encoder{es: es}
+			e.structValue(addrObj.Addr().UnsafePointer(), obj.Type(), c, ModeValueUntagged)
+			r := &wire.Raw{Tag: wire.TagStruct, Data: e.buf, Objects: e.objs}
+			es.encodedStructs[obj] = r
+			*dest = r
+			return
+		}
 	}
 	s := &wire.Struct{}
 	*dest = s
@@ -737,7 +863,7 @@ func (es *encodeState) encodeObject(obj reflect.Value, how encodeStrategy, dest 
 			// be handled correctly in the decode path as well.
 			return
 		}
-		es.resolve(obj, r)
+		es.resolve(obj, r, nil, nil)
 	case reflect.Bool:
 		*dest = wire.Bool(obj.Bool())
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
@@ -773,7 +899,7 @@ func (es *encodeState) encodeObject(obj reflect.Value, how encodeStrategy, dest 
 			return
 		}
 		// Slices need pointer resolution.
-		es.resolve(arrayFromSlice(obj), &s.Ref)
+		es.resolve(arrayFromSlice(obj), &s.Ref, nil, nil)
 	case reflect.Interface:
 		es.encodeInterface(obj, dest)
 	case reflect.Struct:
@@ -785,7 +911,7 @@ func (es *encodeState) encodeObject(obj reflect.Value, how encodeStrategy, dest 
 		}
 		r := new(wire.Ref)
 		*dest = r
-		es.resolve(obj, r)
+		es.resolve(obj, r, nil, nil)
 	default:
 		Failf("unknown object %#v", obj.Interface())
 		panic("unreachable")
@@ -803,7 +929,7 @@ func (es *encodeState) Save(obj reflect.Value) {
 	// objects on the pending list. All queued objects should be fully
 	// resolved, and we should be able to serialize after this call.
 	var root wire.Ref
-	es.resolve(obj.Addr(), &root)
+	es.resolve(obj.Addr(), &root, nil, nil)
 
 	// Encode the graph.
 	var oes *objectEncodeState
@@ -814,7 +940,7 @@ func (es *encodeState) Save(obj reflect.Value) {
 			// deferred list yet again. That's expected, and why it
 			// is removed first.
 			es.deferred.Remove(oes)
-			es.encodeObject(oes.obj, oes.how, &oes.encoded)
+			es.encodeDeferred(oes)
 		}
 	}); err != nil {
 		// Include the object in the error message, if available.
@@ -825,14 +951,14 @@ func (es *encodeState) Save(obj reflect.Value) {
 	}
 
 	// Check that we have objects to serialize.
-	if len(es.pending) == 0 {
+	if es.pendingCount == 0 {
 		Failf("pending is empty?")
 	}
 
-	// Buffer writes.
-	es.w.Buffer(64 * len(es.pending))
 	// Write the header with the number of objects.
-	if err := WriteHeader(&es.w, uint64(len(es.pending)), true); err != nil {
+	// Buffer writes, with a buffer sized for the encodings of all objects.
+	es.w.Buffer(es.encodedBytes + 64*len(es.pendingTypes))
+	if err := WriteHeader(&es.w, uint64(es.pendingCount), true); err != nil {
 		Failf("error writing header: %w", err)
 	}
 
@@ -845,20 +971,20 @@ func (es *encodeState) Save(obj reflect.Value) {
 			wire.Save(&es.w, &wt)
 		}
 		// Emit objects in ID order.
-		ids := make([]objectID, 0, len(es.pending))
-		for id := range es.pending {
-			ids = append(ids, id)
-		}
-		sort.Slice(ids, func(i, j int) bool {
-			return ids[i] < ids[j]
-		})
-		for _, id := range ids {
+		for i, pending := range es.pending {
+			if pending == nil {
+				continue
+			}
 			// Encode the id.
 			oes = nil
-			wire.Save(&es.w, wire.Uint(id))
+			wire.Save(&es.w, wire.Uint(i+1))
 			// Marshal the object.
-			oes = es.pending[id]
-			wire.Save(&es.w, oes.encoded)
+			oes = pending
+			if oes.encoded != nil {
+				wire.Save(&es.w, oes.encoded)
+			} else {
+				wire.SaveRawData(&es.w, &oes.raw)
+			}
 		}
 		if err := es.w.Flush(); err != nil {
 			panic(err)

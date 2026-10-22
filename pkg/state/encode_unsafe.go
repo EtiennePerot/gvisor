@@ -19,6 +19,9 @@ import (
 	"unsafe"
 )
 
+// objectAddr is the address of an object.
+type objectAddr = unsafe.Pointer
+
 // arrayFromSlice constructs a new pointer to the slice data.
 //
 // It would be similar to the following:
