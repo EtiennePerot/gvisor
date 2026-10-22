@@ -20,8 +20,10 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/protobuf/proto"
+	"gvisor.dev/gvisor/runsc/cbor"
 	"gvisor.dev/gvisor/runsc/container"
 	"gvisor.dev/gvisor/runsc/sandbox"
 )
@@ -36,22 +38,48 @@ var ignoreList = map[string]struct{}{
 	"Container.Spec.Windows.CredentialSpec": {},
 }
 
+var (
+	jsonMarshaler   = reflect.TypeFor[json.Marshaler]()
+	jsonUnmarshaler = reflect.TypeFor[json.Unmarshaler]()
+	cborMarshaler   = reflect.TypeFor[cbor.Marshaler]()
+	cborUnmarshaler = reflect.TypeFor[cbor.Unmarshaler]()
+	protoMessage    = reflect.TypeFor[proto.Message]()
+	timePointer     = reflect.TypeFor[*time.Time]()
+)
+
 // implementsSerializableInterface returns true if the given type implements
 // an interface which inherently provides serialization.
-func implementsSerializableInterface(typ reflect.Type) bool {
-	jsonMarshaler := reflect.TypeOf((*json.Marshaler)(nil)).Elem()
-	jsonUnmarshaler := reflect.TypeOf((*json.Unmarshaler)(nil)).Elem()
-	if typ.Implements(jsonMarshaler) && typ.Implements(jsonUnmarshaler) {
-		return true
+//
+// State files are encoded with CBOR, and JSON state files written by older
+// versions of runsc are still read, so types with custom JSON serialization
+// must also have custom CBOR serialization (except time.Time, which the CBOR
+// package encodes like encoding/json).
+func implementsSerializableInterface(typ reflect.Type) (bool, error) {
+	if typ.Implements(protoMessage) {
+		return true, nil
 	}
-	protoMessage := reflect.TypeOf((*proto.Message)(nil)).Elem()
-	return typ.Implements(protoMessage)
+	if !typ.Implements(jsonMarshaler) || !typ.Implements(jsonUnmarshaler) {
+		return false, nil
+	}
+	if typ == timePointer {
+		return true, nil
+	}
+	if !typ.Implements(cborMarshaler) || !typ.Implements(cborUnmarshaler) {
+		return false, fmt.Errorf("type %v implements json.Marshaler and json.Unmarshaler, so it must also implement cbor.Marshaler and cbor.Unmarshaler", typ)
+	}
+	return true, nil
 }
 
 // checkSerializable verifies that the given type is serializable.
 func checkSerializable(typ reflect.Type, fieldName []string) error {
-	if implementsSerializableInterface(typ) || implementsSerializableInterface(reflect.PointerTo(typ)) {
-		return nil
+	for _, t := range []reflect.Type{typ, reflect.PointerTo(typ)} {
+		ok, err := implementsSerializableInterface(t)
+		if err != nil {
+			return fmt.Errorf("%q: %w", strings.Join(fieldName, "."), err)
+		}
+		if ok {
+			return nil
+		}
 	}
 	field := func(s string) []string {
 		return append(append(([]string)(nil), fieldName...), s)

@@ -15,6 +15,7 @@
 package container
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,9 +27,37 @@ import (
 	"github.com/gofrs/flock"
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/sync"
+	"gvisor.dev/gvisor/runsc/cbor"
 )
 
 const stateFileExtension = "state"
+
+// State files are encoded with CBOR (RFC 8949) by encodeState. Every runsc
+// command is a new process, and decoding CBOR in a new process is several
+// times cheaper than decoding JSON, mostly because encoding/json does a lot of
+// reflection work on first use of each type. Like JSON, CBOR maps are keyed
+// by field name (the same names, from the json struct tags), so state files
+// remain readable when fields are added or removed in other runsc versions.
+//
+// CBOR state files start with the self-described CBOR tag (RFC 8949, section
+// 3.4.6), which tells them apart from JSON state files, written by older
+// versions of runsc. decodeState reads both. Versions of runsc that only read
+// JSON fail to parse CBOR state files, rather than misreading them.
+var stateFileMagic = []byte{0xd9, 0xd9, 0xf7}
+
+// encodeState encodes v for a state file.
+func encodeState(v any) ([]byte, error) {
+	return cbor.Append(append(make([]byte, 0, 4096), stateFileMagic...), v)
+}
+
+// decodeState decodes the contents of a state file into v, which must be a
+// pointer.
+func decodeState(data []byte, v any) error {
+	if b, ok := bytes.CutPrefix(data, stateFileMagic); ok {
+		return cbor.Unmarshal(b, v)
+	}
+	return json.Unmarshal(data, v)
+}
 
 // ErrStateFileLocked indicates that a state file is locked and TryLock is
 // enabled. Callers can identify wrapped lock errors with errors.Is.
@@ -399,7 +428,7 @@ func (s *StateFile) loadLocked(v any) error {
 		log.Warningf("Error loading state file %q: %v", path, err)
 		return err
 	}
-	return json.Unmarshal(metaBytes, &v)
+	return decodeState(metaBytes, v)
 }
 
 func (s *StateFile) close() error {

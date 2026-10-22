@@ -60,6 +60,7 @@ import (
 	"gvisor.dev/gvisor/pkg/urpc"
 	"gvisor.dev/gvisor/runsc/boot/procfs"
 	"gvisor.dev/gvisor/runsc/boot/sentryapi"
+	"gvisor.dev/gvisor/runsc/cbor"
 	"gvisor.dev/gvisor/runsc/cgroup"
 	"gvisor.dev/gvisor/runsc/config"
 	"gvisor.dev/gvisor/runsc/console"
@@ -142,6 +143,21 @@ func (p *Pid) UnmarshalJSON(b []byte) error {
 // MarshalJSON implements json.Marshaler.MarshalJSON
 func (p *Pid) MarshalJSON() ([]byte, error) {
 	return json.Marshal(p.Load())
+}
+
+// UnmarshalCBOR implements cbor.Unmarshaler.UnmarshalCBOR.
+func (p *Pid) UnmarshalCBOR(b []byte) error {
+	var pid int
+	if err := cbor.Unmarshal(b, &pid); err != nil {
+		return err
+	}
+	p.Store(pid)
+	return nil
+}
+
+// MarshalCBOR implements cbor.Marshaler.MarshalCBOR.
+func (p *Pid) MarshalCBOR() ([]byte, error) {
+	return cbor.Marshal(p.Load())
 }
 
 // Sandbox wraps a sandbox process.

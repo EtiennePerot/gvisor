@@ -18,6 +18,7 @@ go_library(
         "//visibility:public",
     ],
     deps = [
+        "//runsc/cbor",
         "//runsc/specutils",
         "@com_github_containerd_log//:go_default_library",
         "@com_github_opencontainers_runtime_spec//specs-go:go_default_library",
@@ -34,6 +35,7 @@ go_test(
     ],
     embed = [":utils"],
     deps = [
+        "//runsc/cbor",
         "//runsc/specutils",
         "@com_github_mohae_deepcopy//:go_default_library",
         "@com_github_opencontainers_runtime_spec//specs-go:go_default_library",

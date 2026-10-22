@@ -15,12 +15,14 @@
 package utils
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"gvisor.dev/gvisor/runsc/cbor"
 	"gvisor.dev/gvisor/runsc/specutils"
 )
 
@@ -400,5 +402,48 @@ func TestAbortFuseConnection_ConnectionNotExist(t *testing.T) {
 	// If the minor dir does not exist (already closed), it should safely return nil.
 	if err := abortFuseConnection(999); err != nil {
 		t.Errorf("expected nil when minor directory does not exist, got %v", err)
+	}
+}
+
+func TestFindGoferPID(t *testing.T) {
+	const (
+		containerID = "container456"
+		goferPID    = 1234
+	)
+	state := map[string]any{
+		"id":       containerID,
+		"status":   "running",
+		"goferPid": goferPID,
+		"sandbox":  map[string]any{"id": containerID, "pid": 1000},
+	}
+	jsonState, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	cborState, err := cbor.Marshal(state)
+	if err != nil {
+		t.Fatalf("cbor.Marshal: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		data []byte
+		want int
+	}{
+		{name: "json", data: jsonState, want: goferPID},
+		{name: "cbor", data: append(append([]byte{}, stateFileCBORMagic...), cborState...), want: goferPID},
+		{name: "cbor without magic", data: cborState, want: 0},
+		{name: "truncated cbor", data: append(append([]byte{}, stateFileCBORMagic...), cborState[:len(cborState)/2]...), want: 0},
+		{name: "empty", data: nil, want: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rootDir := t.TempDir()
+			path := filepath.Join(rootDir, fmt.Sprintf("%s_sandbox:%s.state", containerID, containerID))
+			if err := os.WriteFile(path, tc.data, 0644); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+			if got := FindGoferPID(rootDir, "", containerID); got != tc.want {
+				t.Errorf("FindGoferPID() = %d, want %d", got, tc.want)
+			}
+		})
 	}
 }

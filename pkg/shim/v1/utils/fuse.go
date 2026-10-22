@@ -16,6 +16,7 @@ package utils
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,6 +29,7 @@ import (
 	"github.com/containerd/log"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"golang.org/x/sys/unix"
+	"gvisor.dev/gvisor/runsc/cbor"
 	"gvisor.dev/gvisor/runsc/specutils"
 )
 
@@ -243,14 +245,23 @@ type containerStateJSON struct {
 	GoferPid int `json:"goferPid"`
 }
 
+// stateFileCBORMagic is the self-described CBOR tag, which starts the state
+// files written as CBOR by runsc. Older versions of runsc write JSON. See
+// runsc/container/state_file.go.
+var stateFileCBORMagic = []byte{0xd9, 0xd9, 0xf7}
+
 func readGoferPIDFromStateFile(path string) int {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return 0
 	}
 	var s containerStateJSON
-	if err := json.Unmarshal(data, &s); err != nil {
-		log.L.Debugf("FindGoferPID: failed to unmarshal JSON from %s: %v", path, err)
+	unmarshal := json.Unmarshal
+	if b, ok := bytes.CutPrefix(data, stateFileCBORMagic); ok {
+		data, unmarshal = b, cbor.Unmarshal
+	}
+	if err := unmarshal(data, &s); err != nil {
+		log.L.Debugf("FindGoferPID: failed to decode state file %s: %v", path, err)
 		return 0
 	}
 	if s.GoferPid > 0 {

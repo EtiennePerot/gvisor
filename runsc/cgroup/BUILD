@@ -19,6 +19,7 @@ go_library(
         "//pkg/abi/linux",
         "//pkg/cleanup",
         "//pkg/log",
+        "//runsc/cbor",
         "@com_github_cenkalti_backoff//:go_default_library",
         "@com_github_coreos_go_systemd_v22//dbus:go_default_library",
         "@com_github_godbus_dbus_v5//:go_default_library",
@@ -40,6 +41,7 @@ go_test(
     tags = ["local"],
     deps = [
         "//pkg/test/testutil",
+        "//runsc/cbor",
         "@com_github_coreos_go_systemd_v22//dbus:go_default_library",
         "@com_github_godbus_dbus_v5//:go_default_library",
         "@com_github_google_go_cmp//cmp:go_default_library",

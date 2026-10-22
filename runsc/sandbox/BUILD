@@ -45,6 +45,7 @@ go_library(
         "//pkg/xdp",
         "//runsc/boot/procfs",
         "//runsc/boot/sentryapi",
+        "//runsc/cbor",
         "//runsc/cgroup",
         "//runsc/config",
         "//runsc/console",

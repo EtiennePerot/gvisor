@@ -19,12 +19,14 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/test/testutil"
+	"gvisor.dev/gvisor/runsc/cbor"
 )
 
 var debianMountinfo = `
@@ -1056,53 +1058,63 @@ func TestOptional(t *testing.T) {
 	}
 }
 
-func TestJSON(t *testing.T) {
-	for _, tc := range []struct {
-		cg Cgroup
+func TestSerialization(t *testing.T) {
+	for _, codec := range []struct {
+		name      string
+		marshal   func(any) ([]byte, error)
+		unmarshal func([]byte, any) error
 	}{
-		{
-			cg: &cgroupV1{
-				Name:    "foobar",
-				Parents: map[string]string{"hello": "world"},
-				Own:     map[string]bool{"parent": true},
-			},
-		},
-		{
-			cg: &cgroupV2{
-				Mountpoint:  "foobar",
-				Path:        "a/path/here",
-				Controllers: []string{"test", "controllers"},
-				Own:         []string{"I", "own", "this"},
-			},
-		},
-		{
-			cg: CreateMockSystemdCgroup(),
-		},
-		{
-			cg: nil,
-		},
+		{name: "json", marshal: json.Marshal, unmarshal: json.Unmarshal},
+		{name: "cbor", marshal: cbor.Marshal, unmarshal: cbor.Unmarshal},
 	} {
-		in := &CgroupJSON{Cgroup: tc.cg}
-		data, err := json.Marshal(in)
-		if err != nil {
-			t.Fatalf("could not serialize %v to JSON: %v", in, err)
-		}
-		out := &CgroupJSON{}
-		if err := json.Unmarshal(data, out); err != nil {
-			t.Fatalf("could not deserialize %v from JSON: %v", data, err)
-		}
-		switch tc.cg.(type) {
-		case *cgroupSystemd:
-			if _, ok := out.Cgroup.(*cgroupSystemd); !ok {
-				t.Errorf("cgroup incorrectly deserialized from JSON: got %v, want %v", out.Cgroup, tc.cg)
+		for _, tc := range []struct {
+			cg Cgroup
+		}{
+			{
+				cg: &cgroupV1{
+					Name:    "foobar",
+					Parents: map[string]string{"hello": "world"},
+					Own:     map[string]bool{"parent": true},
+				},
+			},
+			{
+				cg: &cgroupV2{
+					Mountpoint:  "foobar",
+					Path:        "a/path/here",
+					Controllers: []string{"test", "controllers"},
+					Own:         []string{"I", "own", "this"},
+				},
+			},
+			{
+				cg: CreateMockSystemdCgroup(),
+			},
+			{
+				cg: nil,
+			},
+		} {
+			in := &CgroupJSON{Cgroup: tc.cg}
+			data, err := codec.marshal(in)
+			if err != nil {
+				t.Fatalf("could not serialize %v to %s: %v", in, codec.name, err)
 			}
-		case *cgroupV1:
-			if _, ok := out.Cgroup.(*cgroupV1); !ok {
-				t.Errorf("cgroup incorrectly deserialized from JSON: got %v, want %v", out.Cgroup, tc.cg)
+			out := &CgroupJSON{}
+			if err := codec.unmarshal(data, out); err != nil {
+				t.Fatalf("could not deserialize %v from %s: %v", data, codec.name, err)
 			}
-		case *cgroupV2:
-			if _, ok := out.Cgroup.(*cgroupV2); !ok {
-				t.Errorf("cgroup incorrectly deserialized from JSON: got %v, want %v", out.Cgroup, tc.cg)
+			if got, want := reflect.TypeOf(out.Cgroup), reflect.TypeOf(tc.cg); got != want {
+				t.Errorf("cgroup incorrectly deserialized from %s: got type %v, want %v", codec.name, got, want)
+			}
+			// Compare the serialized fields.
+			wantJSON, err := json.Marshal(in)
+			if err != nil {
+				t.Fatalf("json.Marshal(%v): %v", in, err)
+			}
+			gotJSON, err := json.Marshal(out)
+			if err != nil {
+				t.Fatalf("json.Marshal(%v): %v", out, err)
+			}
+			if string(gotJSON) != string(wantJSON) {
+				t.Errorf("cgroup incorrectly deserialized from %s: got %s, want %s", codec.name, gotJSON, wantJSON)
 			}
 		}
 	}

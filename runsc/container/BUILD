@@ -29,6 +29,7 @@ go_library(
         "//pkg/unet",
         "//pkg/urpc",
         "//runsc/boot/sentryapi",
+        "//runsc/cbor",
         "//runsc/cgroup",
         "//runsc/config",
         "//runsc/console",
@@ -117,6 +118,7 @@ go_test(
     name = "serialization_test",
     srcs = ["serialization_test.go"],
     deps = [
+        "//runsc/cbor",
         ":container",
         "//runsc/sandbox",
         "@org_golang_google_protobuf//proto:go_default_library",
@@ -151,5 +153,20 @@ go_test(
         "//runsc/flag",
         "//runsc/specutils",
         "@org_golang_x_sys//unix:go_default_library",
+    ],
+)
+
+go_test(
+    name = "state_file_encoding_test",
+    size = "small",
+    srcs = ["state_file_encoding_test.go"],
+    embed = [":container"],
+    deps = [
+        "//pkg/metric:metric_go_proto",
+        "//runsc/boot/sentryapi",
+        "//runsc/cbor",
+        "//runsc/sandbox",
+        "//runsc/specutils",
+        "@com_github_opencontainers_runtime_spec//specs-go:go_default_library",
     ],
 )

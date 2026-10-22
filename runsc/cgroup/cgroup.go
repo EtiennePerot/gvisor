@@ -37,6 +37,7 @@ import (
 
 	"gvisor.dev/gvisor/pkg/cleanup"
 	"gvisor.dev/gvisor/pkg/log"
+	"gvisor.dev/gvisor/runsc/cbor"
 )
 
 const (
@@ -555,18 +556,63 @@ func (c *CgroupJSON) UnmarshalJSON(data []byte) error {
 
 // MarshalJSON implements json.Marshaler.MarshalJSON
 func (c *CgroupJSON) MarshalJSON() ([]byte, error) {
-	if c.Cgroup == nil {
-		return json.Marshal(cgroupJSONUnknown{})
+	w := c.wrapper()
+	if w == nil {
+		return nil, nil
 	}
-	switch c.Cgroup.(type) {
+	return json.Marshal(w)
+}
+
+// wrapper returns c.Cgroup wrapped in a struct that names its type, or nil if
+// the type is unknown.
+func (c *CgroupJSON) wrapper() any {
+	switch cg := c.Cgroup.(type) {
+	case nil:
+		return cgroupJSONUnknown{}
 	case *cgroupV1:
-		return json.Marshal(cgroupJSONv1{Cgroup: c.Cgroup.(*cgroupV1)})
+		return cgroupJSONv1{Cgroup: cg}
 	case *cgroupV2:
-		return json.Marshal(cgroupJSONv2{Cgroup: c.Cgroup.(*cgroupV2)})
+		return cgroupJSONv2{Cgroup: cg}
 	case *cgroupSystemd:
-		return json.Marshal(cgroupJSONSystemd{Cgroup: c.Cgroup.(*cgroupSystemd)})
+		return cgroupJSONSystemd{Cgroup: cg}
 	}
-	return nil, nil
+	return nil
+}
+
+// cgroupCBOR is used to decode the CBOR encoding of CgroupJSON, which is the
+// encoding of one of the cgroupJSON* types.
+type cgroupCBOR struct {
+	V1      *cgroupV1      `json:"cgroupv1"`
+	V2      *cgroupV2      `json:"cgroupv2"`
+	Systemd *cgroupSystemd `json:"cgroupsystemd"`
+}
+
+// UnmarshalCBOR implements cbor.Unmarshaler.UnmarshalCBOR.
+func (c *CgroupJSON) UnmarshalCBOR(data []byte) error {
+	var w cgroupCBOR
+	if err := cbor.Unmarshal(data, &w); err != nil {
+		return err
+	}
+	switch {
+	case w.V1 != nil:
+		c.Cgroup = w.V1
+	case w.V2 != nil:
+		c.Cgroup = w.V2
+	case w.Systemd != nil:
+		c.Cgroup = w.Systemd
+	default:
+		c.Cgroup = nil
+	}
+	return nil
+}
+
+// MarshalCBOR implements cbor.Marshaler.MarshalCBOR.
+func (c *CgroupJSON) MarshalCBOR() ([]byte, error) {
+	w := c.wrapper()
+	if w == nil {
+		return nil, fmt.Errorf("unknown cgroup type %T", c.Cgroup)
+	}
+	return cbor.Marshal(w)
 }
 
 // Install creates and configures cgroups according to 'res'. If cgroup path
