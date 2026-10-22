@@ -15,6 +15,7 @@
 package tests
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/gob"
@@ -104,6 +105,18 @@ func gobLoad(_ context.Context, r io.Reader, v any) (_ state.Stats, err error) {
 	return
 }
 
+// reflectSave is state.Save without Codec methods.
+func reflectSave(ctx context.Context, w io.Writer, v any) (state.Stats, error) {
+	defer state.DisableCodecs()()
+	return state.Save(ctx, w, v)
+}
+
+// reflectLoad is state.Load without Codec methods.
+func reflectLoad(ctx context.Context, r io.Reader, v any) (state.Stats, error) {
+	defer state.DisableCodecs()()
+	return state.Load(ctx, r, v)
+}
+
 var allAlgos = map[string]struct {
 	Save   func(context.Context, io.Writer, any) (state.Stats, error)
 	Load   func(context.Context, io.Reader, any) (state.Stats, error)
@@ -112,6 +125,10 @@ var allAlgos = map[string]struct {
 	"state": {
 		Save: state.Save,
 		Load: state.Load,
+	},
+	"state-reflect": {
+		Save: reflectSave,
+		Load: reflectLoad,
 	},
 	"gob": {
 		Save: gobSave,
@@ -146,9 +163,12 @@ func BenchmarkDecoding(b *testing.B) {
 				}
 				b.ReportAllocs()
 				var r bytes.Reader
+				// Statefiles are read through a bufio.Reader.
+				br := bufio.NewReaderSize(&r, 256<<10)
 				for b.Loop() {
 					r.Reset(buf.Bytes())
-					if _, err := algoInfo.Load(context.Background(), &r, v); err != nil {
+					br.Reset(&r)
+					if _, err := algoInfo.Load(context.Background(), br, v); err != nil {
 						b.Errorf("load failed: %v", err)
 					}
 				}
