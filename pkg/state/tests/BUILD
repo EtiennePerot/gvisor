@@ -10,6 +10,7 @@ go_library(
     srcs = [
         "array.go",
         "bench.go",
+        "codec.go",
         "integer.go",
         "load.go",
         "map.go",
@@ -20,6 +21,7 @@ go_library(
     deps = [
         "//pkg/state",
         "//pkg/state/pretty",
+        "//pkg/state/tests/foreign",
     ],
 )
 
@@ -31,6 +33,7 @@ go_test(
         "bench_test.go",
         "binary_test.go",
         "bool_test.go",
+        "codec_test.go",
         "float_test.go",
         "integer_test.go",
         "load_test.go",
@@ -43,6 +46,7 @@ go_test(
     embed = [":tests"],
     deps = [
         "//pkg/state",
+        "//pkg/state/tests/foreign",
         "//pkg/state/wire",
     ],
 )
