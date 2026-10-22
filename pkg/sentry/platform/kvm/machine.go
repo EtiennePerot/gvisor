@@ -77,6 +77,15 @@ type machine struct {
 	// vCPUsByID pool.
 	usedVCPUs int
 
+	// createdVCPUs is the number of vCPUs that have been created in the
+	// vCPUsByID pool. It is less than maxVCPUs while createVCPUsAsync is
+	// running, or if it failed to create a vCPU.
+	createdVCPUs int
+
+	// vCPUsCreated is closed once createVCPUsAsync is done. It is nil if
+	// createVCPUsAsync was never called.
+	vCPUsCreated chan struct{}
+
 	// maxVCPUs is the maximum number of vCPUs supported by the machine.
 	maxVCPUs int
 
@@ -269,7 +278,6 @@ func (m *machine) createVCPU(id int) (*vCPU, error) {
 		machine: m,
 	}
 	c.CPU.Init(&m.kernel, c.id, c)
-	m.vCPUsByID[c.id] = c
 
 	// Ensure the signal mask is correct.
 	if err := c.setSignalMask(); err != nil {
@@ -288,7 +296,51 @@ func (m *machine) createVCPU(id int) (*vCPU, error) {
 		panic(fmt.Sprintf("error initializing vCPU(id=%d) state: %v", id, err))
 	}
 
+	m.vCPUsByID[c.id] = c
+	m.createdVCPUs++
+
 	return c, nil // Done.
+}
+
+// createVCPUsAsync creates the vCPUs of the pool that have not been created
+// yet, in the background. Each vCPU costs several ioctls, which add up to tens
+// of milliseconds of sandbox startup latency on hosts with many CPUs (the pool
+// has 3 vCPUs per Sentry P).
+//
+// Until it is done, Get only hands out vCPUs that have already been created,
+// and waits for more if all of them are in use. vCPU creation requires ioctls
+// that the seccomp filters don't allow, so the platform's SeccompInfo waits
+// for it to be done (see waitVCPUs).
+//
+// If creating a vCPU fails, the pool is limited to the vCPUs that have been
+// created.
+func (m *machine) createVCPUsAsync() {
+	m.vCPUsCreated = make(chan struct{})
+	go func() {
+		defer close(m.vCPUsCreated)
+		for {
+			m.mu.Lock()
+			id := m.createdVCPUs
+			if id >= m.maxVCPUs {
+				m.mu.Unlock()
+				return
+			}
+			_, err := m.createVCPU(id)
+			m.available.Broadcast()
+			m.mu.Unlock()
+			if err != nil {
+				log.Warningf("Limiting the vCPU pool to %d vCPUs: %v", id, err)
+				return
+			}
+		}
+	}()
+}
+
+// waitVCPUs waits for createVCPUsAsync to be done.
+func (m *machine) waitVCPUs() {
+	if m.vCPUsCreated != nil {
+		<-m.vCPUsCreated
+	}
 }
 
 // forceMappingEntireAddressSpace forces mapping the entire process address
@@ -550,6 +602,7 @@ func (m *machine) mapTSCOffsetAlias() {
 // Precondition: all vCPUs must be returned to the machine.
 func (m *machine) Destroy() {
 	runtime.SetFinalizer(m, nil)
+	m.waitVCPUs()
 
 	// Destroy vCPUs.
 	for _, c := range m.vCPUsByID {
@@ -628,7 +681,7 @@ func (m *machine) Get() *vCPU {
 		}
 
 		// Get vCPU from the m.vCPUsByID pool.
-		if m.usedVCPUs < m.maxVCPUs {
+		if m.usedVCPUs < m.createdVCPUs {
 			c := m.vCPUsByID[m.usedVCPUs]
 			m.usedVCPUs++
 			c.lock()
