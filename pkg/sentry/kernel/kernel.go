@@ -875,7 +875,7 @@ func (k *Kernel) saveToLocked(ctx context.Context, stateFile, pagesMetadata io.W
 		mfSaveWg.Add(1)
 		go func() {
 			defer mfSaveWg.Done()
-			mfSaveErr = k.saveMemoryFiles(ctx, nil, pagesMetadata, pagesFile, mfsToSaveActual, appMFExcludeCommittedZeroPages, releaseAfterWrite) // transfers ownership
+			mfSaveErr = k.saveMemoryFiles(ctx, nil, pagesMetadata, pagesFile, mfsToSaveActual, appMFExcludeCommittedZeroPages, resume, releaseAfterWrite) // transfers ownership
 		}()
 		pagesCleanup.Release()
 		// Defer a Wait() so we wait for k.saveMemoryFiles() to complete even if we
@@ -940,7 +940,7 @@ func (k *Kernel) saveToLocked(ctx context.Context, stateFile, pagesMetadata io.W
 			return mfSaveErr
 		}
 	} else {
-		mfSaveErr = k.saveMemoryFiles(ctx, stateFile, nil, nil, mfsToSaveActual, appMFExcludeCommittedZeroPages, false /* releaseAfterWrite */)
+		mfSaveErr = k.saveMemoryFiles(ctx, stateFile, nil, nil, mfsToSaveActual, appMFExcludeCommittedZeroPages, resume, false /* releaseAfterWrite */)
 		if mfSaveErr != nil {
 			return mfSaveErr
 		}
@@ -967,10 +967,12 @@ func (k *Kernel) BeforeResume(ctx context.Context) {
 // and MemoryFile state will be saved to w. Otherwise, pagesMetadata and
 // pagesFile must be non-nil, saveMemoryFiles takes ownership of both
 // pagesMetadata and pagesFile (even if it returns a non-nil error), and
-// MemoryFile state will be saved to pagesMetadata and pagesFile. If
+// MemoryFile state will be saved to pagesMetadata and pagesFile. resume
+// indicates whether the kernel will be resumed after saving; if it is false,
+// the sandbox exits after saving, so the MemoryFiles are discarded. If
 // releaseAfterWrite is true, pages written to pagesFile are released from
 // their MemoryFiles; see pgalloc.SaveOpts.ReleaseAfterWrite.
-func (k *Kernel) saveMemoryFiles(ctx context.Context, w io.Writer, pagesMetadata io.WriteCloser, pagesFile stateio.AsyncWriter, mfsToSave map[checkpoint.ResourceID]*pgalloc.MemoryFile, appMFExcludeCommittedZeroPages, releaseAfterWrite bool) error {
+func (k *Kernel) saveMemoryFiles(ctx context.Context, w io.Writer, pagesMetadata io.WriteCloser, pagesFile stateio.AsyncWriter, mfsToSave map[checkpoint.ResourceID]*pgalloc.MemoryFile, appMFExcludeCommittedZeroPages, resume, releaseAfterWrite bool) error {
 	memoryStart := time.Now()
 
 	pmw := w
@@ -983,6 +985,7 @@ func (k *Kernel) saveMemoryFiles(ctx context.Context, w io.Writer, pagesMetadata
 
 	mfOpts := pgalloc.SaveOpts{
 		ExcludeCommittedZeroPages: appMFExcludeCommittedZeroPages,
+		DiscardAfterSave:          !resume,
 	}
 	var (
 		asyncPageSaveWg      sync.WaitGroup

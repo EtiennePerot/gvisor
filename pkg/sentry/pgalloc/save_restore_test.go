@@ -21,6 +21,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"slices"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -258,5 +259,105 @@ func TestSaveToPagesFileReleaseAfterWrite(t *testing.T) {
 				}
 			})
 		})
+	}
+}
+
+// hostDataPages returns the indices of pages in fr that are committed in f's
+// host file.
+func hostDataPages(t *testing.T, f *MemoryFile, fr memmap.FileRange) []int {
+	t.Helper()
+	var pages []int
+	d := f.newHostFileDataSeeker()
+	for off := fr.Start; off < fr.End; {
+		data, err := d.dataAtOrAfter(off)
+		if err != nil {
+			t.Fatalf("dataAtOrAfter(%#x): %v", off, err)
+		}
+		for ; data.Start < min(data.End, fr.End); data.Start += uint64(hostarch.PageSize) {
+			pages = append(pages, int((data.Start-fr.Start)/uint64(hostarch.PageSize)))
+		}
+		off = max(data.End, off+uint64(hostarch.PageSize))
+	}
+	return pages
+}
+
+func TestSaveToDiscardAfterSave(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		discard      bool
+		wantHostData []int
+	}{
+		{name: "resume", wantHostData: []int{2, 12}},
+		{name: "discard", discard: true, wantHostData: []int{2, 3, 4, 9, 12}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSaveTestMemoryFile(t, false)
+			fr := allocateSaveTestPages(t, f)
+			pwritePage(t, f, fr, 2, 1)
+			pwritePage(t, f, fr, 3, 0)
+			pwritePage(t, f, fr, 4, 0)
+			pwritePage(t, f, fr, 9, 0)
+			pwritePage(t, f, fr, 12, 2)
+			want := make([]byte, fr.Length())
+			want[2*hostarch.PageSize+17] = 1
+			want[12*hostarch.PageSize+17] = 2
+
+			var checkpoint bytes.Buffer
+			if err := f.SaveTo(context.Background(), &checkpoint, &SaveOpts{DiscardAfterSave: tc.discard}); err != nil {
+				t.Fatalf("SaveTo: %v", err)
+			}
+			// Zero pages are accounted as uncommitted, whether or not they
+			// are decommitted.
+			if got, want := f.knownCommittedBytes, 2*uint64(hostarch.PageSize); got != want {
+				t.Errorf("knownCommittedBytes: got %d, want %d", got, want)
+			}
+			if got := hostDataPages(t, f, fr); !slices.Equal(got, tc.wantHostData) {
+				t.Errorf("host data pages after SaveTo: got %v, want %v", got, tc.wantHostData)
+			}
+			f.forEachMappingSlice(fr, func(bs []byte) {
+				if !bytes.Equal(bs, want) {
+					t.Error("contents changed by SaveTo")
+				}
+			})
+
+			restored := newSaveTestMemoryFile(t, false)
+			if err := restored.LoadFrom(context.Background(), &checkpoint, &LoadOpts{}); err != nil {
+				t.Fatalf("LoadFrom: %v", err)
+			}
+			t.Cleanup(func() { restored.DecRef(fr) })
+			if got, want := restored.knownCommittedBytes, 2*uint64(hostarch.PageSize); got != want {
+				t.Errorf("restored knownCommittedBytes: got %d, want %d", got, want)
+			}
+			restored.forEachMappingSlice(fr, func(bs []byte) {
+				if !bytes.Equal(bs, want) {
+					t.Error("restored contents differ from saved contents")
+				}
+			})
+		})
+	}
+}
+
+func TestSaveToDiscardAfterSaveDiskBacked(t *testing.T) {
+	// Without SEEK_DATA/SEEK_HOLE, scanning may commit pages that were not
+	// committed before, so zero pages must still be decommitted to avoid
+	// increasing memory usage during saving.
+	f := newSaveTestMemoryFile(t, true)
+	fr := allocateSaveTestPages(t, f)
+	pwritePage(t, f, fr, 2, 1)
+	pwritePage(t, f, fr, 3, 0)
+	pwritePage(t, f, fr, 4, 0)
+	var st unix.Stat_t
+	if err := unix.Fstat(f.FD(), &st); err != nil {
+		t.Fatalf("Fstat: %v", err)
+	}
+	blocksBefore := st.Blocks
+	if err := f.SaveTo(context.Background(), io.Discard, &SaveOpts{DiscardAfterSave: true}); err != nil {
+		t.Fatalf("SaveTo: %v", err)
+	}
+	if err := unix.Fstat(f.FD(), &st); err != nil {
+		t.Fatalf("Fstat: %v", err)
+	}
+	if st.Blocks >= blocksBefore {
+		t.Errorf("SaveTo did not decommit zero pages: allocated blocks %d before, %d after", blocksBefore, st.Blocks)
 	}
 }

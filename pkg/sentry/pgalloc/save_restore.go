@@ -195,6 +195,13 @@ type SaveOpts struct {
 	// will never be used again after SaveTo, e.g. because the sandbox exits
 	// after saving.
 	ReleaseAfterWrite bool
+
+	// If DiscardAfterSave is true, the MemoryFile will not be used after
+	// SaveTo() returns, e.g. because the sandbox exits after saving without
+	// resuming. SaveTo() then skips work whose only purpose is to reduce the
+	// MemoryFile's memory usage after saving, since the MemoryFile's memory
+	// will be released when it is destroyed anyway.
+	DiscardAfterSave bool
 }
 
 // SaveTo writes f's state to the given stream.
@@ -281,6 +288,16 @@ func (f *MemoryFile) SaveTo(ctx context.Context, w io.Writer, opts *SaveOpts) er
 	// were not previously known to be committed to avoid increasing memory
 	// usage during scanning. Batch decommitment of transiently-committed pages
 	// to reduce host syscalls.
+	//
+	// If the backing file supports SEEK_DATA/SEEK_HOLE, we only read pages
+	// that are already committed in the host, so decommitting zero-filled
+	// pages reduces memory usage rather than preventing an increase. This is
+	// unnecessary if the MemoryFile will be discarded after saving: the pages
+	// are still marked uncommitted in f.memAcct (and thus in the checkpoint),
+	// and their memory is released when f is destroyed, which is cheaper than
+	// one host syscall per run of zero pages while the sandbox is paused.
+	dataSeeker := f.newHostFileDataSeeker()
+	decommitZeroPages := dataSeeker == nil || !opts.DiscardAfterSave
 	var (
 		decommitWarnOnce  sync.Once
 		decommitPendingFR memmap.FileRange
@@ -388,7 +405,6 @@ func (f *MemoryFile) SaveTo(ctx context.Context, w io.Writer, opts *SaveOpts) er
 		return maseg
 	}
 
-	dataSeeker := f.newHostFileDataSeeker()
 	zeroPage := make([]byte, hostarch.PageSize)
 	// f.mu is unlocked below, allowing concurrent calls to f.UpdateUsage() to
 	// observe pages that we transiently commit (for comparisons to zero) or
@@ -419,7 +435,9 @@ func (f *MemoryFile) SaveTo(ctx context.Context, w io.Writer, opts *SaveOpts) er
 				if isZeroed {
 					if !wasCommitted {
 						alreadyUncommittedBytes += uint64(hostarch.PageSize)
-						decommitAddPage(off)
+						if decommitZeroPages {
+							decommitAddPage(off)
+						}
 					} else {
 						newUncommittedBytes += uint64(hostarch.PageSize)
 					}
