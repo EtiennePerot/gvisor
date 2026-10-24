@@ -298,6 +298,47 @@ func (f *MemoryFile) SaveTo(ctx context.Context, w io.Writer, opts *SaveOpts) er
 	// one host syscall per run of zero pages while the sandbox is paused.
 	dataSeeker := f.newHostFileDataSeeker()
 	decommitZeroPages := dataSeeker == nil || !opts.DiscardAfterSave
+
+	// If pages are released after they are written (see
+	// SaveOpts.ReleaseAfterWrite), zero pages are never written, so skipping
+	// their decommitment would keep them committed until f is destroyed.
+	// Instead, pass them to async page saving to be released along with
+	// written pages, off the scanning path. Since releasing a host hole is a
+	// no-op, include host holes in released ranges, so that zero pages
+	// separated only by holes are released together.
+	releaseZeroPages := !decommitZeroPages && amfs != nil && opts.ReleaseAfterWrite
+	var (
+		releasePendingFR  memmap.FileRange
+		releaseBatch      []memmap.FileRange
+		releaseBatchBytes uint64
+	)
+	releaseFlush := func() {
+		if releasePendingFR.Length() != 0 {
+			releaseBatch = append(releaseBatch, releasePendingFR)
+			releasePendingFR = memmap.FileRange{}
+		}
+		if len(releaseBatch) != 0 {
+			amfs.pf.addReleasable(amfs, releaseBatch)
+			releaseBatch = releaseBatch[:0]
+			releaseBatchBytes = 0
+		}
+	}
+	releaseAddRange := func(fr memmap.FileRange) {
+		if releasePendingFR.Length() != 0 && releasePendingFR.End == fr.Start {
+			releasePendingFR.End = fr.End
+		} else {
+			if releasePendingFR.Length() != 0 {
+				releaseBatch = append(releaseBatch, releasePendingFR)
+				releaseBatchBytes += releasePendingFR.Length()
+			}
+			releasePendingFR = fr
+		}
+		// Hand off ranges in batches to amortize synchronization with
+		// async page saving, but promptly enough to bound memory usage.
+		if releaseBatchBytes+releasePendingFR.Length() >= apsReleaseBatchBytes {
+			releaseFlush()
+		}
+	}
 	var (
 		decommitWarnOnce  sync.Once
 		decommitPendingFR memmap.FileRange
@@ -437,6 +478,8 @@ func (f *MemoryFile) SaveTo(ctx context.Context, w io.Writer, opts *SaveOpts) er
 						alreadyUncommittedBytes += uint64(hostarch.PageSize)
 						if decommitZeroPages {
 							decommitAddPage(off)
+						} else if releaseZeroPages {
+							releaseAddRange(memmap.FileRange{off, off + uint64(hostarch.PageSize)})
 						}
 					} else {
 						newUncommittedBytes += uint64(hostarch.PageSize)
@@ -475,6 +518,9 @@ func (f *MemoryFile) SaveTo(ctx context.Context, w io.Writer, opts *SaveOpts) er
 				alreadyUncommittedBytes += hole.Length()
 				hostHoleBytes += hole.Length()
 				maseg = updateAddRange(maseg, hole, false /* wasCommitted */, false /* nowCommitted */)
+				if releaseZeroPages {
+					releaseAddRange(hole)
+				}
 			}
 			dataFR := memmap.FileRange{hole.End, min(data.End, fr.End)}
 			scanRange(dataFR, false /* wasCommitted */)
@@ -522,6 +568,9 @@ func (f *MemoryFile) SaveTo(ctx context.Context, w io.Writer, opts *SaveOpts) er
 	if decommitPendingFR.Length() != 0 {
 		decommitNow(decommitPendingFR)
 		decommitPendingFR = memmap.FileRange{}
+	}
+	if releaseZeroPages {
+		releaseFlush()
 	}
 	if scanErr != nil {
 		return fmt.Errorf("failed to find data ranges in MemoryFile backing file: %w", scanErr)
@@ -650,6 +699,11 @@ type AsyncPagesFileSave struct {
 
 	// unsaved tracks pages that have not been saved. unsaved is protected by mu.
 	unsaved ringdeque.Deque[apsRange]
+
+	// unwrittenReleasable contains MemoryFile ranges that will not be written
+	// and should be released along with written ranges (see
+	// addReleasable). unwrittenReleasable is protected by mu.
+	unwrittenReleasable []apsRange
 
 	// stStatus communicates state from MemoryFile.SaveTo() and its callers to
 	// the goroutine.
@@ -815,6 +869,20 @@ func (apfs *AsyncPagesFileSave) MemoryFilesDone() {
 // be written.
 func (apfs *AsyncPagesFileSave) PagesFileOffset() uint64 {
 	return apfs.saveOff
+}
+
+// addReleasable arranges for frs, which will not be written, to be released
+// along with pages that have been written. It is called by
+// MemoryFile.SaveTo() for zero pages and host holes.
+//
+// Preconditions: SaveOpts.ReleaseAfterWrite was true when amfs was created.
+func (apfs *AsyncPagesFileSave) addReleasable(amfs *asyncMemoryFileSave, frs []memmap.FileRange) {
+	apfs.mu.Lock()
+	for _, fr := range frs {
+		apfs.unwrittenReleasable = append(apfs.unwrittenReleasable, apsRange{amfs: amfs, FileRange: fr})
+	}
+	apfs.mu.Unlock()
+	apfs.stStatus.Notify(apsSTPending)
 }
 
 func (apfs *AsyncPagesFileSave) canEnqueue() bool {
@@ -1020,6 +1088,11 @@ func (apfs *AsyncPagesFileSave) main() {
 			panic("main loop invariant failed")
 		}
 		apfs.mu.Lock()
+		for _, r := range apfs.unwrittenReleasable {
+			apfs.releasable = append(apfs.releasable, r)
+			apfs.releasableBytes += r.Length()
+		}
+		apfs.unwrittenReleasable = apfs.unwrittenReleasable[:0]
 		apfs.aw.Reserve(apfs.saveOff)
 		for !apfs.unsaved.Empty() {
 			mfr := apfs.unsaved.PeekFrontPtr()

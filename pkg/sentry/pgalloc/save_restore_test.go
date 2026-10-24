@@ -199,6 +199,12 @@ func TestSaveToPagesFileReleaseAfterWrite(t *testing.T) {
 				if i%5 == 3 {
 					continue
 				}
+				// Commit some zero pages, which are not written but must
+				// still be released.
+				if i%7 == 5 {
+					pwritePage(t, f, fr, i, 0)
+					continue
+				}
 				pwritePage(t, f, fr, i, byte(i+1))
 				want[i*hostarch.PageSize+17] = byte(i + 1)
 			}
@@ -217,6 +223,7 @@ func TestSaveToPagesFileReleaseAfterWrite(t *testing.T) {
 			err = f.SaveTo(context.Background(), &metadata, &SaveOpts{
 				PagesFile:         apfs,
 				ReleaseAfterWrite: tc.release,
+				DiscardAfterSave:  tc.release,
 			})
 			apfs.MemoryFilesDone()
 			if saveErr := <-saveDone; saveErr != nil {
