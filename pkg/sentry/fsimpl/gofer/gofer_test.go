@@ -15,9 +15,12 @@
 package gofer
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 
+	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/lisafs"
 	"gvisor.dev/gvisor/pkg/sentry/contexttest"
@@ -192,5 +195,69 @@ func TestXattrCacheList(t *testing.T) {
 	list, found = ino.xattrCache.getList()
 	if !found || !slices.Equal(list, wantList) {
 		t.Errorf("getList() = (%v, %v), want (%v, true)", list, found, wantList)
+	}
+}
+
+// TestHardLinkAdoptsFreshMetadata checks that a new dentry that adopts the
+// cached inode of another hard link to the same file refreshes the inode's
+// metadata if it is not authoritative.
+func TestHardLinkAdoptsFreshMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		interop  InteropMode
+		wantMode uint32
+	}{
+		{name: "shared", interop: InteropModeShared, wantMode: 0400},
+		// Cached metadata is authoritative, so it is kept.
+		{name: "exclusive", interop: InteropModeExclusive, wantMode: 0600},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := contexttest.Context(t)
+			fs := filesystem{
+				mf:          pgalloc.MemoryFileFromContext(ctx),
+				inoByKey:    make(map[inoKey]uint64),
+				inodeByKey:  make(map[inoKey]*inode),
+				clock:       ktime.RealtimeClockFromContext(ctx),
+				dentryCache: &dentryCache{maxCachedDentries: 0},
+			}
+			fs.opts.interop = tc.interop
+
+			dir := t.TempDir()
+			oldPath := filepath.Join(dir, "old")
+			newPath := filepath.Join(dir, "new")
+			if err := os.WriteFile(oldPath, nil, 0600); err != nil {
+				t.Fatalf("os.WriteFile: %v", err)
+			}
+			openPath := func(path string) int {
+				fd, err := unix.Open(path, unix.O_PATH, 0)
+				if err != nil {
+					t.Fatalf("unix.Open(%q): %v", path, err)
+				}
+				return fd
+			}
+			oldD, err := fs.newDirectfsDentry(openPath(oldPath))
+			if err != nil {
+				t.Fatalf("fs.newDirectfsDentry: %v", err)
+			}
+
+			// Change the file behind the client's back, and look it up through
+			// a new hard link.
+			if err := os.Chmod(oldPath, 0400); err != nil {
+				t.Fatalf("os.Chmod: %v", err)
+			}
+			if err := os.Link(oldPath, newPath); err != nil {
+				t.Fatalf("os.Link: %v", err)
+			}
+			newD, err := fs.newDirectfsDentry(openPath(newPath))
+			if err != nil {
+				t.Fatalf("fs.newDirectfsDentry: %v", err)
+			}
+			if newD.inode != oldD.inode {
+				t.Fatalf("hard links don't share an inode")
+			}
+			if got := newD.inode.mode.Load() &^ linux.S_IFMT; got != tc.wantMode {
+				t.Errorf("mode: got %#o, want %#o", got, tc.wantMode)
+			}
+		})
 	}
 }

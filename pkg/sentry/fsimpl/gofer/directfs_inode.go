@@ -149,8 +149,12 @@ func (fs *filesystem) newDirectfsDentry(controlFD int) (*dentry, error) {
 	// This also avoids a correctness issue when a directory is bind-mounted on the host:
 	// different paths (e.g., /mnt/ and /mnt/a/b/c if /mnt/a/b/c is a bind mount of /mnt/)
 	// can return the same device ID and inode number from a stat call.
+	cacheHit := false
 	temp.d.inode = fs.getOrCreateInode(inoKey /* dontCache = */, isDir,
-		func() { _ = unix.Close(controlFD) },
+		func() {
+			cacheHit = true
+			_ = unix.Close(controlFD)
+		},
 		func() *inode {
 			temp.i = directfsInode{
 				inode: inode{
@@ -214,6 +218,14 @@ func (fs *filesystem) newDirectfsDentry(controlFD int) (*dentry, error) {
 			}
 			return inode
 		})
+	if cacheHit && !temp.d.inode.cachedMetadataAuthoritative() {
+		// The adopted inode's cached metadata may be stale, e.g. if the file
+		// was changed through another hard link since it was last revalidated.
+		// Refresh it, as revalidation would for an existing dentry.
+		temp.d.inode.metadataMu.Lock()
+		temp.d.inode.impl.(*directfsInode).updateMetadataFromStatxLocked(&stat) // +checklocksforce: temp.d.inode.metadataMu is locked above.
+		temp.d.inode.metadataMu.Unlock()
+	}
 
 	temp.d.init()
 	// If this dentry adopted a cached inode that already carries a bound-socket

@@ -129,8 +129,12 @@ func (fs *filesystem) newLisafsDentry(ctx context.Context, ino *lisafs.Inode) (*
 	// This also avoids a correctness issue when a directory is bind-mounted on the host:
 	// different paths (e.g., /mnt/ and /mnt/a/b/c if /mnt/a/b/c is a bind mount of /mnt/)
 	// can return the same device ID and inode number from a stat call.
+	cacheHit := false
 	temp.d.inode = fs.getOrCreateInode(inoKey /* dontCache = */, isDir,
-		func() { fs.client.CloseFD(ctx, ino.ControlFD, false /* flush */) },
+		func() {
+			cacheHit = true
+			fs.client.CloseFD(ctx, ino.ControlFD, false /* flush */)
+		},
 		func() *inode {
 			temp.i = lisafsInode{
 				inode: inode{
@@ -194,6 +198,14 @@ func (fs *filesystem) newLisafsDentry(ctx context.Context, ino *lisafs.Inode) (*
 			}
 			return inode
 		})
+	if cacheHit && !temp.d.inode.cachedMetadataAuthoritative() {
+		// The adopted inode's cached metadata may be stale, e.g. if the file
+		// was changed through another hard link since it was last revalidated.
+		// Refresh it, as revalidation would for an existing dentry.
+		temp.d.inode.metadataMu.Lock()
+		temp.d.inode.impl.(*lisafsInode).updateMetadataFromStatxLocked(&ino.Stat) // +checklocksforce: temp.d.inode.metadataMu is locked above.
+		temp.d.inode.metadataMu.Unlock()
+	}
 
 	temp.d.init()
 	// If this dentry adopted a cached inode that already carries a bound-socket
