@@ -698,6 +698,11 @@ type AsyncPagesFileSave struct {
 	releasableBytes uint64
 	retained        []apsRange
 
+	// releasedBytes and releaseCalls are the total number of bytes released
+	// and the number of host syscalls used to release them, for logging.
+	releasedBytes uint64
+	releaseCalls  uint64
+
 	// If err is not nil, it is the error that has terminated async page
 	// saving. Note that unlike AsyncPagesFileLoad.err(),
 	// AsyncPagesFileSave.err is never returned to application syscalls and
@@ -1059,13 +1064,15 @@ func (apfs *AsyncPagesFileSave) main() {
 				apfs.mu.Unlock()
 				bandwidthTotal := float64(bytesTotal) * 1e-6 / durTotal.Seconds()
 				bandwidthFull := float64(bytesFull) * 1e-6 / durFull.Seconds()
-				log.Infof("Async page saving completed in %s (%d bytes, %.3f MB/s); queue full for %s (%d bytes, %.3f MB/s)",
+				log.Infof("Async page saving completed in %s (%d bytes, %.3f MB/s); queue full for %s (%d bytes, %.3f MB/s); released %d bytes in %d syscalls",
 					durTotal.Round(time.Millisecond),
 					bytesTotal,
 					bandwidthTotal,
 					durFull.Round(time.Millisecond),
 					bytesFull,
-					bandwidthFull)
+					bandwidthFull,
+					apfs.releasedBytes,
+					apfs.releaseCalls)
 				return
 			}
 			panic(fmt.Sprintf("unknown events in stStatus: %#x", ev))
@@ -1168,6 +1175,8 @@ func (apfs *AsyncPagesFileSave) release(r apsRange, all bool) {
 		}
 		r.FileRange = memmap.FileRange{start, end}
 	}
+	apfs.releaseCalls++
+	apfs.releasedBytes += r.Length()
 	if err := r.amfs.f.decommitFile(r.FileRange); err != nil {
 		// The pages have already been saved, so this only means that memory
 		// is released later, when the MemoryFile is destroyed. Don't retry
