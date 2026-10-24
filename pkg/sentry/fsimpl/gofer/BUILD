@@ -138,7 +138,10 @@ go_library(
 
 go_test(
     name = "gofer_test",
-    srcs = ["gofer_test.go"],
+    srcs = [
+        "gofer_test.go",
+        "save_restore_test.go",
+    ],
     embed = [":gofer"],
     deps = [
         "//pkg/abi/linux",
@@ -146,6 +149,7 @@ go_test(
         "//pkg/sentry/contexttest",
         "//pkg/sentry/ktime",
         "//pkg/sentry/pgalloc",
+        "//pkg/sentry/vfs",
         "@org_golang_x_sys//unix:go_default_library",
     ],
 )

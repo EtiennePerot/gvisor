@@ -45,7 +45,7 @@ type savedDentryRW struct {
 }
 
 // PrepareSave implements vfs.FilesystemImplSaveRestoreExtension.PrepareSave.
-func (fs *filesystem) PrepareSave(ctx context.Context) error {
+func (fs *filesystem) PrepareSave(ctx context.Context, opts vfs.PrepareSaveOptions) error {
 	if len(fs.iopts.UniqueID.Path) == 0 {
 		return fmt.Errorf("gofer.filesystem with no UniqueID cannot be saved")
 	}
@@ -85,7 +85,7 @@ func (fs *filesystem) PrepareSave(ctx context.Context) error {
 		return err
 	}
 
-	return fs.root.prepareSaveRecursive(ctx)
+	return fs.root.prepareSaveRecursive(ctx, &opts)
 }
 
 // Preconditions:
@@ -122,8 +122,8 @@ func (d *dentry) prepareSaveDead(ctx context.Context) error {
 	}
 	if d.inode.isRegularFile() {
 		if !d.inode.cachedMetadataAuthoritative() {
-			// Get updated metadata for d in case we need to perform metadata
-			// validation during restore.
+			// Get updated metadata for d, since d.inode.size determines how
+			// much file data prepareSaveDeletedRegularFile() saves.
 			if err := d.inode.updateMetadata(ctx); err != nil {
 				return err
 			}
@@ -177,10 +177,13 @@ func (d *dentry) prepareSaveDeletedRegularFile(ctx context.Context) error {
 	return nil
 }
 
-func (d *dentry) prepareSaveRecursive(ctx context.Context) error {
-	if d.inode.isRegularFile() && !d.inode.cachedMetadataAuthoritative() {
-		// Get updated metadata for d in case we need to perform metadata
-		// validation during restore.
+func (d *dentry) prepareSaveRecursive(ctx context.Context, opts *vfs.PrepareSaveOptions) error {
+	if opts.ValidateMetadataOnRestore && d.inode.isRegularFile() && !d.inode.cachedMetadataAuthoritative() {
+		// Get updated metadata for d so that it can be validated during
+		// restore. This is otherwise unnecessary, since restore replaces
+		// non-authoritative cached metadata with the remote file's current
+		// metadata (see lisafsInode.restoreInode() and
+		// directfsInode.restoreFile()), and costs one stat per file.
 		if err := d.inode.updateMetadata(ctx); err != nil {
 			return err
 		}
@@ -201,7 +204,7 @@ func (d *dentry) prepareSaveRecursive(ctx context.Context) error {
 			delete(d.children, childName)
 			continue
 		}
-		if err := child.prepareSaveRecursive(ctx); err != nil {
+		if err := child.prepareSaveRecursive(ctx, opts); err != nil {
 			return err
 		}
 	}
