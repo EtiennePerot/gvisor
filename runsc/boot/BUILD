@@ -97,6 +97,7 @@ go_library(
         "//pkg/sentry/fsimpl/sys",
         "//pkg/sentry/fsimpl/tmpfs",
         "//pkg/sentry/fsimpl/user",
+        "//pkg/sentry/hostmm",
         "//pkg/sentry/inet",
         "//pkg/sentry/kernel",
         "//pkg/sentry/kernel/auth",

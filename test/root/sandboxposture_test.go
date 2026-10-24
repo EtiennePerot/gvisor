@@ -30,6 +30,7 @@ import (
 	"gvisor.dev/gvisor/pkg/test/dockerutil"
 	"gvisor.dev/gvisor/pkg/test/sandboxposture"
 	"gvisor.dev/gvisor/pkg/test/testutil"
+	"gvisor.dev/gvisor/runsc/boot"
 	"gvisor.dev/gvisor/runsc/config"
 	"gvisor.dev/gvisor/runsc/flag"
 )
@@ -100,6 +101,7 @@ func TestSandboxPostureDocker(t *testing.T) {
 		GoDebug:              sandboxposture.GoDebug(conf.Platform),
 		ExtraFDClasses:       extraFDClasses(conf),
 		CgoEnabled:           config.CgoEnabled,
+		MemoryFileTmpfs:      boot.ChooseMemoryFileTmpfsHuge(conf, boot.ReadHostTHP()) != "",
 		NetNamespaceTarget:   netnsTarget,
 		ChildOfRef:           true, // Ref is shim
 		Ref:                  ref,
@@ -255,6 +257,7 @@ func TestSandboxPostureDo(t *testing.T) {
 		GoDebug:              sandboxposture.GoDebug(conf.Platform),
 		ExtraFDClasses:       extraFDClasses(conf),
 		CgoEnabled:           config.CgoEnabled,
+		MemoryFileTmpfs:      boot.ChooseMemoryFileTmpfsHuge(conf, boot.ReadHostTHP()) != "",
 		// The sandbox is a child of the `runsc do` process this test spawned,
 		// not of the test itself.
 		ChildOfRef: false,

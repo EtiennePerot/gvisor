@@ -26,6 +26,7 @@ import (
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/test/sandboxposture"
 	"gvisor.dev/gvisor/pkg/test/testutil"
+	"gvisor.dev/gvisor/runsc/boot"
 	"gvisor.dev/gvisor/runsc/config"
 	"gvisor.dev/gvisor/runsc/container"
 	"gvisor.dev/gvisor/runsc/gvisorbinaries"
@@ -163,6 +164,7 @@ func testBootPosture(t *testing.T, tc postureCase) {
 		GoDebug:              sandboxposture.GoDebug(conf.Platform),
 		ExtraFDClasses:       tc.extraFDClasses,
 		CgoEnabled:           config.CgoEnabled,
+		MemoryFileTmpfs:      boot.ChooseMemoryFileTmpfsHuge(conf, boot.ReadHostTHP()) != "",
 		// We call container.New directly below, so we are the sandbox parent
 		// (unlike when the containerd shim is in the middle).
 		ChildOfRef: true,

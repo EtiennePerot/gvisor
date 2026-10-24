@@ -196,6 +196,7 @@ func RegisterFlags(flagSet *flag.FlagSet) {
 	flagSet.String("TESTONLY-test-name-env", "", "TEST ONLY; do not ever use! Used for automated tests to improve logging.")
 	flagSet.Bool("TESTONLY-afs-syscall-panic", false, "TEST ONLY; do not ever use! Used for tests exercising gVisor panic reporting.")
 	flagSet.String("TESTONLY-autosave-image-path", "", "TEST ONLY; enable auto save for syscall tests and set path for state file.")
+	flagSet.String("TESTONLY-memory-file-tmpfs-huge", "", "TEST ONLY; override the main memory file's backing: \"memfd\", or the huge= option of a private tmpfs to create it on.")
 	flagSet.Bool("TESTONLY-autosave-resume", false, "TEST ONLY; enable auto save and resume for syscall tests and set path for state file.")
 
 	RegisterDeprecatedFlags(flagSet)

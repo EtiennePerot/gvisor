@@ -440,6 +440,12 @@ type Config struct {
 	// and stores the directory path to the saved state file.
 	TestOnlyAutosaveImagePath string `flag:"TESTONLY-autosave-image-path"`
 
+	// TestOnlyMemoryFileTmpfsHuge overrides the automatic choice of the main
+	// MemoryFile's backing: "memfd" for a memfd, or a tmpfs huge= option
+	// (e.g. "within_size") for a file on a sandbox-private tmpfs mount with
+	// that option. If empty, the choice is automatic.
+	TestOnlyMemoryFileTmpfsHuge string `flag:"TESTONLY-memory-file-tmpfs-huge"`
+
 	// TestOnlyAutosaveResume indicates save resume for syscall tests.
 	TestOnlyAutosaveResume bool `flag:"TESTONLY-autosave-resume"`
 

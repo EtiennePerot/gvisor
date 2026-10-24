@@ -189,6 +189,11 @@ type Boot struct {
 
 	hostTHP boot.HostTHP
 
+	// memoryFileTmpfsHuge is the huge= option of the tmpfs mounted at
+	// boot.MemoryFileTmpfsDir in the sandbox root, or empty if there is no
+	// such mount.
+	memoryFileTmpfsHuge string
+
 	// FDs for profile data.
 	profileFDs profile.FDArgs
 
@@ -290,6 +295,8 @@ func (b *Boot) SetFlags(f *flag.FlagSet) {
 	f.StringVar(&b.hostTHP.ShmemEnabled, "host-thp-shmem-enabled", "", "value of /sys/kernel/mm/transparent_hugepage/shmem_enabled on the host")
 	f.StringVar(&b.hostTHP.Defrag, "host-thp-defrag", "", "value of /sys/kernel/mm/transparent_hugepage/defrag on the host")
 	f.StringVar(&b.hostTHP.HugeShmemEnabled, "host-thp-huge-shmem-enabled", "", "value of /sys/kernel/mm/transparent_hugepage/"+boot.HugeShmemEnabledFile+" on the host")
+	f.StringVar(&b.hostTHP.Enabled, "host-thp-enabled", "", "value of /sys/kernel/mm/transparent_hugepage/enabled on the host")
+	f.StringVar(&b.memoryFileTmpfsHuge, "memory-file-tmpfs-huge", "", "huge= option of the tmpfs mounted at "+boot.MemoryFileTmpfsDir+" in the sandbox root, on which the main memory file is created")
 	f.IntVar(&b.uid, "uid", 0, "user ID")
 	f.IntVar(&b.gid, "gid", 0, "user ID")
 	f.BoolVar(&b.noRootContainer, "no-root-container", false, "if true, boot the sandbox without a root container; containers are added later as subcontainers")
@@ -425,6 +432,16 @@ func (b *Boot) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcomma
 				argOverride["host-thp-huge-shmem-enabled"] = b.hostTHP.HugeShmemEnabled
 			}
 		}
+		if len(b.hostTHP.Enabled) == 0 {
+			val, err := hostmm.ReadTransparentHugepageEnum("enabled")
+			if err != nil {
+				log.Warningf("Failed to infer --host-thp-enabled: %v", err)
+			} else {
+				b.hostTHP.Enabled = val
+				log.Infof("Setting host-thp-enabled: %q", b.hostTHP.Enabled)
+				argOverride["host-thp-enabled"] = b.hostTHP.Enabled
+			}
+		}
 	}
 	timer.Reached("host info read")
 
@@ -487,11 +504,23 @@ func (b *Boot) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcomma
 	}
 
 	if b.setUpRoot {
-		if err := setUpChroot(spec, conf, timer); err != nil {
+		memfile := memoryFileTmpfs{
+			huge: boot.ChooseMemoryFileTmpfsHuge(conf, b.hostTHP),
+			uid:  os.Getuid(),
+			gid:  os.Getgid(),
+		}
+		if !conf.Rootless && !b.applyCaps {
+			// The sandbox will call itself as nobody below.
+			memfile.uid, memfile.gid = nobody, nobody
+		}
+		huge, err := setUpChroot(spec, conf, memfile, timer)
+		if err != nil {
 			util.Fatalf("error setting up chroot: %v", err)
 		}
 		timer.Reached("chroot set up")
 		argOverride["setup-root"] = "false"
+		b.memoryFileTmpfsHuge = huge
+		argOverride["memory-file-tmpfs-huge"] = huge
 
 		if !conf.Rootless {
 			// /proc is umounted from a forked process, because the
@@ -750,6 +779,7 @@ func (b *Boot) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcomma
 			MNCCManagementDevMinor:       uint32(b.nvidiaMNCCManagementDevMinor),
 		},
 		HostTHP:                  b.hostTHP,
+		MemoryFileTmpfsHuge:      b.memoryFileTmpfsHuge,
 		SaveFDs:                  b.saveFDs.GetFDs(),
 		SaveCheckpointGofer:      b.saveCheckpointGofer,
 		FSSaveFDs:                b.fsSaveFDs.GetFDs(),

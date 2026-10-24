@@ -260,6 +260,9 @@ type Loader struct {
 
 	hostTHP HostTHP
 
+	// memoryFileTmpfsHuge is Args.MemoryFileTmpfsHuge.
+	memoryFileTmpfsHuge string
+
 	// saveMu serializes save operations. Saves can be requested concurrently:
 	// autosave in save-resume mode is triggered by any task executing the
 	// trigger syscall, and checkpoints may be requested concurrently via the
@@ -530,6 +533,10 @@ type Args struct {
 	NvidiaHostSettings  *nvconf.HostSettings
 	// HostTHP contains host transparent hugepage settings.
 	HostTHP HostTHP
+	// MemoryFileTmpfsHuge, if not empty, is the huge= option of the tmpfs
+	// mounted at MemoryFileTmpfsDir, on which the main MemoryFile is
+	// created. If empty, the main MemoryFile is a memfd.
+	MemoryFileTmpfsHuge string
 	// SaveFDs are FDs used for user-triggered checkpoint saving.
 	SaveFDs []*fd.FD
 	// If SaveCheckpointGofer is true, Args.SaveFDs contains only one FD, which
@@ -684,6 +691,7 @@ func New(args Args) (*Loader, error) {
 		cpuQuota:              args.CPUQuota,
 		cpuPeriod:             args.CPUPeriod,
 		hostTHP:               args.HostTHP,
+		memoryFileTmpfsHuge:   args.MemoryFileTmpfsHuge,
 		containerIDs:          make(map[string]string),
 		containerSpecs:        make(map[string]*specs.Spec),
 		failedToStart:         make(map[string]struct{}),
@@ -805,7 +813,7 @@ func New(args Args) (*Loader, error) {
 	}
 
 	// Create memory file.
-	mf, err := createMemoryFile(args.Conf.AppHugePages, args.HostTHP)
+	mf, err := createMemoryFile(args.Conf.AppHugePages, args.HostTHP, args.MemoryFileTmpfsHuge)
 	if err != nil {
 		return nil, fmt.Errorf("creating memory file: %w", err)
 	}
@@ -1217,13 +1225,30 @@ func createPlatform(conf *config.Config, numCPU int, deviceFile *fd.FD, sandboxI
 	return plat, nil
 }
 
-func createMemoryFile(appHugePages bool, hostTHP HostTHP) (*pgalloc.MemoryFile, error) {
+// createMemoryFile creates the main MemoryFile. If tmpfsHuge is not empty,
+// the MemoryFile is created on the tmpfs mounted at MemoryFileTmpfsDir with
+// huge=tmpfsHuge; otherwise, it is a memfd.
+func createMemoryFile(appHugePages bool, hostTHP HostTHP, tmpfsHuge string) (*pgalloc.MemoryFile, error) {
 	const memfileName = "runsc-memory"
-	memfd, err := memutil.CreateMemFD(memfileName, 0)
-	if err != nil {
-		return nil, fmt.Errorf("error creating memfd: %w", err)
+	var memfile *os.File
+	mountHuge := hostTHP.ShmemEnabled
+	if tmpfsHuge != "" {
+		fd, err := unix.Open(MemoryFileTmpfsDir, unix.O_TMPFILE|unix.O_RDWR|unix.O_CLOEXEC, 0600)
+		if err != nil {
+			log.Warningf("Failed to create memory file in %q, falling back to memfd: %v", MemoryFileTmpfsDir, err)
+			tmpfsHuge = ""
+		} else {
+			memfile = os.NewFile(uintptr(fd), memfileName)
+			mountHuge = tmpfsHuge
+		}
 	}
-	memfile := os.NewFile(uintptr(memfd), memfileName)
+	if memfile == nil {
+		memfd, err := memutil.CreateMemFD(memfileName, 0)
+		if err != nil {
+			return nil, fmt.Errorf("error creating memfd: %w", err)
+		}
+		memfile = os.NewFile(uintptr(memfd), memfileName)
+	}
 
 	mfopts := pgalloc.MemoryFileOpts{
 		// We can't enable pgalloc.MemoryFileOpts.UseHostMemcgPressure even if
@@ -1231,11 +1256,15 @@ func createMemoryFile(appHugePages bool, hostTHP HostTHP) (*pgalloc.MemoryFile, 
 		// in a mount namespace in which the relevant cgroupfs is not visible.
 	}
 	if appHugePages {
-		hp, enabled := hostTHP.memoryFileHugepages(hostTHP.ShmemEnabled)
+		backing := "memfd"
+		if tmpfsHuge != "" {
+			backing = "tmpfs huge=" + tmpfsHuge
+		}
+		hp, enabled := hostTHP.memoryFileHugepages(mountHuge)
 		if enabled {
-			log.Infof("Enabling application huge pages: %s", hp.reason)
+			log.Infof("Enabling application huge pages (%s): %s", backing, hp.reason)
 		} else {
-			log.Infof("Disabling application huge pages: %s", hp.reason)
+			log.Infof("Disabling application huge pages (%s): %s", backing, hp.reason)
 		}
 		mfopts.ExpectHugepages = hp.expectHugepages
 		mfopts.AdviseHugepage = hp.adviseHugepage

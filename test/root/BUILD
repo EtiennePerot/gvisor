@@ -46,6 +46,7 @@ go_test(
         "//pkg/test/dockerutil",
         "//pkg/test/sandboxposture",
         "//pkg/test/testutil",
+        "//runsc/boot",
         "//runsc/cgroup",
         "//runsc/config",
         "//runsc/container",

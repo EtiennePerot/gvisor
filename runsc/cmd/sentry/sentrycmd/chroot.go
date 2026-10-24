@@ -28,6 +28,7 @@ import (
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/rdma"
 	"gvisor.dev/gvisor/pkg/timing"
+	"gvisor.dev/gvisor/runsc/boot"
 	"gvisor.dev/gvisor/runsc/cmd/sandboxsetup"
 	"gvisor.dev/gvisor/runsc/cmd/util"
 	"gvisor.dev/gvisor/runsc/config"
@@ -134,7 +135,11 @@ func setupMinimalProcfs(chroot string, timer *timing.Timer) error {
 
 // setUpChroot creates an empty directory with runsc mounted at /runsc and proc
 // mounted at /proc.
-func setUpChroot(spec *specs.Spec, conf *config.Config, timer *timing.Timer) error {
+//
+// If memfile.huge is not empty, it also mounts a tmpfs for the main
+// MemoryFile at boot.MemoryFileTmpfsDir in the chroot. It returns the huge=
+// option of that mount, or "" if it didn't mount one.
+func setUpChroot(spec *specs.Spec, conf *config.Config, memfile memoryFileTmpfs, timer *timing.Timer) (string, error) {
 	// We are a new mount namespace, so we can use /tmp as a directory to
 	// construct a new root.
 	chroot := os.TempDir()
@@ -144,15 +149,15 @@ func setUpChroot(spec *specs.Spec, conf *config.Config, timer *timing.Timer) err
 	// Convert all shared mounts into slave to be sure that nothing will be
 	// propagated outside of our namespace.
 	if err := specutils.SafeMount("", "/", "", unix.MS_SLAVE|unix.MS_REC, "", "/proc"); err != nil {
-		return fmt.Errorf("error converting mounts: %v", err)
+		return "", fmt.Errorf("error converting mounts: %v", err)
 	}
 
 	if err := specutils.SafeMount("runsc-root", chroot, "tmpfs", unix.MS_NOSUID|unix.MS_NODEV|unix.MS_NOEXEC, "", "/proc"); err != nil {
-		return fmt.Errorf("error mounting tmpfs in chroot: %v", err)
+		return "", fmt.Errorf("error mounting tmpfs in chroot: %v", err)
 	}
 
 	if err := os.Mkdir(filepath.Join(chroot, "etc"), 0755); err != nil {
-		return fmt.Errorf("error creating /etc in chroot: %v", err)
+		return "", fmt.Errorf("error creating /etc in chroot: %v", err)
 	}
 
 	if err := sandboxsetup.CopyFile(filepath.Join(chroot, "etc/localtime"), "/etc/localtime"); err != nil {
@@ -161,24 +166,74 @@ func setUpChroot(spec *specs.Spec, conf *config.Config, timer *timing.Timer) err
 	timer.Reached("chroot base mounted")
 
 	if err := setupMinimalProcfs(chroot, timer); err != nil {
-		return fmt.Errorf("error setting up minimal procfs in chroot %q: %v", chroot, err)
+		return "", fmt.Errorf("error setting up minimal procfs in chroot %q: %v", chroot, err)
 	}
 	timer.Reached("chroot procfs set up")
 
 	if err := tpuProxyUpdateChroot("/", chroot, spec, conf); err != nil {
-		return fmt.Errorf("error configuring chroot for TPU devices: %w", err)
+		return "", fmt.Errorf("error configuring chroot for TPU devices: %w", err)
 	}
 
 	if err := rdmaSysfsUpdateChroot(chroot, spec, conf); err != nil {
-		return fmt.Errorf("error configuring chroot for RDMA sysfs: %w", err)
+		return "", fmt.Errorf("error configuring chroot for RDMA sysfs: %w", err)
+	}
+
+	memfileHuge := ""
+	if memfile.huge != "" {
+		if err := mountMemoryFileTmpfs(chroot, memfile); err != nil {
+			// The sandbox works with a memfd, just without huge pages.
+			log.Warningf("Failed to mount memory file tmpfs, falling back to memfd: %v", err)
+		} else {
+			memfileHuge = memfile.huge
+			timer.Reached("chroot memory file tmpfs mounted")
+		}
 	}
 
 	if err := specutils.SafeMount("", chroot, "", unix.MS_REMOUNT|unix.MS_RDONLY|unix.MS_BIND, "", "/proc"); err != nil {
-		return fmt.Errorf("error remounting chroot in read-only: %v", err)
+		return "", fmt.Errorf("error remounting chroot in read-only: %v", err)
 	}
 	timer.Reached("chroot sealed read-only")
 
-	return sandboxsetup.PivotRoot(chroot)
+	if err := sandboxsetup.PivotRoot(chroot); err != nil {
+		return "", err
+	}
+	return memfileHuge, nil
+}
+
+// nobody is the UID and GID of user and group nobody.
+const nobody = 65534
+
+// memoryFileTmpfs describes the tmpfs on which the sandbox creates its main
+// MemoryFile.
+type memoryFileTmpfs struct {
+	// huge is the huge= mount option, or "" for no mount.
+	huge string
+
+	// uid and gid own the mount. They must be the user and group that the
+	// sandbox runs as.
+	uid int
+	gid int
+}
+
+// mountMemoryFileTmpfs mounts the given tmpfs at boot.MemoryFileTmpfsDir in the
+// chroot. It is a separate mount, so it stays writable after the chroot is
+// remounted read-only.
+func mountMemoryFileTmpfs(chroot string, m memoryFileTmpfs) error {
+	dir := filepath.Join(chroot, boot.MemoryFileTmpfsDir)
+	if err := os.Mkdir(dir, 0700); err != nil {
+		return err
+	}
+	// size=0 disables the size limit: like a memfd, the MemoryFile is
+	// sparse, and its memory usage is limited by memory cgroups.
+	opts := fmt.Sprintf("huge=%s,size=0,mode=0700,uid=%d,gid=%d", m.huge, m.uid, m.gid)
+	// The MemoryFile is mapped PROT_EXEC for application executable mappings,
+	// so the mount can't be noexec.
+	if err := specutils.SafeMount("runsc-memory", dir, "tmpfs", unix.MS_NOSUID|unix.MS_NODEV, opts, "/proc"); err != nil {
+		_ = os.Remove(dir)
+		return fmt.Errorf("mounting tmpfs (%s) at %q: %w", opts, dir, err)
+	}
+	log.Infof("Mounted memory file tmpfs at %q with %q", dir, opts)
+	return nil
 }
 
 func tpuProxyUpdateChroot(hostRoot, chroot string, spec *specs.Spec, conf *config.Config) error {

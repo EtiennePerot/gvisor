@@ -130,6 +130,7 @@ go_test(
         "//pkg/sync",
         "//pkg/test/sandboxposture",
         "//pkg/test/testutil",
+        "//runsc/boot",
         "//runsc/boot/sentryapi",
         "//runsc/cmd/sandboxsetup",
         "//runsc/cmd/sentry/sentrycmd",

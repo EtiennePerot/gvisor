@@ -18,6 +18,8 @@ import (
 	"fmt"
 
 	"gvisor.dev/gvisor/pkg/hostarch"
+	"gvisor.dev/gvisor/pkg/sentry/hostmm"
+	"gvisor.dev/gvisor/runsc/config"
 )
 
 // HostTHP holds host transparent hugepage settings.
@@ -35,12 +37,21 @@ type HostTHP struct {
 	// Defrag is the selected option in
 	// /sys/kernel/mm/transparent_hugepage/defrag.
 	Defrag string
+
+	// Enabled is the selected option in
+	// /sys/kernel/mm/transparent_hugepage/enabled.
+	Enabled string
 }
 
 // HugeShmemEnabledFile is the path, relative to
 // /sys/kernel/mm/transparent_hugepage, of the per-size shmem huge page control
 // for huge pages of size hostarch.HugePageSize.
 var HugeShmemEnabledFile = fmt.Sprintf("hugepages-%dkB/shmem_enabled", hostarch.HugePageSize>>10)
+
+// MemoryFileTmpfsDir is the path, relative to the sandbox root, at which runsc
+// mounts a sandbox-private tmpfs to back the main MemoryFile, if
+// HostTHP.MemoryFileTmpfsHuge() says to.
+const MemoryFileTmpfsDir = "/runsc-memory"
 
 // shmemHuge returns the policy that determines whether the host kernel backs
 // a regular shmem file by huge pages of size hostarch.HugePageSize, if the
@@ -78,10 +89,52 @@ func (t HostTHP) shmemHuge(mountHuge string) string {
 	}
 }
 
+// tmpfsHugeOption is the huge= option used for the private tmpfs mount
+// that backs the main MemoryFile. "within_size" and "always" behave
+// identically for the MemoryFile, whose size is always a multiple of its 1 GiB
+// chunk size; prefer the more conservative option.
+const tmpfsHugeOption = "within_size"
+
+// MemoryFileTmpfsHuge returns the huge= option of the sandbox-private tmpfs
+// mount on which the main MemoryFile should be created, or "" if the main
+// MemoryFile should be a memfd.
+//
+// A memfd gets huge pages only if the host's shmem policy allows it. Many
+// hosts (including Container-Optimized OS) set shmem_enabled to "never", so
+// that the host's own SysV shm, shared anonymous mappings and memfds don't use
+// huge pages, while regular tmpfs mounts can still opt in with huge=. On such
+// hosts, application memory can only get huge pages if it is backed by a file
+// on such a mount.
+func (t HostTHP) MemoryFileTmpfsHuge() string {
+	if _, enabled := t.memoryFileHugepages(t.ShmemEnabled); enabled {
+		// memfds already get huge pages.
+		return ""
+	}
+	if t.shmemHuge(tmpfsHugeOption) != tmpfsHugeOption {
+		// huge= is overridden by the host.
+		return ""
+	}
+	switch t.Defrag {
+	case "defer", "defer+madvise", "madvise", "never":
+		// Huge page allocations for mappings without MADV_HUGEPAGE don't
+		// invoke direct compaction.
+	case "always":
+		// Huge page allocations will invoke direct compaction; this is
+		// consistent with host private anonymous memory only if it uses
+		// huge pages without MADV_HUGEPAGE as well.
+		if t.Enabled != "always" {
+			return ""
+		}
+	default:
+		return ""
+	}
+	return tmpfsHugeOption
+}
+
 // memoryFileHugepages returns the huge page options for a MemoryFile created
 // on a tmpfs mount with the given huge= option (for memfds, the host's
-// shmem_enabled), and whether these options enable huge pages. opts.reason
-// describes the decision for logging.
+// shmem_enabled), and whether these options enable huge pages. It also
+// returns a description of the decision for logging.
 func (t HostTHP) memoryFileHugepages(mountHuge string) (opts memoryFileHugepageOpts, enabled bool) {
 	policy := t.shmemHuge(mountHuge)
 	opts.reason = fmt.Sprintf("shmem huge page policy is %q", policy)
@@ -123,4 +176,36 @@ type memoryFileHugepageOpts struct {
 	adviseHugepage   bool
 	adviseNoHugepage bool
 	reason           string
+}
+
+// ChooseMemoryFileTmpfsHuge returns the huge= option of the sandbox-private
+// tmpfs mount on which the main MemoryFile should be created, or "" if the
+// main MemoryFile should be a memfd.
+func ChooseMemoryFileTmpfsHuge(conf *config.Config, t HostTHP) string {
+	switch v := conf.TestOnlyMemoryFileTmpfsHuge; v {
+	case "":
+	case "memfd":
+		return ""
+	default:
+		return v
+	}
+	if !conf.AppHugePages {
+		return ""
+	}
+	return t.MemoryFileTmpfsHuge()
+}
+
+// ReadHostTHP returns the host's transparent hugepage settings. Settings that
+// can't be read are left empty.
+func ReadHostTHP() HostTHP {
+	read := func(name string) string {
+		val, _ := hostmm.ReadTransparentHugepageEnum(name)
+		return val
+	}
+	return HostTHP{
+		ShmemEnabled:     read("shmem_enabled"),
+		HugeShmemEnabled: read(HugeShmemEnabledFile),
+		Defrag:           read("defrag"),
+		Enabled:          read("enabled"),
+	}
 }

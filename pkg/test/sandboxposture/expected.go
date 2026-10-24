@@ -188,9 +188,16 @@ var baseFDClasses = []string{
 	FDSocket,
 	FDAnonPrefix + "eventfd",
 	FDAnonPrefix + "eventpoll",
-	FDMemfdPrefix + "runsc-memory",
 	FDMemfdPrefix + "memory-usage",
 }
+
+// memoryFileTmpfsEntry and memoryFileTmpfsMount are the root entry and mount
+// of the tmpfs on which the sandbox creates its main memory file, if
+// ExpectedOpts.MemoryFileTmpfs. See runsc/boot.MemoryFileTmpfsDir.
+const (
+	memoryFileTmpfsEntry = "runsc-memory/"
+	memoryFileTmpfsMount = "/runsc-memory tmpfs nosuid,nodev"
+)
 
 // ExpectedOpts describes the runsc configuration a sandbox was started with,
 // or at least the subset of it that determines its expected security posture.
@@ -208,6 +215,11 @@ type ExpectedOpts struct {
 	NetNamespaceTarget   string
 	CgoEnabled           bool
 	GoDebug              string
+
+	// MemoryFileTmpfs is whether the sandbox backs application memory by a
+	// file on a private tmpfs mount rather than by a memfd. See
+	// runsc/boot.ChooseMemoryFileTmpfsHuge.
+	MemoryFileTmpfs bool
 
 	// ChildOfRef is whether the sandbox is expected to be a direct child
 	// of the reference process. False under shim.
@@ -323,6 +335,10 @@ func expectedFilesystem(opts ExpectedOpts) Filesystem {
 	entries = append(entries, opts.ExtraRootEntries...)
 
 	mounts := []string{"/ tmpfs ro"}
+	if opts.MemoryFileTmpfs {
+		entries = append(entries, memoryFileTmpfsEntry)
+		mounts = append(mounts, memoryFileTmpfsMount)
+	}
 	mounts = append(mounts, opts.ExtraMounts...)
 
 	sort.Strings(entries)
@@ -338,6 +354,11 @@ func expectedFilesystem(opts ExpectedOpts) Filesystem {
 
 func expectedFDs(opts ExpectedOpts) FDTable {
 	classes := append([]string(nil), baseFDClasses...)
+	if opts.MemoryFileTmpfs {
+		classes = append(classes, FDDeleted)
+	} else {
+		classes = append(classes, FDMemfdPrefix+"runsc-memory")
+	}
 	classes = append(classes, opts.Ref.StdioFDs...)
 	if opts.RequiresCapSysPtrace {
 		classes = append(classes,
