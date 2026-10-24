@@ -498,20 +498,15 @@ func getRestoreReadersForLocalCheckpointFiles(o *sentryapi.RestoreOpts) (io.Read
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	cu := cleanup.Make(func() { stateFile.Close() })
-	defer cu.Clean()
-	var stat unix.Stat_t
-	if err := unix.Fstat(stateFile.FD(), &stat); err != nil {
+	stateReader, err := newLocalStateFileReader(stateFile /* transfers ownership */)
+	if err != nil {
 		return nil, nil, nil, err
 	}
-	if stat.Size == 0 {
-		return nil, nil, nil, fmt.Errorf("statefile cannot be empty")
-	}
-
 	if !o.HavePagesFile {
-		cu.Release()
-		return stateFile, nil, nil, nil
+		return stateReader, nil, nil, nil
 	}
+	cu := cleanup.Make(func() { stateReader.Close() })
+	defer cu.Clean()
 	pagesMetadataFile, err := o.ReleaseFD(1)
 	if err != nil {
 		return nil, nil, nil, err
@@ -523,13 +518,42 @@ func getRestoreReadersForLocalCheckpointFiles(o *sentryapi.RestoreOpts) (io.Read
 	}
 	cu.Release()
 	// //pkg/state/wire reads one byte at a time; buffer reads from
-	// pagesMetadataFile to avoid making one syscall per read. For the state
-	// file, this buffering is handled by statefile.NewReader() =>
-	// compressio.Reader or compressio.NewSimpleReader().
-	return stateFile,
+	// pagesMetadataFile to avoid making one syscall per read.
+	return stateReader,
 		stateio.NewBufioReadCloser(pagesMetadataFile),
 		stateio.NewPagesFileFDReaderDefault(int32(pagesFile.Release())),
 		nil
+}
+
+// newLocalStateFileReader returns an io.ReadCloser that reads the state file
+// from stateFile. It takes ownership of stateFile, even if it returns a non-nil
+// error.
+func newLocalStateFileReader(stateFile *fd.FD) (io.ReadCloser, error) {
+	var stat unix.Stat_t
+	if err := unix.Fstat(stateFile.FD(), &stat); err != nil {
+		stateFile.Close()
+		return nil, err
+	}
+	if stat.Size == 0 {
+		stateFile.Close()
+		return nil, fmt.Errorf("statefile cannot be empty")
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Size <= stateio.StateFileFDReadBytes {
+		// Only regular files can be read at offsets, and there is nothing to
+		// read ahead in a file that fits in one read. statefile.NewReader() =>
+		// compressio.Reader or compressio.NewSimpleReader() buffers reads from
+		// these files.
+		return stateFile, nil
+	}
+	// The state file is decoded sequentially by a single goroutine. Read
+	// ahead so that decoding doesn't stop for every read from the host, which
+	// is slow if the file isn't in the page cache or if the disk is busy
+	// loading the pages file.
+	r, err := stateio.NewStateFileFDReader(int32(stateFile.Release()) /* transfers ownership */)
+	if err != nil {
+		return nil, fmt.Errorf("failed to buffer state file: %w", err)
+	}
+	return r, nil
 }
 
 func getRestoreReadersForCheckpointGofer(o *sentryapi.RestoreOpts) (io.ReadCloser, io.ReadCloser, stateio.AsyncReader, error) {
