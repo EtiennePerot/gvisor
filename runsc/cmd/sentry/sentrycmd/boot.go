@@ -289,6 +289,7 @@ func (b *Boot) SetFlags(f *flag.FlagSet) {
 	f.StringVar(&b.productName, "product-name", "", "value to show in /sys/devices/virtual/dmi/id/product_name")
 	f.StringVar(&b.hostTHP.ShmemEnabled, "host-thp-shmem-enabled", "", "value of /sys/kernel/mm/transparent_hugepage/shmem_enabled on the host")
 	f.StringVar(&b.hostTHP.Defrag, "host-thp-defrag", "", "value of /sys/kernel/mm/transparent_hugepage/defrag on the host")
+	f.StringVar(&b.hostTHP.HugeShmemEnabled, "host-thp-huge-shmem-enabled", "", "value of /sys/kernel/mm/transparent_hugepage/"+boot.HugeShmemEnabledFile+" on the host")
 	f.IntVar(&b.uid, "uid", 0, "user ID")
 	f.IntVar(&b.gid, "gid", 0, "user ID")
 	f.BoolVar(&b.noRootContainer, "no-root-container", false, "if true, boot the sandbox without a root container; containers are added later as subcontainers")
@@ -413,6 +414,15 @@ func (b *Boot) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcomma
 				b.hostTHP.Defrag = val
 				log.Infof("Setting host-thp-defrag: %q", b.hostTHP.Defrag)
 				argOverride["host-thp-defrag"] = b.hostTHP.Defrag
+			}
+		}
+		if len(b.hostTHP.HugeShmemEnabled) == 0 {
+			// This file doesn't exist before Linux 6.11, which is equivalent
+			// to "inherit".
+			if val, err := hostmm.ReadTransparentHugepageEnum(boot.HugeShmemEnabledFile); err == nil {
+				b.hostTHP.HugeShmemEnabled = val
+				log.Infof("Setting host-thp-huge-shmem-enabled: %q", b.hostTHP.HugeShmemEnabled)
+				argOverride["host-thp-huge-shmem-enabled"] = b.hostTHP.HugeShmemEnabled
 			}
 		}
 	}
