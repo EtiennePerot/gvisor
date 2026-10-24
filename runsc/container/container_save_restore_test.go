@@ -1017,6 +1017,85 @@ func TestCheckpointRestoreEROFS(t *testing.T) {
 	}
 }
 
+// TestCheckpointRestoreSharedMountFileChanged checks that a file that is open
+// on a shared bind mount reflects changes made on the host between checkpoint
+// and restore.
+func TestCheckpointRestoreSharedMountFileChanged(t *testing.T) {
+	for name, conf := range configs(t, true /* noOverlay */) {
+		t.Run(name, func(t *testing.T) {
+			dir, err := os.MkdirTemp(testutil.TmpDir(), "checkpoint-test")
+			if err != nil {
+				t.Fatalf("os.MkdirTemp failed: %v", err)
+			}
+			defer os.RemoveAll(dir)
+			if err := os.Chmod(dir, 0777); err != nil {
+				t.Fatalf("error chmoding file: %q, %v", dir, err)
+			}
+			imageDir := filepath.Join(dir, "image")
+			if err := os.Mkdir(imageDir, 0777); err != nil {
+				t.Fatalf("os.Mkdir failed: %v", err)
+			}
+			path := filepath.Join(dir, "file")
+			if err := os.WriteFile(path, []byte("old"), 0666); err != nil {
+				t.Fatalf("os.WriteFile failed: %v", err)
+			}
+
+			// Keep the file open, so that its dentry is saved.
+			spec := testutil.NewSpecWithArgs("bash", "-c", fmt.Sprintf("exec 3<%q; exec sleep 1000", path))
+			_, bundleDir, cleanup, err := testutil.SetupContainer(spec, conf)
+			if err != nil {
+				t.Fatalf("error setting up container: %v", err)
+			}
+			defer cleanup()
+
+			args := Args{
+				ID:        testutil.RandomContainerID(),
+				Spec:      spec,
+				BundleDir: bundleDir,
+			}
+			cont, err := New(conf, args)
+			if err != nil {
+				t.Fatalf("error creating container: %v", err)
+			}
+			defer cont.Destroy()
+			if err := cont.Start(conf); err != nil {
+				t.Fatalf("error starting container: %v", err)
+			}
+			if err := waitForProcessList(cont, []*controlapi.Process{newProcessBuilder().PID(1).Cmd("sleep").Process()}); err != nil {
+				t.Fatalf("waiting for sleep: %v", err)
+			}
+			if err := cont.Checkpoint(conf, imageDir, sandbox.CheckpointOpts{}); err != nil {
+				t.Fatalf("error checkpointing container: %v", err)
+			}
+			cont.Destroy()
+
+			// Change the file's size and contents while the container is not
+			// running.
+			const want = "new and longer"
+			if err := os.WriteFile(path, []byte(want), 0666); err != nil {
+				t.Fatalf("os.WriteFile failed: %v", err)
+			}
+
+			cont2, err := New(conf, args)
+			if err != nil {
+				t.Fatalf("error creating container: %v", err)
+			}
+			defer cont2.Destroy()
+			if err := cont2.Restore(conf, imageDir, false /* direct */, false /* background */, nil /* networkArgs */); err != nil {
+				t.Fatalf("error restoring container: %v", err)
+			}
+
+			got, err := executeCombinedOutput(conf, cont2, nil, "/bin/bash", "-c", "stat -L -c %s /proc/1/fd/3; cat /proc/1/fd/3")
+			if err != nil {
+				t.Fatalf("exec failed: %v, output: %s", err, got)
+			}
+			if wantOut := fmt.Sprintf("%d\n%s", len(want), want); string(got) != wantOut {
+				t.Errorf("file after restore: got %q, want %q", got, wantOut)
+			}
+		})
+	}
+}
+
 func TestCheckpointResume(t *testing.T) {
 	for name, conf := range configs(t, true /* noOverlay */) {
 		t.Run(name, func(t *testing.T) {
