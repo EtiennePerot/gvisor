@@ -51,6 +51,11 @@ import (
 //     if it is no longer needed at all.
 //  2. Add the flag to flags_graveyard.go and remove it from flags.go.
 type Config struct {
+	// DeferCheckpoint is set by the restore subcommand for the current request.
+	// It is passed to the Sentry through RestoreOpts, not through boot flags or
+	// serialized Config values.
+	DeferCheckpoint bool `json:"-"`
+
 	// RootDir is the runtime root directory.
 	RootDir string `flag:"root"`
 

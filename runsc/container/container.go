@@ -532,7 +532,10 @@ func (c *Container) Restore(conf *config.Config, imagePath string, direct, backg
 	restore := func(conf *config.Config, spec *specs.Spec) error {
 		return c.Sandbox.Restore(conf, spec, c.ID, imagePath, direct, background, networkArgs)
 	}
-	return c.startImpl(conf, "restore", restore, c.Sandbox.RestoreSubcontainer)
+	restoreSubcontainer := func(spec *specs.Spec, conf *config.Config, cid string, stdios, goferFiles, goferFilestores []*os.File, devIOFile *os.File, goferConfs []specutils.GoferMountConf) error {
+		return c.Sandbox.RestoreSubcontainer(spec, conf, cid, stdios, goferFiles, goferFilestores, devIOFile, goferConfs, imagePath, direct, background)
+	}
+	return c.startImpl(conf, "restore", restore, restoreSubcontainer)
 }
 
 func (c *Container) startImpl(conf *config.Config, action string, startRoot func(conf *config.Config, spec *specs.Spec) error, startSub func(spec *specs.Spec, conf *config.Config, cid string, stdios, goferFiles, goferFilestores []*os.File, devIOFile *os.File, goferConfs []specutils.GoferMountConf) error) error {
@@ -557,6 +560,19 @@ func (c *Container) startImpl(conf *config.Config, action string, startRoot func
 			return err
 		}
 	} else {
+		if action == "restore" && c.Sandbox.DeferCheckpoint {
+			// A deferred sandbox may precreate children before their volumes are
+			// assigned. Refresh only the mounts, retaining the create-time process
+			// and other settings. Do this before computing the Gofer configuration,
+			// since the Gofer also reads the bundle spec.
+			// Parse with a copy so bundle annotations don't change this request.
+			bundleConf := *conf
+			spec, err := specutils.ReadSpec(c.BundleDir, specutils.SpecOpts{Conf: &bundleConf})
+			if err != nil {
+				return fmt.Errorf("reading deferred restore mounts: %w", err)
+			}
+			c.Spec.Mounts = spec.Mounts
+		}
 		// Join cgroup to start gofer process to ensure it's part of the cgroup from
 		// the start (and all their children processes).
 		if err := cgroup.RunInCgroup(c.Sandbox.CgroupJSON.Cgroup, func(cloneIntoCgroupFD *os.File) error {
