@@ -18,7 +18,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path"
 	"strconv"
 	gtime "time"
@@ -659,11 +658,6 @@ func (cm *containerManager) RestoreSubcontainer(args *sentryapi.StartArgs, reply
 	if args.CID == "" {
 		return errors.New("start argument missing container ID")
 	}
-	numCheckpointFiles := args.Checkpoint.NumFiles()
-	if numCheckpointFiles > len(args.Files) {
-		return errors.New("invalid checkpoint file count")
-	}
-	numContainerFiles := len(args.Files) - numCheckpointFiles
 	expectedFDs := 1 // At least one FD for the root filesystem.
 	expectedFDs += args.NumGoferFilestoreFDs
 	if args.IsDevIoFilePresent {
@@ -675,11 +669,11 @@ func (cm *containerManager) RestoreSubcontainer(args *sentryapi.StartArgs, reply
 	if args.IsRootfsUpperTarFilePresent {
 		return errors.New("rootfs upper tar file is not supported during restore")
 	}
-	if numContainerFiles < expectedFDs {
-		return fmt.Errorf("restore arguments must contain at least %d FDs, but only got %d", expectedFDs, numContainerFiles)
+	if len(args.Files) < expectedFDs {
+		return fmt.Errorf("restore arguments must contain at least %d FDs, but only got %d", expectedFDs, len(args.Files))
 	}
 
-	r, containerFiles, err := cm.initCheckpointSubcontainer(args)
+	r, err := cm.bindCheckpoint(nil /* o */)
 	if err != nil {
 		return err
 	}
@@ -687,7 +681,7 @@ func (cm *containerManager) RestoreSubcontainer(args *sentryapi.StartArgs, reply
 	// All validation passed, logs the spec for debugging.
 	specutils.LogSpecDebug(args.Spec, args.Conf.OCISeccomp)
 
-	goferFiles := containerFiles
+	goferFiles := args.Files
 	var stdios []*fd.FD
 	if !args.Spec.Process.Terminal {
 		// When not using a terminal, stdios come as the first 3 files in the
@@ -734,36 +728,38 @@ func (cm *containerManager) RestoreSubcontainer(args *sentryapi.StartArgs, reply
 	return nil
 }
 
-// initCheckpointSubcontainer binds and initializes a deferred checkpoint, or
-// waits for an existing initialization. It returns the restore session and the
-// child files without the checkpoint payload. The caller must keep args.Files
-// open until this method returns and validate the payload length against
-// args.Checkpoint.NumFiles() before calling.
+// BindCheckpoint supplies the checkpoint of a restore prepared with
+// RestoreOpts.DeferCheckpoint. It returns once the checkpoint is initialized;
+// memory loading continues asynchronously, so that it overlaps the setup of
+// the subcontainers restored next. Binding an already bound checkpoint only
+// waits for its initialization.
+func (cm *containerManager) BindCheckpoint(o *sentryapi.RestoreOpts, _ *struct{}) error {
+	log.Debugf("containerManager.BindCheckpoint")
+	_, err := cm.bindCheckpoint(o)
+	return err
+}
+
+// bindCheckpoint initializes the checkpoint from o if no checkpoint is bound
+// yet, or waits for an existing initialization, and returns the restore
+// session. o is nil if the caller does not supply a checkpoint.
 //
 // +checklocksexclude:cm.l.mu
-func (cm *containerManager) initCheckpointSubcontainer(args *sentryapi.StartArgs) (*restorer, []*os.File, error) {
-	containerFiles := args.Files[:len(args.Files)-args.Checkpoint.NumFiles()]
-	var o sentryapi.RestoreOpts
-	if args.Checkpoint != nil {
-		o = *args.Checkpoint
-		o.Files = args.Files[len(containerFiles):]
-	}
-
+func (cm *containerManager) bindCheckpoint(o *sentryapi.RestoreOpts) (*restorer, error) {
 	cm.l.mu.Lock()
 	unlock := cleanup.Make(cm.l.mu.Unlock)
 	defer unlock.Clean()
 
 	if cm.l.state != restoringUnstarted {
-		return nil, nil, fmt.Errorf("sandbox is not being restored, cannot restore subcontainer: state=%s", cm.l.state)
+		return nil, fmt.Errorf("sandbox is not being restored, cannot bind checkpoint: state=%s", cm.l.state)
 	}
 	r := cm.restorer
-	if r.checkpointInit == nil && args.Checkpoint == nil {
-		return nil, nil, errors.New("checkpoint has not been supplied; restore the subcontainer with --image-path instead of start")
+	if r.checkpointInit == nil && o == nil {
+		return nil, errors.New("checkpoint has not been supplied; restore the subcontainer with --image-path instead of start")
 	}
 	if r.checkpointInit == nil {
 		noRoot := cm.l.noRootContainer.enabled
 		r.checkpointInit = sync.OnceValue(func() error {
-			err := r.initCheckpoint(&o, noRoot)
+			err := r.initCheckpoint(o, noRoot)
 			if err == nil && r.totalContainers < 2 {
 				err = fmt.Errorf("deferred checkpoint restore requires at least 2 containers, got %d", r.totalContainers)
 			}
@@ -778,19 +774,19 @@ func (cm *containerManager) initCheckpointSubcontainer(args *sentryapi.StartArgs
 	}
 	checkpointInit := r.checkpointInit
 	unlock.Clean()
-	// URPC closes any unused checkpoint payload when the handler returns.
-	// Every caller waits for initialization, including ordinary starts. The
-	// donor request also waits, keeping its checkpoint files open until done.
+	// Every caller waits for initialization. The caller that supplied the
+	// checkpoint keeps its files open until then, since URPC closes unused
+	// payload files when the handler returns.
 	if err := checkpointInit(); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	cm.l.mu.Lock()
 	state := cm.l.state
 	cm.l.mu.Unlock()
 	if state != restoringUnstarted {
-		return nil, nil, fmt.Errorf("sandbox is not being restored, cannot restore subcontainer: state=%s", state)
+		return nil, fmt.Errorf("sandbox is not being restored, cannot restore subcontainer: state=%s", state)
 	}
-	return r, containerFiles, nil
+	return r, nil
 }
 
 // Pause pauses all tasks, blocking until they are stopped.

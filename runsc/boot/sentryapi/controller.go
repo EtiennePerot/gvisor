@@ -72,18 +72,12 @@ type StartArgs struct {
 	// IsRootfsUpperTarFilePresent indicates whether the rootfs upper tar file is present.
 	IsRootfsUpperTarFilePresent bool
 
-	// Checkpoint contains restore options when a subcontainer binds a deferred
-	// checkpoint. Its files are carried at the end of FilePayload, not in the
-	// nested RestoreOpts payload. It is nil for ordinary start requests.
-	Checkpoint *RestoreOpts
-
 	// FilePayload contains, in order:
 	//   * stdin, stdout, and stderr (optional: if terminal is disabled).
 	//   * file descriptors to gofer-backing host files (optional).
 	//   * file descriptor for /dev gofer connection (optional)
 	//   * file descriptor for rootfs upper tar file (optional)
 	//   * file descriptors to connect to gofer to serve the root filesystem.
-	//   * checkpoint files, in RestoreOpts order (optional: restore only).
 	urpc.FilePayload
 }
 
@@ -129,7 +123,8 @@ type RestoreOpts struct {
 	Background     bool
 
 	// DeferCheckpoint prepares a no-root restore without checkpoint files.
-	// FilePayload must be empty; checkpoint binding is performed separately.
+	// FilePayload must be empty; ContMgrBindCheckpoint supplies the checkpoint
+	// later.
 	DeferCheckpoint bool
 
 	// If UseCheckpointGofer is true, the first file in FilePayload is a Unix
@@ -151,21 +146,9 @@ type RestoreReply struct {
 	KernelStarted bool
 }
 
-// NumFiles returns the number of payload FDs required by these restore options.
-// A nil receiver represents a request without a checkpoint payload.
-func (o *RestoreOpts) NumFiles() int {
-	if o == nil {
-		return 0
-	}
-	n := 1 // State file or checkpoint Gofer socket.
-	if o.HavePagesFile && !o.UseCheckpointGofer {
-		n += 2
-	}
-	if o.HaveDeviceFile {
-		n++
-	}
-	return n
-}
+// ContMgrBindCheckpoint supplies the checkpoint of a restore prepared with
+// RestoreOpts.DeferCheckpoint.
+const ContMgrBindCheckpoint = "containerManager.BindCheckpoint"
 
 // ContMgrRestoreSubcontainer restores a container from a statefile.
 const ContMgrRestoreSubcontainer = "containerManager.RestoreSubcontainer"
