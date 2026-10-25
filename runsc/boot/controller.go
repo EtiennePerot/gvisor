@@ -379,9 +379,6 @@ func (cm *containerManager) Restore(o *sentryapi.RestoreOpts, reply *sentryapi.R
 			return errors.New("cannot pass files when deferring the checkpoint")
 		}
 	}
-	// Initialize failure notification before preparing the restore or reading
-	// the checkpoint, since either operation can fail.
-	cm.l.restoreDone = sync.NewCond(&cm.l.mu)
 	defer func() {
 		if retErr != nil {
 			cu.Clean() // Release `cm.l.mu` as onRestoreFailed will acquire it.

@@ -2369,3 +2369,146 @@ func onlyPID(t *testing.T, c *Container) int {
 	}
 	return int(pl[0].PID)
 }
+
+// TestCheckpointRestoreNoRootContainerDeferred restores a no-root sandbox whose
+// root was prepared, and whose child was created, before the checkpoint was
+// supplied by the child restore.
+func TestCheckpointRestoreNoRootContainerDeferred(t *testing.T) {
+	for _, background := range []bool{false, true} {
+		t.Run(fmt.Sprintf("background=%t", background), func(t *testing.T) {
+			testCheckpointRestoreNoRootContainerDeferred(t, background)
+		})
+	}
+}
+
+func testCheckpointRestoreNoRootContainerDeferred(t *testing.T, background bool) {
+	conf := testutil.TestConfig(t)
+	setupTestRootDir(t, conf)
+
+	dir := checkpointDir(t)
+	outputPath := filepath.Join(dir, "output")
+	outputFile, err := createWriteableOutputFile(outputPath)
+	if err != nil {
+		t.Fatalf("error creating output file: %v", err)
+	}
+	defer outputFile.Close()
+	script := fmt.Sprintf("for ((i=0; ;i++)); do echo $i >> %q; sleep 1; done", outputPath)
+
+	sbID := testutil.RandomContainerID()
+	sb := startNoRootContainerSandbox(t, conf, sbID)
+	startNoRootContainerSubWithArgs(t, conf, sbID, nil /* pidnsPath */, "bash", "-c", script)
+	if err := waitForFileNotEmpty(outputFile); err != nil {
+		t.Fatalf("Failed to wait for output file: %v", err)
+	}
+	checkpointNoRootContainer(t, conf, sb, dir, sandbox.CheckpointOpts{Compression: statefile.CompressionLevelNone})
+	lastNum, err := readOutputNum(outputPath, -1)
+	if err != nil {
+		t.Fatalf("error with outputFile: %v", err)
+	}
+	if err := os.Remove(outputPath); err != nil {
+		t.Fatalf("error removing file: %v", err)
+	}
+	outputFile2, err := createWriteableOutputFile(outputPath)
+	if err != nil {
+		t.Fatalf("error creating output file: %v", err)
+	}
+	defer outputFile2.Close()
+
+	newContainer := func(id string, spec *specs.Spec, noRootContainer bool) *Container {
+		t.Helper()
+		bundle, cleanupBundle, err := testutil.SetupBundleDir(spec)
+		if err != nil {
+			t.Fatalf("error setting up bundle: %v", err)
+		}
+		t.Cleanup(cleanupBundle)
+		c, err := New(conf, Args{ID: id, Spec: spec, BundleDir: bundle, NoRootContainer: noRootContainer})
+		if err != nil {
+			t.Fatalf("error creating container %q: %v", id, err)
+		}
+		t.Cleanup(func() { c.Destroy() })
+		return c
+	}
+
+	// Prepare the sandbox and create the child before the checkpoint is known.
+	deferConf := *conf
+	deferConf.DeferCheckpoint = true
+	newSbID := testutil.RandomContainerID()
+	sb2 := newContainer(newSbID, noRootContainerSandboxSpec(), true /* noRootContainer */)
+	if err := sb2.Restore(&deferConf, "" /* imagePath */, false /* direct */, false /* background */, nil /* networkArgs */); err != nil {
+		t.Fatalf("error preparing deferred restore: %v", err)
+	}
+	sub2 := newContainer(testutil.RandomContainerID(), noRootContainerSubSpec(newSbID, "bash", "-c", script), false /* noRootContainer */)
+
+	// The child restore supplies the checkpoint.
+	if err := sub2.Restore(conf, dir, false /* direct */, background, nil /* networkArgs */); err != nil {
+		t.Fatalf("error restoring child: %v", err)
+	}
+	if err := sb2.WaitRestore(); err != nil {
+		t.Fatalf("error waiting for restore: %v", err)
+	}
+	if err := waitForFileNotEmpty(outputFile2); err != nil {
+		t.Fatalf("Failed to wait for output file: %v", err)
+	}
+	firstNum, err := readOutputNum(outputPath, 0)
+	if err != nil {
+		t.Fatalf("error with outputFile: %v", err)
+	}
+	if lastNum+1 != firstNum {
+		t.Errorf("error numbers not in order, previous: %d, next: %d", lastNum, firstNum)
+	}
+	for _, c := range []*Container{sb2, sub2} {
+		if got := c.State().Status; got != Running {
+			t.Errorf("container %q is %v after restore, want %v", c.ID, got, Running)
+		}
+	}
+}
+
+// TestCheckpointRestoreNoRootContainerDeferredUnassigned checks that a prepared
+// sandbox that never receives a checkpoint can be torn down, and that a child
+// start without the checkpoint is rejected.
+func TestCheckpointRestoreNoRootContainerDeferredUnassigned(t *testing.T) {
+	conf := testutil.TestConfig(t)
+	setupTestRootDir(t, conf)
+
+	sbSpec := noRootContainerSandboxSpec()
+	sbBundle, cleanupBundle, err := testutil.SetupBundleDir(sbSpec)
+	if err != nil {
+		t.Fatalf("error setting up bundle: %v", err)
+	}
+	defer cleanupBundle()
+	sbID := testutil.RandomContainerID()
+	sb, err := New(conf, Args{ID: sbID, Spec: sbSpec, BundleDir: sbBundle, NoRootContainer: true})
+	if err != nil {
+		t.Fatalf("error creating sandbox: %v", err)
+	}
+	deferConf := *conf
+	deferConf.DeferCheckpoint = true
+	if err := sb.Restore(&deferConf, "" /* imagePath */, false /* direct */, false /* background */, nil /* networkArgs */); err != nil {
+		t.Fatalf("error preparing deferred restore: %v", err)
+	}
+
+	subSpec := noRootContainerSubSpec(sbID, "sleep", "1000")
+	subBundle, cleanupSubBundle, err := testutil.SetupBundleDir(subSpec)
+	if err != nil {
+		t.Fatalf("error setting up bundle: %v", err)
+	}
+	defer cleanupSubBundle()
+	sub, err := New(conf, Args{ID: testutil.RandomContainerID(), Spec: subSpec, BundleDir: subBundle})
+	if err != nil {
+		t.Fatalf("error creating child: %v", err)
+	}
+	const want = "checkpoint has not been supplied"
+	if err := sub.Start(conf); err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("Start() = %v, want error containing %q", err, want)
+	}
+
+	if err := sub.Destroy(); err != nil {
+		t.Errorf("error destroying child: %v", err)
+	}
+	if err := sb.Destroy(); err != nil {
+		t.Errorf("error destroying sandbox: %v", err)
+	}
+	if sandboxRunning(t, sb) {
+		t.Errorf("sandbox %q still running after Destroy", sb.ID)
+	}
+}
