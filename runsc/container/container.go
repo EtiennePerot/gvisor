@@ -542,11 +542,19 @@ func (c *Container) Restore(conf *config.Config, imagePath string, direct, backg
 		if err := c.requireStatus("restore", Created); err != nil {
 			return err
 		}
-		// Bind the checkpoint before creating the Gofer, so that checkpoint
-		// loading overlaps the subcontainer setup.
-		if err := c.Sandbox.BindCheckpoint(conf, imagePath, direct, background); err != nil {
-			return err
+		// Bind the checkpoint while creating the Gofer, so that checkpoint
+		// initialization and loading overlap the subcontainer setup.
+		bound := make(chan error, 1)
+		go func() {
+			bound <- c.Sandbox.BindCheckpoint(conf, imagePath, direct, background)
+		}()
+		restoreSubcontainer := func(spec *specs.Spec, conf *config.Config, cid string, stdios, goferFiles, goferFilestores []*os.File, devIOFile *os.File, goferConfs []specutils.GoferMountConf) error {
+			if err := <-bound; err != nil {
+				return err
+			}
+			return c.Sandbox.RestoreSubcontainer(spec, conf, cid, stdios, goferFiles, goferFilestores, devIOFile, goferConfs)
 		}
+		return c.startImpl(conf, "restore", restore, restoreSubcontainer)
 	}
 	return c.startImpl(conf, "restore", restore, c.Sandbox.RestoreSubcontainer)
 }
