@@ -655,7 +655,9 @@ func isPrimitiveZero(typ reflect.Type) bool {
 		// value must be zero. Therefore this is primitive.
 		return true
 	case reflect.Struct:
-		return false
+		// A zero-size struct holds no data. Its StateSave and StateLoad
+		// are not called, so zero-size types must not define hooks.
+		return typ.Size() == 0
 	case reflect.Map:
 		// The isPrimitiveZero function is called only on zero-types to
 		// see if it's safe to serialize. Since a zero map has no

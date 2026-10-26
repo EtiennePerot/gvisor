@@ -50,6 +50,12 @@ func TestEmptyStruct(t *testing.T) {
 		typeOnlyEmptyStruct{},
 	})))
 
+	runTestCases(t, false, "fields", []any{
+		emptyStructFields{},
+		emptyStructFields{v: 1},
+		&emptyStructFields{v: 1},
+	})
+
 	// Ensuring empty struct aliasing works.
 	es := emptyStructPointer{new(struct{})}
 	runTestCases(t, false, "empty-struct-pointers", []any{

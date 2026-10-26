@@ -38,6 +38,19 @@ func (*typeOnlyEmptyStruct) StateFields() []string { return nil }
 type savableEmptyStruct struct{}
 
 // +stateify savable
+type nestedEmptyStruct struct {
+	savableEmptyStruct
+}
+
+// +stateify savable
+type emptyStructFields struct {
+	savableEmptyStruct
+	nested nestedEmptyStruct
+	array  [2]nestedEmptyStruct
+	v      int64
+}
+
+// +stateify savable
 type emptyStructPointer struct {
 	nothing *struct{}
 }
