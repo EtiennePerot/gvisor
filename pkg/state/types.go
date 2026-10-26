@@ -27,6 +27,7 @@ import (
 type typeEntry struct {
 	ID typeID
 	wire.Type
+	methods
 }
 
 // reconciledTypeEntry is a reconciled entry in the typeDatabase.
@@ -34,6 +35,7 @@ type reconciledTypeEntry struct {
 	wire.Type
 	LocalType  reflect.Type
 	FieldOrder []int
+	methods
 }
 
 // typeEncodeDatabase is an internal TypeInfo database for encoding.
@@ -121,8 +123,9 @@ func (tdb *typeEncodeDatabase) Lookup(typ reflect.Type) (*typeEntry, bool) {
 		// Register the new type.
 		tdb.lastID++
 		te = &typeEntry{
-			ID:   tdb.lastID,
-			Type: info,
+			ID:      tdb.lastID,
+			Type:    info,
+			methods: makeMethods(typ),
 		}
 
 		// All done.
@@ -212,6 +215,7 @@ func (tbd *typeDecodeDatabase) Lookup(id typeID, typ reflect.Type) *reconciledTy
 	rte := &reconciledTypeEntry{
 		Type:      info,
 		LocalType: typ,
+		methods:   makeMethods(typ),
 	}
 	// If there are zero or one fields, then we skip allocating the field
 	// slice. There is special handling for decoding in this case. If the

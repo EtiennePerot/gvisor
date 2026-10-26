@@ -373,6 +373,9 @@ func (ds *decodeState) decodeStruct(ods *objectDecodeState, obj reflect.Value, e
 
 	// Lookup the object type.
 	rte := ds.types.Lookup(typeID(encoded.TypeID), obj.Type())
+	if rte.LocalType != obj.Type() {
+		Failf("type ID %d is %v, not %v", encoded.TypeID, rte.LocalType, obj.Type())
+	}
 	ods.typ = typeID(encoded.TypeID)
 
 	// Invoke the loader.
@@ -384,11 +387,11 @@ func (ds *decodeState) decodeStruct(ods *objectDecodeState, obj reflect.Value, e
 	}
 	ds.stats.start(ods.typ)
 	defer ds.stats.done()
-	switch value := obj.Addr().Interface().(type) {
-	case SaverLoader:
-		value.StateLoad(ds.ctx, Source{internal: od})
-	case binaryObject:
-		loadBinary(value, rte.Name, Source{internal: od})
+	switch {
+	case rte.saverLoader != nil:
+		rte.saverLoaderAt(obj).StateLoad(ds.ctx, Source{internal: od})
+	case rte.binary != nil:
+		loadBinary(rte.binaryAt(obj), rte.Name, Source{internal: od})
 	}
 }
 

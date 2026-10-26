@@ -538,11 +538,11 @@ func (es *encodeState) encodeStruct(obj reflect.Value, dest *wire.Object) {
 	}
 	es.stats.start(te.ID)
 	defer es.stats.done()
-	switch value := obj.Addr().Interface().(type) {
-	case SaverLoader:
-		value.StateSave(Sink{internal: oe})
-	case binaryObject:
-		es.saveBinary(value, te.Name, Sink{internal: oe})
+	switch {
+	case te.saverLoader != nil:
+		te.saverLoaderAt(obj).StateSave(Sink{internal: oe})
+	case te.binary != nil:
+		es.saveBinary(te.binaryAt(obj), te.Name, Sink{internal: oe})
 	}
 }
 
