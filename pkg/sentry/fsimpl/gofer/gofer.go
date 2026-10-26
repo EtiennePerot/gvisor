@@ -31,6 +31,7 @@
 //	            dentry.handleMu
 //	              dentry.dataMu
 //	          filesystem.ancestryMu
+//	          filesystem.devMu
 //	          filesystem.inoMu
 //	          filesystem.inodeMu
 //	specialFileFD.mu
@@ -91,6 +92,7 @@ const (
 	moptDisableFileHandleSharing = "disable_file_handle_sharing"
 	moptDisableFifoOpen          = "disable_fifo_open"
 	moptCharDevicePolicy         = "char_device_policy"
+	moptVirtualInodeNumbers      = "virtual_inode_numbers"
 
 	// Directfs options.
 	moptDirectfs = "directfs"
@@ -211,7 +213,9 @@ type filesystem struct {
 	// clock is a realtime clock used to set timestamps in file operations.
 	clock ktime.Clock
 
-	// devMinor is the filesystem's minor device number. devMinor is immutable.
+	// devMinor is the filesystem's minor device number. It is used for
+	// synthetic files, and for all files if opts.virtualInodeNumbers.
+	// devMinor is immutable.
 	devMinor uint32
 
 	// root is the root dentry. root is immutable.
@@ -241,9 +245,22 @@ type filesystem struct {
 	syncableDentries dentryList
 	specialFileFDs   specialFDList
 
+	// devMinorByHostDev maps host device numbers, as given by inoKey.dev(),
+	// to minor device numbers assigned to files on those devices. It is only
+	// used if !opts.virtualInodeNumbers. Host device numbers may change
+	// across checkpoint/restore, so devMinorByHostDev is rebuilt on restore.
+	// devMinorByHostDev is protected by devMu.
+	devMu             sync.RWMutex `state:"nosave"`
+	devMinorByHostDev map[uint64]uint32
+
+	// savedDevMinors is devMinorByHostDev as saved at checkpoint. It is only
+	// set during restore; see restoreDevMinor.
+	savedDevMinors map[uint64]uint32 `state:"nosave"`
+
 	// inoByKey maps previously-observed device ID and host inode numbers to
-	// internal inode numbers assigned to those files. inoByKey is not preserved
-	// across checkpoint/restore because inode numbers may be reused between
+	// internal inode numbers assigned to those files. It is only used if
+	// opts.virtualInodeNumbers. inoByKey is not preserved across
+	// checkpoint/restore because inode numbers may be reused between
 	// different gofer processes, so inode numbers may be repeated for different
 	// files across checkpoint/restore. inoByKey is protected by inoMu.
 	inoMu    sync.Mutex        `state:"nosave"`
@@ -347,6 +364,12 @@ type filesystemOptions struct {
 	// dispatched to the sentry's device registry, passed through to the host
 	// via the gofer, or a combination of both.
 	charDevicePolicy charDevicePolicy
+
+	// If virtualInodeNumbers is true, files are assigned sequential inode
+	// numbers, recorded in filesystem.inoByKey, and the filesystem's device
+	// number. Otherwise files report their host inode numbers, and their host
+	// device numbers are mapped to sandbox-private device numbers.
+	virtualInodeNumbers bool
 
 	// directfs holds options for directfs mode.
 	directfs directfsOpts
@@ -605,6 +628,10 @@ func (fstype FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virt
 		delete(mopts, moptDirectfs)
 		fsopts.directfs.enabled = true
 	}
+	if _, ok := mopts[moptVirtualInodeNumbers]; ok {
+		delete(mopts, moptVirtualInodeNumbers)
+		fsopts.virtualInodeNumbers = true
+	}
 	// fsopts.regularFilesUseSpecialFileFD can only be enabled by specifying
 	// "cache=none".
 
@@ -645,6 +672,8 @@ func (fstype FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virt
 		devMinor:   devMinor,
 		inoByKey:   make(map[inoKey]uint64),
 		inodeByKey: make(map[inoKey]*inode),
+
+		devMinorByHostDev: make(map[uint64]uint32),
 	}
 
 	// Did the user configure a global dentry cache?
@@ -828,7 +857,11 @@ func (fs *filesystem) Release(ctx context.Context) {
 		}
 	}
 
-	fs.vfsfs.VirtualFilesystem().PutAnonBlockDevMinor(fs.devMinor)
+	vfsObj := fs.vfsfs.VirtualFilesystem()
+	vfsObj.PutAnonBlockDevMinor(fs.devMinor)
+	for _, devMinor := range fs.devMinorByHostDev {
+		vfsObj.PutAnonBlockDevMinor(devMinor)
+	}
 }
 
 // releaseExtraRefsRecursiveLocked traverses the tree with root d and
@@ -889,6 +922,11 @@ func inoKeyFromStat(stat *unix.Stat_t) inoKey {
 	}
 }
 
+// dev returns the host device number of the key.
+func (k inoKey) dev() uint64 {
+	return uint64(k.devMajor)<<32 | uint64(k.devMinor)
+}
+
 // inode represents a filesystem object.
 //
 // +stateify savable
@@ -914,7 +952,8 @@ type inode struct {
 	//   - Lock metadataMu and use atomic operations to update because we might
 	//     have atomic readers that don't hold the lock.
 	metadataMu sync.Mutex          `state:"nosave"`
-	ino        uint64              // immutable
+	ino        uint64              // immutable, except during restore
+	devMinor   uint32              // immutable, except during restore
 	mode       atomicbitops.Uint32 // type is immutable, perms are mutable
 	uid        atomicbitops.Uint32 // auth.KUID, but stored as raw uint32 for sync/atomic
 	gid        atomicbitops.Uint32 // auth.KGID, but ...
@@ -1251,7 +1290,12 @@ type dentryListElem struct {
 	dentryEntry
 }
 
+// inoFromKey returns the inode number of the file identified by key. With
+// virtual inode numbers, key must include the host device numbers.
 func (fs *filesystem) inoFromKey(key inoKey) uint64 {
+	if !fs.opts.virtualInodeNumbers {
+		return key.ino
+	}
 	fs.inoMu.Lock()
 	defer fs.inoMu.Unlock()
 
@@ -1261,6 +1305,113 @@ func (fs *filesystem) inoFromKey(key inoKey) uint64 {
 	ino := fs.nextIno()
 	fs.inoByKey[key] = ino
 	return ino
+}
+
+// devMinorFromKey returns the minor device number of the file identified by
+// key.
+func (fs *filesystem) devMinorFromKey(key inoKey) (uint32, error) {
+	if fs.opts.virtualInodeNumbers {
+		return fs.devMinor, nil
+	}
+	dev := key.dev()
+	fs.devMu.RLock()
+	devMinor, ok := fs.devMinorByHostDev[dev]
+	fs.devMu.RUnlock()
+	if ok {
+		return devMinor, nil
+	}
+	fs.devMu.Lock()
+	defer fs.devMu.Unlock()
+	if devMinor, ok := fs.devMinorByHostDev[dev]; ok {
+		return devMinor, nil
+	}
+	return fs.newDevMinorLocked(dev)
+}
+
+// Preconditions: fs.devMu is locked.
+func (fs *filesystem) newDevMinorLocked(dev uint64) (uint32, error) {
+	devMinor, err := fs.vfsfs.VirtualFilesystem().GetAnonBlockDevMinor()
+	if err != nil {
+		return 0, err
+	}
+	fs.devMinorByHostDev[dev] = devMinor
+	return devMinor, nil
+}
+
+func hasDevMinor(devMinorByHostDev map[uint64]uint32, devMinor uint32) bool {
+	for _, m := range devMinorByHostDev {
+		if m == devMinor {
+			return true
+		}
+	}
+	return false
+}
+
+// restoreDevMinor returns the minor device number for the host device of key,
+// which identifies a restored inode that had minor device number saved at
+// checkpoint. saved is reused if it was allocated to a host device at
+// checkpoint and no other host device has been mapped to it since, so that
+// device numbers are stable across checkpoint/restore when the host
+// filesystem is unchanged.
+func (fs *filesystem) restoreDevMinor(key inoKey, saved uint32) (uint32, error) {
+	dev := key.dev()
+	fs.devMu.Lock()
+	defer fs.devMu.Unlock()
+	if devMinor, ok := fs.devMinorByHostDev[dev]; ok {
+		return devMinor, nil
+	}
+	if !hasDevMinor(fs.savedDevMinors, saved) || hasDevMinor(fs.devMinorByHostDev, saved) {
+		return fs.newDevMinorLocked(dev)
+	}
+	fs.devMinorByHostDev[dev] = saved
+	return saved, nil
+}
+
+// releaseSavedDevMinors releases the minor device numbers allocated at
+// checkpoint that restore did not reuse.
+func (fs *filesystem) releaseSavedDevMinors() {
+	vfsObj := fs.vfsfs.VirtualFilesystem()
+	fs.devMu.Lock()
+	defer fs.devMu.Unlock()
+	for _, devMinor := range fs.savedDevMinors {
+		if !hasDevMinor(fs.devMinorByHostDev, devMinor) {
+			vfsObj.PutAnonBlockDevMinor(devMinor)
+		}
+	}
+	fs.savedDevMinors = nil
+}
+
+// restoreInoKey records the host identity of a restored inode, and updates
+// the inode and device numbers derived from it. Host inode and device
+// numbers are not preserved across checkpoint/restore, so:
+//
+//   - We must assume that the host filesystem did not change in a way that
+//     would invalidate dentries, since we can't revalidate dentries by
+//     checking inoKey.
+//
+//   - With virtual inode numbers, the new inoKey is associated with the
+//     existing i.ino. Otherwise, i.ino follows the host inode number.
+func (i *inode) restoreInoKey(key inoKey) error {
+	i.inoKey = key
+	if i.fs.opts.virtualInodeNumbers {
+		i.fs.inoMu.Lock()
+		i.fs.inoByKey[key] = i.ino
+		i.fs.inoMu.Unlock()
+	} else {
+		i.ino = key.ino
+		devMinor, err := i.fs.restoreDevMinor(key, i.devMinor)
+		if err != nil {
+			return err
+		}
+		i.devMinor = devMinor
+	}
+	// inodeByKey contains non-directory inodes only.
+	if i.fileType() != linux.S_IFDIR {
+		i.fs.inodeMu.Lock()
+		i.fs.inodeByKey[key] = i
+		i.fs.inodeMu.Unlock()
+	}
+	return nil
 }
 
 func (fs *filesystem) nextIno() uint64 {
@@ -1346,7 +1497,7 @@ func (d *dentry) statTo(stat *linux.Statx) {
 	stat.Ctime = linux.NsecToStatxTimestamp(d.inode.ctime.Load())
 	stat.Mtime = linux.NsecToStatxTimestamp(d.inode.mtime.Load())
 	stat.DevMajor = linux.UNNAMED_MAJOR
-	stat.DevMinor = d.inode.fs.devMinor
+	stat.DevMinor = d.inode.devMinor
 	stat.RdevMajor = d.inode.rdevMajor
 	stat.RdevMinor = d.inode.rdevMinor
 }
