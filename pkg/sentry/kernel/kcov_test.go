@@ -32,14 +32,14 @@ func TestKcovSaveRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 	var data bytes.Buffer
-	if _, err := state.Save(t.Context(), &data, &original); err != nil {
+	if err := state.Save(t.Context(), &data, &original, nil); err != nil {
 		t.Fatal(err)
 	}
 
 	mf := new(pgalloc.MemoryFile)
 	ctx := context.WithValue(t.Context(), pgalloc.CtxMemoryFile, mf)
 	var restored *Kcov
-	if _, err := state.Load(ctx, &data, &restored); err != nil {
+	if err := state.Load(ctx, &data, &restored, nil); err != nil {
 		t.Fatal(err)
 	}
 	if got, want := restored.mf, mf; got != want {

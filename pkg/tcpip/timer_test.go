@@ -48,11 +48,11 @@ func TestJobRestoreSchedulingState(t *testing.T) {
 			// retaining any live timer from the original graph.
 			original := [2]any{job, clock}
 			var buf bytes.Buffer
-			if _, err := state.Save(context.Background(), &buf, &original); err != nil {
+			if err := state.Save(context.Background(), &buf, &original, nil); err != nil {
 				t.Fatalf("Save: %s", err)
 			}
 			var restored [2]any
-			if _, err := state.Load(context.Background(), &buf, &restored); err != nil {
+			if err := state.Load(context.Background(), &buf, &restored, nil); err != nil {
 				t.Fatalf("Load: %s", err)
 			}
 			var restoredMu sync.Mutex

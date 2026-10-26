@@ -69,22 +69,18 @@ var allObjects = map[string]struct {
 }
 
 // gobSave is a version of save using gob (no stats available).
-func gobSave(_ context.Context, w io.Writer, v any) (_ state.Stats, err error) {
-	enc := gob.NewEncoder(w)
-	err = enc.Encode(v)
-	return
+func gobSave(_ context.Context, w io.Writer, v any, _ *state.Stats) error {
+	return gob.NewEncoder(w).Encode(v)
 }
 
 // gobLoad is a version of load using gob (no stats available).
-func gobLoad(_ context.Context, r io.Reader, v any) (_ state.Stats, err error) {
-	dec := gob.NewDecoder(r)
-	err = dec.Decode(v)
-	return
+func gobLoad(_ context.Context, r io.Reader, v any, _ *state.Stats) error {
+	return gob.NewDecoder(r).Decode(v)
 }
 
 var allAlgos = map[string]struct {
-	Save   func(context.Context, io.Writer, any) (state.Stats, error)
-	Load   func(context.Context, io.Reader, any) (state.Stats, error)
+	Save   func(context.Context, io.Writer, any, *state.Stats) error
+	Load   func(context.Context, io.Reader, any, *state.Stats) error
 	MaxPtr int
 }{
 	"state": {
@@ -104,7 +100,7 @@ func BenchmarkEncoding(b *testing.B) {
 				v := objInfo.New(1024)
 				b.ReportAllocs()
 				for b.Loop() {
-					if _, err := algoInfo.Save(context.Background(), io.Discard, v); err != nil {
+					if err := algoInfo.Save(context.Background(), io.Discard, v, nil); err != nil {
 						b.Errorf("save failed: %v", err)
 					}
 				}
@@ -119,14 +115,14 @@ func BenchmarkDecoding(b *testing.B) {
 			b.Run(fmt.Sprintf("%s/%s", objName, algoName), func(b *testing.B) {
 				v := objInfo.New(1024)
 				buf := new(bytes.Buffer)
-				if _, err := algoInfo.Save(context.Background(), buf, v); err != nil {
+				if err := algoInfo.Save(context.Background(), buf, v, nil); err != nil {
 					b.Errorf("save failed: %v", err)
 				}
 				b.ReportAllocs()
 				var r bytes.Reader
 				for b.Loop() {
 					r.Reset(buf.Bytes())
-					if _, err := algoInfo.Load(context.Background(), &r, v); err != nil {
+					if err := algoInfo.Load(context.Background(), &r, v, nil); err != nil {
 						b.Errorf("load failed: %v", err)
 					}
 				}

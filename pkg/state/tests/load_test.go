@@ -107,11 +107,11 @@ func checkDependencyCycle[T any](t *testing.T, root *T) {
 	var saved bytes.Buffer
 	// Keep the nodes below the special root object, which Load permits
 	// other objects to reference without waiting.
-	if _, err := state.Save(t.Context(), &saved, &root); err != nil {
+	if err := state.Save(t.Context(), &saved, &root, nil); err != nil {
 		t.Fatal(err)
 	}
 	var restored *T
-	if _, err := state.Load(t.Context(), &saved, &restored); err == nil || !strings.Contains(err.Error(), "dependency cycle:") {
+	if err := state.Load(t.Context(), &saved, &restored, nil); err == nil || !strings.Contains(err.Error(), "dependency cycle:") {
 		t.Fatalf("Load = %v, want a dependency cycle diagnostic", err)
 	}
 }

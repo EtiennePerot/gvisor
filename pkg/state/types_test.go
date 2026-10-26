@@ -43,14 +43,14 @@ func (*binaryFailure) UnmarshalBinary([]byte) error { return errBinary }
 
 func TestBinaryErrors(t *testing.T) {
 	var buf bytes.Buffer
-	if _, err := Save(t.Context(), &buf, &binaryFailure{failAppend: true}); !errors.Is(err, errBinary) {
+	if err := Save(t.Context(), &buf, &binaryFailure{failAppend: true}, nil); !errors.Is(err, errBinary) {
 		t.Fatalf("Save = %v, want %v", err, errBinary)
 	}
 	buf.Reset()
-	if _, err := Save(t.Context(), &buf, &binaryFailure{}); err != nil {
+	if err := Save(t.Context(), &buf, &binaryFailure{}, nil); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
-	if _, err := Load(t.Context(), &buf, &binaryFailure{}); !errors.Is(err, errBinary) {
+	if err := Load(t.Context(), &buf, &binaryFailure{}, nil); !errors.Is(err, errBinary) {
 		t.Fatalf("Load = %v, want %v", err, errBinary)
 	}
 }
@@ -103,7 +103,7 @@ func TestLazyValidation(t *testing.T) {
 		t.Skip("type metadata is validated eagerly")
 	}
 	var buf bytes.Buffer
-	_, err := Save(t.Context(), &buf, &duplicateFieldType{})
+	err := Save(t.Context(), &buf, &duplicateFieldType{}, nil)
 	if err == nil || !strings.Contains(err.Error(), "duplicate field") {
 		t.Fatalf("Save = %v, want duplicate field error", err)
 	}

@@ -151,8 +151,8 @@ type decodeState struct {
 	// leaves are consumed from the front and appended to the back.
 	leaves odsList
 
-	// stats tracks time data.
-	stats Stats
+	// stats tracks time data, if not nil.
+	stats *Stats
 }
 
 // lookup looks up an object in decodeState or returns nil if no such object
@@ -172,7 +172,7 @@ func (ds *decodeState) checkComplete(ods *objectDecodeState) bool {
 	}
 
 	// Track stats if relevant.
-	if ods.callbacks != nil && ods.typ != 0 {
+	if ds.stats != nil && ods.callbacks != nil && ods.typ != 0 {
 		ds.stats.start(ods.typ)
 		defer ds.stats.done()
 	}
@@ -382,8 +382,10 @@ func (ds *decodeState) decodeStruct(ods *objectDecodeState, obj reflect.Value, e
 		rte:     rte,
 		encoded: encoded,
 	}
-	ds.stats.start(ods.typ)
-	defer ds.stats.done()
+	if ds.stats != nil {
+		ds.stats.start(ods.typ)
+		defer ds.stats.done()
+	}
 	switch value := obj.Addr().Interface().(type) {
 	case SaverLoader:
 		value.StateLoad(ds.ctx, Source{internal: od})
@@ -627,10 +629,12 @@ func (ds *decodeState) findCycle() []*objectDecodeState {
 //
 // This function may panic and should be run in safely().
 func (ds *decodeState) Load(obj reflect.Value) {
-	ds.stats.init()
-	defer ds.stats.fini(func(id typeID) string {
-		return ds.types.LookupName(id)
-	})
+	if ds.stats != nil {
+		ds.stats.init()
+		defer ds.stats.fini(func(id typeID) string {
+			return ds.types.LookupName(id)
+		})
+	}
 
 	// Add the root object with ID 1.
 	_ = ds.addObject(1, obj)

@@ -456,7 +456,7 @@ func TestCheckpointCPUFeaturesMetadata(t *testing.T) {
 			// Kernel.saveToLocked saves the CPUID FeatureSet as the first object in
 			// the state stream (which Kernel.LoadFrom also relies on).
 			var fs cpuid.FeatureSet
-			if _, err := state.Load(context.Background(), r, &fs); err != nil {
+			if err := state.Load(context.Background(), r, &fs, nil); err != nil {
 				t.Fatalf("error loading CPUID FeatureSet from state file: %v", err)
 			}
 			if want := strings.Join(fs.FeatureNames(), ","); got != want {

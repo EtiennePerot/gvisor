@@ -124,11 +124,11 @@ func TestZeroSizedFieldPointers(t *testing.T) {
 					graph.v1, graph.v2 = graph.v2, graph.v1
 				}
 				var encoded bytes.Buffer
-				if _, err := state.Save(t.Context(), &encoded, &graph); err != nil {
+				if err := state.Save(t.Context(), &encoded, &graph, nil); err != nil {
 					t.Fatal(err)
 				}
 				var loaded system
-				if _, err := state.Load(t.Context(), &encoded, &loaded); err != nil {
+				if err := state.Load(t.Context(), &encoded, &loaded, nil); err != nil {
 					t.Fatal(err)
 				}
 				if order == "parent_first" {

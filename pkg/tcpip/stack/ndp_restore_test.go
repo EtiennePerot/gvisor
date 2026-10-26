@@ -76,13 +76,13 @@ func newNDPStackForRestore(t *testing.T, configs ipv6.NDPConfigurations) (*ndpDi
 func restoreNDPStack(t *testing.T, s *stack.Stack, disp *ndpDispatcher, delay time.Duration) (*stack.Stack, *faketime.ManualClock) {
 	t.Helper()
 	var buf bytes.Buffer
-	if _, err := state.Save(context.Background(), &buf, s); err != nil {
+	if err := state.Save(context.Background(), &buf, s, nil); err != nil {
 		t.Fatalf("Save: %s", err)
 	}
 	restored := stack.New(stack.Options{})
 	t.Cleanup(restored.Destroy)
 	ctx := context.WithValue(context.Background(), ndpDispatcherContextKey{}, disp)
-	if _, err := state.Load(ctx, &buf, restored); err != nil {
+	if err := state.Load(ctx, &buf, restored, nil); err != nil {
 		t.Fatalf("Load: %s", err)
 	}
 	clock := restored.Clock().(*faketime.ManualClock)

@@ -95,7 +95,8 @@ func TestTCPMigration(t *testing.T) {
 
 			// Save the stack.
 			var buf bytes.Buffer
-			saveStats, err := state.Save(context.Background(), &buf, c.Stack())
+			var saveStats state.Stats
+			err := state.Save(context.Background(), &buf, c.Stack(), &saveStats)
 			if err != nil {
 				t.Fatalf("Save failed: %v", err)
 			}
@@ -113,7 +114,8 @@ func TestTCPMigration(t *testing.T) {
 			restoredStack.SetAllowLiveTCPMigration(tc.allowMigration)
 			defer restoredStack.Destroy()
 
-			loadStats, err := state.Load(context.Background(), bytes.NewReader(buf.Bytes()), restoredStack)
+			var loadStats state.Stats
+			err = state.Load(context.Background(), bytes.NewReader(buf.Bytes()), restoredStack, &loadStats)
 			if err != nil {
 				t.Fatalf("Load failed: %v", err)
 			}
@@ -357,7 +359,8 @@ func TestRestoreListenWithPreexistingConnection(t *testing.T) {
 
 					// Save the stack.
 					var buf bytes.Buffer
-					saveStats, err := state.Save(context.Background(), &buf, c.Stack())
+					var saveStats state.Stats
+					err := state.Save(context.Background(), &buf, c.Stack(), &saveStats)
 					if err != nil {
 						t.Fatalf("Save failed: %v", err)
 					}
@@ -371,7 +374,8 @@ func TestRestoreListenWithPreexistingConnection(t *testing.T) {
 					restoredStack.SetAllowLiveTCPMigration(false)
 					defer restoredStack.Destroy()
 
-					loadStats, err := state.Load(context.Background(), bytes.NewReader(buf.Bytes()), restoredStack)
+					var loadStats state.Stats
+					err = state.Load(context.Background(), bytes.NewReader(buf.Bytes()), restoredStack, &loadStats)
 					if err != nil {
 						t.Fatalf("Load failed: %v", err)
 					}
@@ -556,7 +560,7 @@ func TestSaveAfterRestoreWithReplaceConfig(t *testing.T) {
 	c.Stack().SetRemoveConf(false)
 
 	var buf bytes.Buffer
-	if _, err := state.Save(context.Background(), &buf, c.Stack()); err != nil {
+	if err := state.Save(context.Background(), &buf, c.Stack(), nil); err != nil {
 		t.Fatalf("First Save failed: %v", err)
 	}
 	c.Stack().Resume()
@@ -567,7 +571,7 @@ func TestSaveAfterRestoreWithReplaceConfig(t *testing.T) {
 	})
 	defer restoredStack.Destroy()
 
-	if _, err := state.Load(context.Background(), bytes.NewReader(buf.Bytes()), restoredStack); err != nil {
+	if err := state.Load(context.Background(), bytes.NewReader(buf.Bytes()), restoredStack, nil); err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
 
@@ -612,7 +616,7 @@ func TestSaveAfterRestoreWithReplaceConfig(t *testing.T) {
 	// unpreserved NICs from tempStack or fail on unregisteredClock.
 	restoredStack.SetRemoveConf(false)
 	var buf2 bytes.Buffer
-	if _, err := state.Save(context.Background(), &buf2, restoredStack); err != nil {
+	if err := state.Save(context.Background(), &buf2, restoredStack, nil); err != nil {
 		t.Fatalf("Second Save after Restore+ReplaceConfig failed: %v", err)
 	}
 	restoredStack.Resume()
@@ -623,7 +627,7 @@ func TestSaveAfterRestoreWithReplaceConfig(t *testing.T) {
 	})
 	defer restoredStack2.Destroy()
 
-	if _, err := state.Load(context.Background(), bytes.NewReader(buf2.Bytes()), restoredStack2); err != nil {
+	if err := state.Load(context.Background(), bytes.NewReader(buf2.Bytes()), restoredStack2, nil); err != nil {
 		t.Fatalf("Second Load failed: %v", err)
 	}
 	restoredStack2.Restore()

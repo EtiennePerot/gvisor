@@ -107,8 +107,8 @@ type encodeState struct {
 	// copied into an immutable string before this buffer is reused.
 	binaryBuf []byte
 
-	// stats tracks time data.
-	stats Stats
+	// stats tracks time data, if not nil.
+	stats *Stats
 }
 
 // isSameSizeParent returns true if child is a field value or element within
@@ -536,8 +536,10 @@ func (es *encodeState) encodeStruct(obj reflect.Value, dest *wire.Object) {
 		es:      es,
 		encoded: s,
 	}
-	es.stats.start(te.ID)
-	defer es.stats.done()
+	if es.stats != nil {
+		es.stats.start(te.ID)
+		defer es.stats.done()
+	}
 	switch value := obj.Addr().Interface().(type) {
 	case SaverLoader:
 		value.StateSave(Sink{internal: oe})
@@ -756,10 +758,12 @@ func (es *encodeState) encodeObject(obj reflect.Value, how encodeStrategy, dest 
 
 // Save serializes the object graph rooted at obj.
 func (es *encodeState) Save(obj reflect.Value) {
-	es.stats.init()
-	defer es.stats.fini(func(id typeID) string {
-		return es.pendingTypes[id-1].Name
-	})
+	if es.stats != nil {
+		es.stats.init()
+		defer es.stats.fini(func(id typeID) string {
+			return es.pendingTypes[id-1].Name
+		})
+	}
 
 	// Resolve the first object, which should queue a pile of additional
 	// objects on the pending list. All queued objects should be fully

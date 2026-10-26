@@ -594,7 +594,7 @@ func TestProcessDeferredDecRefsClearsSliceForSave(t *testing.T) {
 	// state.Save clears the unused slice capacity (cap-len) so it does not
 	// traverse the destroyed dentry (whose test inode is not stateify-savable).
 	var buf bytes.Buffer
-	if _, err := state.Save(sys.Ctx, &buf, &fs.Filesystem); err != nil {
+	if err := state.Save(sys.Ctx, &buf, &fs.Filesystem, nil); err != nil {
 		t.Fatalf("state.Save(&fs.Filesystem) failed: %v", err)
 	}
 }

@@ -87,8 +87,9 @@ func (e *ErrState) Unwrap() error {
 	return e.err
 }
 
-// Save saves the given object state.
-func Save(ctx context.Context, w io.Writer, rootPtr any) (Stats, error) {
+// Save saves the given object state. If stats is not nil, Save collects
+// timing data into it.
+func Save(ctx context.Context, w io.Writer, rootPtr any, stats *Stats) error {
 	// Create the encoding state.
 	es := encodeState{
 		ctx:            ctx,
@@ -97,30 +98,33 @@ func Save(ctx context.Context, w io.Writer, rootPtr any) (Stats, error) {
 		zeroValues:     make(map[reflect.Type]*objectEncodeState),
 		pending:        make(map[objectID]*objectEncodeState),
 		encodedStructs: make(map[reflect.Value]*wire.Struct),
+		stats:          stats,
 	}
 
 	// Perform the encoding.
 	err := safely(func() {
 		es.Save(reflect.ValueOf(rootPtr).Elem())
 	})
-	return es.stats, err
+	return err
 }
 
-// Load loads a checkpoint.
-func Load(ctx context.Context, r io.Reader, rootPtr any) (Stats, error) {
+// Load loads a checkpoint. If stats is not nil, Load collects timing data
+// into it.
+func Load(ctx context.Context, r io.Reader, rootPtr any, stats *Stats) error {
 	// Create the decoding state.
 	ds := decodeState{
 		ctx:      ctx,
 		r:        wire.Reader{Reader: r},
 		types:    makeTypeDecodeDatabase(),
 		deferred: make(map[objectID]wire.Object),
+		stats:    stats,
 	}
 
 	// Attempt our decode.
 	err := safely(func() {
 		ds.Load(reflect.ValueOf(rootPtr).Elem())
 	})
-	return ds.stats, err
+	return err
 }
 
 // Sink is used for Type.StateSave.

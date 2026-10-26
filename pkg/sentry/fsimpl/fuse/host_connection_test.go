@@ -446,11 +446,11 @@ func TestHostConnectionAbortedOnSave(t *testing.T) {
 	}
 
 	var saved bytes.Buffer
-	if _, err := state.Save(s.Ctx, &saved, conn); err != nil {
+	if err := state.Save(s.Ctx, &saved, conn, nil); err != nil {
 		t.Fatalf("state.Save: %v", err)
 	}
 	var restored connection
-	if _, err := state.Load(s.Ctx, &saved, &restored); err != nil {
+	if err := state.Load(s.Ctx, &saved, &restored, nil); err != nil {
 		t.Fatalf("state.Load: %v", err)
 	}
 	defer restored.DecRef(s.Ctx)

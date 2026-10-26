@@ -768,10 +768,10 @@ func doSaveAndLoad(t *testing.T, toSave, toLoad *Buffer) {
 	t.Helper()
 	var buf bytes.Buffer
 	ctx := context.Background()
-	if _, err := state.Save(ctx, &buf, toSave); err != nil {
+	if err := state.Save(ctx, &buf, toSave, nil); err != nil {
 		t.Fatal("state.Save:", err)
 	}
-	if _, err := state.Load(ctx, bytes.NewReader(buf.Bytes()), toLoad); err != nil {
+	if err := state.Load(ctx, bytes.NewReader(buf.Bytes()), toLoad, nil); err != nil {
 		t.Fatal("state.Load:", err)
 	}
 }

@@ -76,7 +76,8 @@ func runTestCases(t *testing.T, shouldFail bool, prefix string, objects []any) {
 			saveBuffer := &bytes.Buffer{}
 			saveObjectPtr := reflect.New(reflect.TypeOf(root))
 			saveObjectPtr.Elem().Set(reflect.ValueOf(root))
-			saveStats, err := state.Save(context.Background(), saveBuffer, saveObjectPtr.Interface())
+			var saveStats state.Stats
+			err := state.Save(context.Background(), saveBuffer, saveObjectPtr.Interface(), &saveStats)
 			if err != nil {
 				if shouldFail {
 					return
@@ -106,7 +107,8 @@ func runTestCases(t *testing.T, shouldFail bool, prefix string, objects []any) {
 
 			// Load a new copy of the object.
 			loadObjectPtr := reflect.New(reflect.TypeOf(root))
-			loadStats, err := state.Load(context.Background(), bytes.NewReader(saveBuffer.Bytes()), loadObjectPtr.Interface())
+			var loadStats state.Stats
+			err = state.Load(context.Background(), bytes.NewReader(saveBuffer.Bytes()), loadObjectPtr.Interface(), &loadStats)
 			if err != nil {
 				if shouldFail {
 					return
@@ -135,11 +137,11 @@ func runTestCases(t *testing.T, shouldFail bool, prefix string, objects []any) {
 			// we can't restore.
 			l := saveBuffer.Len()
 			halfReader := bytes.NewReader(saveBuffer.Bytes()[:l/2])
-			if _, err := state.Load(context.Background(), halfReader, loadObjectPtr.Interface()); err == nil {
+			if err := state.Load(context.Background(), halfReader, loadObjectPtr.Interface(), nil); err == nil {
 				t.Errorf("Load with half bytes succeeded unexpectedly.")
 			}
 			missingByteReader := bytes.NewReader(saveBuffer.Bytes()[:l-1])
-			if _, err := state.Load(context.Background(), missingByteReader, loadObjectPtr.Interface()); err == nil {
+			if err := state.Load(context.Background(), missingByteReader, loadObjectPtr.Interface(), nil); err == nil {
 				t.Errorf("Load with missing byte succeeded unexpectedly.")
 			}
 		})

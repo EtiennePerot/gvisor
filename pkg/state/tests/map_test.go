@@ -84,11 +84,11 @@ func TestMapNaNKeys(t *testing.T) {
 	original[nan] = 1
 	original[nan] = 2
 	var buf bytes.Buffer
-	if _, err := state.Save(t.Context(), &buf, &original); err != nil {
+	if err := state.Save(t.Context(), &buf, &original, nil); err != nil {
 		t.Fatalf("Save failed: %v", err)
 	}
 	var restored map[float64]int
-	if _, err := state.Load(t.Context(), &buf, &restored); err != nil {
+	if err := state.Load(t.Context(), &buf, &restored, nil); err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
 	want := map[int]uint64{1: nanBits, 2: nanBits, 3: math.Float64bits(1)}
@@ -151,7 +151,7 @@ func loadMapEntries(t *testing.T, dst any, entries *wire.Map, objects ...wire.Ob
 		wire.Save(&w, wire.Uint(i+2))
 		wire.Save(&w, object)
 	}
-	if _, err := state.Load(t.Context(), &buf, dst); err != nil {
+	if err := state.Load(t.Context(), &buf, dst, nil); err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 }
@@ -274,11 +274,11 @@ func TestMapLoadHookReceivers(t *testing.T) {
 			original := reflect.New(reflect.TypeOf(test.value))
 			original.Elem().Set(reflect.ValueOf(test.value))
 			var buf bytes.Buffer
-			if _, err := state.Save(ctx, &buf, original.Interface()); err != nil {
+			if err := state.Save(ctx, &buf, original.Interface(), nil); err != nil {
 				t.Fatalf("Save: %v", err)
 			}
 			loaded := reflect.New(original.Elem().Type())
-			if _, err := state.Load(ctx, &buf, loaded.Interface()); err != nil {
+			if err := state.Load(ctx, &buf, loaded.Interface(), nil); err != nil {
 				t.Fatalf("Load: %v", err)
 			}
 			if got, want := loaded.Elem().Interface(), test.value; !reflect.DeepEqual(got, want) {

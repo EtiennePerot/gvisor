@@ -784,7 +784,7 @@ func savePrivateMFs(ctx context.Context, w io.Writer, mfsToSave map[checkpoint.R
 		meta.owners = append(meta.owners, fsID)
 	}
 	// Save the metadata.
-	if _, err := state.Save(ctx, w, &meta); err != nil {
+	if err := state.Save(ctx, w, &meta, nil); err != nil {
 		return err
 	}
 	// Followed by the private memory files in order.
@@ -895,7 +895,7 @@ func (k *Kernel) saveToLocked(ctx context.Context, stateFile, pagesMetadata io.W
 	//
 	// N.B. This will also be saved along with the full kernel save below.
 	cpuidStart := time.Now()
-	if _, err := state.Save(ctx, stateFile, &k.featureSet); err != nil {
+	if err := state.Save(ctx, stateFile, &k.featureSet, nil); err != nil {
 		return err
 	}
 	log.Infof("CPUID save took [%s].", time.Since(cpuidStart))
@@ -915,11 +915,13 @@ func (k *Kernel) saveToLocked(ctx context.Context, stateFile, pagesMetadata io.W
 
 	// Save the kernel state.
 	kernelStart := time.Now()
-	stats, err := state.Save(ctx, stateFile, k)
-	if err != nil {
+	stats := debugStateStats()
+	if err := state.Save(ctx, stateFile, k, stats); err != nil {
 		return err
 	}
-	log.Infof("Kernel save stats: %s", stats.String())
+	if stats != nil {
+		log.Debugf("Kernel save stats: %s", stats.String())
+	}
 	log.Infof("Kernel save took [%s].", time.Since(kernelStart))
 
 	if fsOpts != nil {
@@ -1084,6 +1086,15 @@ func (k *Kernel) invalidateUnsavableMappings(ctx context.Context) error {
 	return nil
 }
 
+// debugStateStats returns a state.Stats to collect if debug logging is
+// enabled, or nil otherwise.
+func debugStateStats() *state.Stats {
+	if log.IsLogging(log.Debug) {
+		return &state.Stats{}
+	}
+	return nil
+}
+
 // LoadFrom restores k from r.
 //
 // Preconditions: k is not in use.
@@ -1103,7 +1114,7 @@ func (k *Kernel) LoadFrom(ctx context.Context, r io.Reader, asyncMFLoader *Async
 	// N.B. This was also saved along with the full kernel below, so we
 	// don't need to explicitly install it in the Kernel.
 	cpuidStart := time.Now()
-	if _, err := state.Load(ctx, r, &k.featureSet); err != nil {
+	if err := state.Load(ctx, r, &k.featureSet, nil); err != nil {
 		return err
 	}
 	log.Infof("CPUID load took [%s].", time.Since(cpuidStart))
@@ -1124,11 +1135,13 @@ func (k *Kernel) LoadFrom(ctx context.Context, r io.Reader, asyncMFLoader *Async
 
 	// Load the kernel state.
 	kernelStart := time.Now()
-	stats, err := state.Load(ctx, r, k)
-	if err != nil {
+	stats := debugStateStats()
+	if err := state.Load(ctx, r, k, stats); err != nil {
 		return err
 	}
-	log.Infof("Kernel load stats: %s", stats.String())
+	if stats != nil {
+		log.Debugf("Kernel load stats: %s", stats.String())
+	}
 	log.Infof("Kernel load took [%s].", time.Since(kernelStart))
 	timeline.Reached("Kernel loaded")
 
@@ -1202,7 +1215,7 @@ func (k *Kernel) ExtractRootfsUpperLayer(ctx context.Context, r io.Reader, async
 
 	// Load the pre-saved CPUID FeatureSet.
 	cpuidStart := time.Now()
-	if _, err := state.Load(ctx, r, &k.featureSet); err != nil {
+	if err := state.Load(ctx, r, &k.featureSet, nil); err != nil {
 		return err
 	}
 	log.Infof("CPUID load took [%s].", time.Since(cpuidStart))
@@ -1211,11 +1224,13 @@ func (k *Kernel) ExtractRootfsUpperLayer(ctx context.Context, r io.Reader, async
 	defer fdnotifier.Resume()
 
 	kernelStart := time.Now()
-	stats, err := state.Load(ctx, r, k)
-	if err != nil {
+	stats := debugStateStats()
+	if err := state.Load(ctx, r, k, stats); err != nil {
 		return err
 	}
-	log.Infof("Kernel load stats: %s", stats.String())
+	if stats != nil {
+		log.Debugf("Kernel load stats: %s", stats.String())
+	}
 	log.Infof("Kernel load took [%s].", time.Since(kernelStart))
 
 	if asyncMFLoader == nil {

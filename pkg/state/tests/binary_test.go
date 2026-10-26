@@ -52,11 +52,11 @@ func TestBinaryTime(t *testing.T) {
 			original := timeContainer{timestamp: timestamp}
 			original.pointer = &original.timestamp
 			var buf bytes.Buffer
-			if _, err := state.Save(t.Context(), &buf, &original); err != nil {
+			if err := state.Save(t.Context(), &buf, &original, nil); err != nil {
 				t.Fatalf("Save: %v", err)
 			}
 			var restored timeContainer
-			if _, err := state.Load(t.Context(), &buf, &restored); err != nil {
+			if err := state.Load(t.Context(), &buf, &restored, nil); err != nil {
 				t.Fatalf("Load: %v", err)
 			}
 			if !restored.timestamp.Equal(timestamp) {

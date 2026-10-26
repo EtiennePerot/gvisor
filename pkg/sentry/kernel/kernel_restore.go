@@ -268,7 +268,7 @@ func (w *CheckpointWaitable) signal(gen CheckpointGeneration, err error) {
 func loadPrivateMemoryFiles(ctx context.Context, r io.Reader, mfmap map[checkpoint.ResourceID]*pgalloc.MemoryFile, fsCheckpointed map[checkpoint.ResourceID]struct{}, opts *pgalloc.LoadOpts) error {
 	// Load the metadata.
 	var meta privateMemoryFileMetadata
-	if _, err := state.Load(ctx, r, &meta); err != nil {
+	if err := state.Load(ctx, r, &meta, nil); err != nil {
 		return err
 	}
 	// Ensure that it is consistent with mfmap, unless we are restoring from

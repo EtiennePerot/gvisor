@@ -142,7 +142,7 @@ func BenchmarkCheckpointFile(b *testing.B) {
 			w := &countingWriter{}
 			b.StartTimer()
 			cpu += cpuTime(b, func() error {
-				_, err := state.Save(ctx, w, k)
+				err := state.Save(ctx, w, k, nil)
 				return err
 			})
 			b.StopTimer()
@@ -363,12 +363,12 @@ func loadKernel(ctx context.Context, plat platform.Platform, data []byte) (*kern
 	}
 	r := bufio.NewReader(sr)
 	var fs cpuid.FeatureSet
-	if _, err := state.Load(ctx, r, &fs); err != nil {
+	if err := state.Load(ctx, r, &fs, nil); err != nil {
 		return nil, fmt.Errorf("loading the CPUID feature set: %w (the benchmark must be built from the same tree as the runtime)", err)
 	}
 	k := &kernel.Kernel{Platform: plat}
 	k.SetMemoryFile(pgalloc.MemoryFileFromContext(ctx))
-	if _, err := state.Load(ctx, r, k); err != nil {
+	if err := state.Load(ctx, r, k, nil); err != nil {
 		return nil, fmt.Errorf("loading the kernel: %w (the benchmark must be built from the same tree as the runtime)", err)
 	}
 	return k, nil
