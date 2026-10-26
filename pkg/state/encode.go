@@ -97,11 +97,17 @@ type encodeState struct {
 	// not actually occur until the full object graph is computed.
 	pending map[objectID]*objectEncodeState
 
-	// encodedStructs maps reflect.Values representing structs to previous
-	// encodings of those structs. This is necessary to avoid duplicate calls
-	// to SaverLoader.StateSave() that may result in multiple calls to
-	// Sink.SaveValue() for a given field, resulting in object duplication.
-	encodedStructs map[reflect.Value]*wire.Struct
+	// replaced maps encoded objects that a containing object replaced to
+	// their encodings. The containing object reuses these encodings. This
+	// avoids duplicate calls to SaverLoader.StateSave() that may result in
+	// multiple calls to Sink.SaveValue() for a given field, resulting in
+	// object duplication.
+	replaced map[replacedKey]wire.Object
+
+	// boxed maps struct and array values held by interfaces to their
+	// encodings. Copies of an interface share the boxed value, so it is
+	// saved once.
+	boxed map[reflect.Value]*wire.Interface
 
 	// binaryBuf holds temporary BinaryAppender output. Each saved value is
 	// copied into an immutable string before this buffer is reused.
@@ -109,6 +115,12 @@ type encodeState struct {
 
 	// stats tracks time data.
 	stats Stats
+}
+
+// replacedKey identifies an addressable value.
+type replacedKey struct {
+	addr uintptr
+	typ  reflect.Type
 }
 
 // isSameSizeParent returns true if child is a field value or element within
@@ -301,6 +313,9 @@ func (es *encodeState) resolve(obj reflect.Value, ref *wire.Ref) {
 				typ:  existing.obj.Type(),
 				refs: existing.refs,
 			})
+			if existing.encoded != nil {
+				es.replaced[replacedKey{seg.Start(), existing.obj.Type()}] = existing.encoded
+			}
 			delete(es.pending, existing.id)
 			es.deferred.Remove(existing)
 			gap = es.values.Remove(seg)
@@ -487,13 +502,8 @@ func (oe *objectEncoder) save(slot int, obj reflect.Value) {
 
 // encodeStruct encodes a composite object.
 func (es *encodeState) encodeStruct(obj reflect.Value, dest *wire.Object) {
-	if s, ok := es.encodedStructs[obj]; ok {
-		*dest = s
-		return
-	}
 	s := &wire.Struct{}
 	*dest = s
-	es.encodedStructs[obj] = s
 
 	// Ensure that the obj is addressable. There are two cases when it is
 	// not. First, is when this is dispatched via SaveValue. Second, when
@@ -613,12 +623,23 @@ func (es *encodeState) encodeInterface(obj reflect.Value, dest *wire.Object) {
 		return
 	}
 
+	k := obj.Kind()
+	if k == reflect.Struct || k == reflect.Array {
+		if i, ok := es.boxed[obj]; ok {
+			*dest = i
+			return
+		}
+	}
+
 	// Encode underlying object.
 	i := &wire.Interface{
 		Type: es.findType(obj.Type()),
 	}
 	*dest = i
 	es.encodeObject(obj, encodeAsValue, &i.Value)
+	if k == reflect.Struct || k == reflect.Array {
+		es.boxed[obj] = i
+	}
 }
 
 // isPrimitive returns true if this is a primitive object, or a composite
@@ -687,6 +708,15 @@ func (es *encodeState) encodeObject(obj reflect.Value, how encodeStrategy, dest 
 	if how == encodeDefault && isPrimitiveZero(obj.Type()) && obj.IsZero() {
 		*dest = wire.Nil{}
 		return
+	}
+	if len(es.replaced) != 0 && obj.CanAddr() {
+		switch obj.Kind() {
+		case reflect.Struct, reflect.Array, reflect.Interface:
+			if e, ok := es.replaced[replacedKey{obj.UnsafeAddr(), obj.Type()}]; ok {
+				*dest = e
+				return
+			}
+		}
 	}
 	switch obj.Kind() {
 	case reflect.Ptr: // Fast path: first.

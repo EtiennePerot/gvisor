@@ -105,6 +105,63 @@ func TestEmbeddedPointers(t *testing.T) {
 	})
 }
 
+func TestReplacedObjectSavedOnce(t *testing.T) {
+	// Each inner object points to its container. The container replaces the
+	// inner object while the inner object is being encoded, then the
+	// container is encoded.
+	oc := &outerCycle{inner: innerCycle{counted: countedSave{v: 1}}}
+	oc.inner.outer = oc
+	oci := &outerCycleIface{}
+	oci.inner = innerCycleIface{counted: countedSave{v: 2}, outer: oci}
+	for _, test := range []struct {
+		name string
+		root any
+	}{
+		{"struct", &oc.inner},
+		{"interface", &oci.inner},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			saveCount = 0
+			root := system{v1: test.root}
+			var encoded bytes.Buffer
+			if _, err := state.Save(t.Context(), &encoded, &root); err != nil {
+				t.Fatal(err)
+			}
+			if saveCount != 1 {
+				t.Errorf("saveV called %d times, want 1", saveCount)
+			}
+			var loaded system
+			if _, err := state.Load(t.Context(), &encoded, &loaded); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestSharedInterfaceValueSavedOnce(t *testing.T) {
+	// Copying an interface shares its boxed value.
+	for _, test := range []struct {
+		name  string
+		value any
+		want  int
+	}{
+		{"struct", countedSave{v: 1}, 1},
+		{"array", [2]countedSave{{v: 1}, {v: 2}}, 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := countedIfacePair{a: test.value, b: test.value}
+			saveCount = 0
+			var encoded bytes.Buffer
+			if _, err := state.Save(t.Context(), &encoded, &root); err != nil {
+				t.Fatal(err)
+			}
+			if saveCount != test.want {
+				t.Errorf("saveV called %d times, want %d", saveCount, test.want)
+			}
+		})
+	}
+}
+
 func TestZeroSizedFieldPointers(t *testing.T) {
 	for _, test := range []struct {
 		name  string

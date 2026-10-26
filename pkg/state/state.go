@@ -91,12 +91,13 @@ func (e *ErrState) Unwrap() error {
 func Save(ctx context.Context, w io.Writer, rootPtr any) (Stats, error) {
 	// Create the encoding state.
 	es := encodeState{
-		ctx:            ctx,
-		w:              wire.Writer{Writer: w},
-		types:          makeTypeEncodeDatabase(),
-		zeroValues:     make(map[reflect.Type]*objectEncodeState),
-		pending:        make(map[objectID]*objectEncodeState),
-		encodedStructs: make(map[reflect.Value]*wire.Struct),
+		ctx:        ctx,
+		w:          wire.Writer{Writer: w},
+		types:      makeTypeEncodeDatabase(),
+		zeroValues: make(map[reflect.Type]*objectEncodeState),
+		pending:    make(map[objectID]*objectEncodeState),
+		replaced:   make(map[replacedKey]wire.Object),
+		boxed:      make(map[reflect.Value]*wire.Interface),
 	}
 
 	// Perform the encoding.

@@ -140,3 +140,48 @@ type zeroSizedFields struct {
 	array     [2]zeroSizedArrayElement
 	value     int64
 }
+
+// saveCount counts calls to countedSave.saveV.
+var saveCount int
+
+// +stateify savable
+type countedSave struct {
+	v int64 `state:".(*savedFieldValue)"`
+}
+
+func (c *countedSave) saveV() *savedFieldValue {
+	saveCount++
+	return &savedFieldValue{c.v}
+}
+
+func (c *countedSave) loadV(_ context.Context, sfv *savedFieldValue) {
+	c.v = sfv.v
+}
+
+// +stateify savable
+type outerCycle struct {
+	inner innerCycle
+}
+
+// +stateify savable
+type innerCycle struct {
+	counted countedSave
+	outer   *outerCycle
+}
+
+// +stateify savable
+type outerCycleIface struct {
+	inner any
+}
+
+// +stateify savable
+type innerCycleIface struct {
+	counted countedSave
+	outer   *outerCycleIface
+}
+
+// +stateify savable
+type countedIfacePair struct {
+	a any
+	b any
+}
