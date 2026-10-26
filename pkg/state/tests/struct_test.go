@@ -105,6 +105,20 @@ func TestEmbeddedPointers(t *testing.T) {
 	})
 }
 
+func TestSingleField(t *testing.T) {
+	values := []any{
+		inner{},
+		inner{1},
+		outerSame{},
+		outerSame{inner{2}},
+		[2]outerSame{{}, {inner{3}}},
+		map[inner]outerSame{{}: {inner{4}}, {5}: {}},
+	}
+	runTestCases(t, false, "plain", values)
+	runTestCases(t, false, "pointers", pointersTo(values))
+	runTestCases(t, false, "interfaces", interfacesTo(values))
+}
+
 func TestZeroSizedFieldPointers(t *testing.T) {
 	for _, test := range []struct {
 		name  string

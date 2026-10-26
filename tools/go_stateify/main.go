@@ -409,10 +409,11 @@ func main() {
 					// the code from compiling if a custom beforeSave was defined in a
 					// file not provided to this binary and prevents inherited methods
 					// from being called multiple times by overriding them.
-					if _, ok := simpleMethods[method{
+					_, hasBeforeSave := simpleMethods[method{
 						typeName:   ts.Name.Name,
 						methodName: "beforeSave",
-					}]; !ok && generateSaverLoader {
+					}]
+					if !hasBeforeSave && generateSaverLoader {
 						fmt.Fprintf(outputFile, "func (%s *%s) beforeSave() {}\n\n", recv, ts.Name.Name)
 					}
 
@@ -458,6 +459,19 @@ func main() {
 							fmt.Fprintf(outputFile, "	stateSourceObject.AfterLoad(func () { %s.afterLoad(ctx) })\n", recv)
 						}
 						fmt.Fprintf(outputFile, "}\n\n")
+					}
+
+					// Mark types whose state methods only save and load
+					// one field, so that pkg/state can access it directly.
+					normalFields, otherFields := 0, 0
+					scanFields(x, scanFunctions{
+						zerovalue: func(string) { otherFields++ },
+						normal:    func(string) { normalFields++ },
+						wait:      func(string) { otherFields++ },
+						value:     func(string, string) { otherFields++ },
+					})
+					if generateSaverLoader && !hasBeforeSave && !hasAfterLoad && normalFields == 1 && otherFields == 0 {
+						fmt.Fprintf(outputFile, "func (%s *%s) StateSingleField() {}\n\n", recv, ts.Name.Name)
 					}
 
 					// Add to our registration.

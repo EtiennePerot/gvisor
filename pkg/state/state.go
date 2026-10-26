@@ -216,6 +216,14 @@ type SaverLoader interface {
 	StateLoad(context.Context, Source)
 }
 
+// singleFieldSaverLoader is a SaverLoader whose StateSave and StateLoad only
+// call Sink.Save and Source.Load for its one field. The encoder and decoder
+// access this field directly instead.
+type singleFieldSaverLoader interface {
+	SaverLoader
+	StateSingleField()
+}
+
 // Source is used for Type.StateLoad.
 type Source struct {
 	internal objectDecoder

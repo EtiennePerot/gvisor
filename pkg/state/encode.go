@@ -487,13 +487,28 @@ func (oe *objectEncoder) save(slot int, obj reflect.Value) {
 
 // encodeStruct encodes a composite object.
 func (es *encodeState) encodeStruct(obj reflect.Value, dest *wire.Object) {
-	if s, ok := es.encodedStructs[obj]; ok {
-		*dest = s
-		return
+	// Look the type up in the database.
+	te, ok := es.types.Lookup(obj.Type())
+	if te != nil && !ok {
+		// Queue the type to be serialized.
+		es.pendingTypes = append(es.pendingTypes, te.Type)
+	}
+
+	// The field of a singleFieldSaverLoader is encoded directly, without a
+	// StateSave call. Encoding it again is harmless, so it skips
+	// encodedStructs.
+	singleField := te != nil && te.singleField != nil
+	if !singleField {
+		if s, ok := es.encodedStructs[obj]; ok {
+			*dest = s
+			return
+		}
 	}
 	s := &wire.Struct{}
 	*dest = s
-	es.encodedStructs[obj] = s
+	if !singleField {
+		es.encodedStructs[obj] = s
+	}
 
 	// Ensure that the obj is addressable. There are two cases when it is
 	// not. First, is when this is dispatched via SaveValue. Second, when
@@ -505,8 +520,6 @@ func (es *encodeState) encodeStruct(obj reflect.Value, dest *wire.Object) {
 		obj = localObj.Elem()
 	}
 
-	// Look the type up in the database.
-	te, ok := es.types.Lookup(obj.Type())
 	if te == nil {
 		if obj.NumField() == 0 {
 			// Allow unregistered anonymous, empty structs. This
@@ -524,13 +537,14 @@ func (es *encodeState) encodeStruct(obj reflect.Value, dest *wire.Object) {
 		// We need a SaverLoader for struct types.
 		Failf("struct %T does not implement SaverLoader", obj.Interface())
 	}
-	if !ok {
-		// Queue the type to be serialized.
-		es.pendingTypes = append(es.pendingTypes, te.Type)
+
+	s.TypeID = wire.TypeID(te.ID)
+	if singleField {
+		es.encodeObject(reflectValueRWAddr(obj.FieldByIndex(te.singleField)).Elem(), encodeDefault, s.Field(0))
+		return
 	}
 
 	// Invoke the provided saver.
-	s.TypeID = wire.TypeID(te.ID)
 	s.Alloc(len(te.Fields))
 	oe := objectEncoder{
 		es:      es,

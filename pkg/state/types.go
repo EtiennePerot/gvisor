@@ -27,6 +27,9 @@ import (
 type typeEntry struct {
 	ID typeID
 	wire.Type
+
+	// singleField is the field index from singleFieldIndex.
+	singleField []int
 }
 
 // reconciledTypeEntry is a reconciled entry in the typeDatabase.
@@ -34,6 +37,24 @@ type reconciledTypeEntry struct {
 	wire.Type
 	LocalType  reflect.Type
 	FieldOrder []int
+
+	// SingleField is the field index from singleFieldIndex.
+	SingleField []int
+}
+
+var singleFieldSaverLoaderType = reflect.TypeFor[singleFieldSaverLoader]()
+
+// singleFieldIndex returns the index of the saved field of typ if typ is a
+// singleFieldSaverLoader, or nil otherwise.
+func singleFieldIndex(typ reflect.Type, fields []string) []int {
+	if len(fields) != 1 || typ.Kind() != reflect.Struct || !reflect.PointerTo(typ).Implements(singleFieldSaverLoaderType) {
+		return nil
+	}
+	f, ok := typ.FieldByName(fields[0])
+	if !ok {
+		return nil
+	}
+	return f.Index
 }
 
 // typeEncodeDatabase is an internal TypeInfo database for encoding.
@@ -121,8 +142,9 @@ func (tdb *typeEncodeDatabase) Lookup(typ reflect.Type) (*typeEntry, bool) {
 		// Register the new type.
 		tdb.lastID++
 		te = &typeEntry{
-			ID:   tdb.lastID,
-			Type: info,
+			ID:          tdb.lastID,
+			Type:        info,
+			singleField: singleFieldIndex(typ, info.Fields),
 		}
 
 		// All done.
@@ -228,6 +250,7 @@ func (tbd *typeDecodeDatabase) Lookup(id typeID, typ reflect.Type) *reconciledTy
 	if len(fields) == 1 && fields[0] == pending.Fields[0] {
 		tbd.byID[id-1] = rte // Save.
 		rte.FieldOrder = singleFieldOrder
+		rte.SingleField = singleFieldIndex(typ, fields)
 		return rte
 	}
 	// Local field names are unique. Equal lengths and a match for every
