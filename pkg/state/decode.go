@@ -481,7 +481,7 @@ func (ds *decodeState) decodeInterface(ods *objectDecodeState, obj reflect.Value
 	// set the interface object to be equal to whatever we decode.
 	origObj := obj
 	obj = reflect.New(typ).Elem()
-	defer origObj.Set(obj)
+	defer setInterface(origObj, obj)
 
 	// With the object now having sufficient type information to actually
 	// have Set called on it, we can proceed to decode the value.

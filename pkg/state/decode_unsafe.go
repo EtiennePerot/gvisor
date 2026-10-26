@@ -17,6 +17,7 @@ package state
 import (
 	"fmt"
 	"reflect"
+	"sync"
 	"unsafe"
 )
 
@@ -42,4 +43,33 @@ func reflectValueRWSlice3(arr reflect.Value, i, j, k int) reflect.Value {
 		panic(fmt.Sprintf("arr has kind %v, wanted %v", arr.Kind(), reflect.Array))
 	}
 	return reflectValueRWAddr(arr).Elem().Slice3(i, j, k)
+}
+
+// ifacePair is an (interface type, concrete type) pair.
+type ifacePair struct {
+	iface    reflect.Type
+	concrete reflect.Type
+}
+
+// ifaceWords maps an ifacePair to the first word (itab or type pointer) of
+// an interface value holding the concrete type.
+var ifaceWords sync.Map // ifacePair -> unsafe.Pointer
+
+// setInterface is equivalent to iface.Set(obj), where iface is of interface
+// kind. It skips the reflect.Value.Set method-set check (which is not cached)
+// for pairs of types that have already been checked.
+//
+// Preconditions: obj is not of interface kind and is not read-only.
+func setInterface(iface, obj reflect.Value) {
+	pair := ifacePair{iface.Type(), obj.Type()}
+	word, ok := ifaceWords.Load(pair)
+	if !ok || !iface.CanSet() {
+		iface.Set(obj)
+		ifaceWords.Store(pair, (*[2]unsafe.Pointer)(unsafe.Pointer(iface.UnsafeAddr()))[0])
+		return
+	}
+	// Both interface kinds start with a type word followed by a data word.
+	// The data word of an any holding obj is the data word that Set stores.
+	v := obj.Interface()
+	*(*[2]unsafe.Pointer)(unsafe.Pointer(iface.UnsafeAddr())) = [2]unsafe.Pointer{word.(unsafe.Pointer), (*[2]unsafe.Pointer)(unsafe.Pointer(&v))[1]}
 }
