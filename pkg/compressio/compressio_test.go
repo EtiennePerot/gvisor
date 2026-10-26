@@ -274,6 +274,47 @@ func TestReadByte(t *testing.T) {
 	}
 }
 
+func TestSimpleReaderPeek(t *testing.T) {
+	data := initTest(t, 64*1024)
+	for _, key := range [][]byte{nil, hashKey} {
+		name := fmt.Sprintf("key=%s", key)
+		var b bytes.Buffer
+		w := NewSimpleWriter(&b, key, 1000)
+		if _, err := w.Write(data); err != nil {
+			t.Fatalf("%s: Write got err %v", name, err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatalf("%s: Close got err %v", name, err)
+		}
+		r := NewSimpleReader(io.NopCloser(&b), key)
+		got := make([]byte, 0, len(data))
+		for i := 0; len(got) < len(data); i++ {
+			if r.Buffered() == 0 {
+				if _, err := r.Peek(1); err != nil {
+					t.Fatalf("%s: Peek(1) at %d got err %v", name, len(got), err)
+				}
+			}
+			p, err := r.Peek(min(r.Buffered(), 300+i%7))
+			if err != nil || len(p) == 0 {
+				t.Fatalf("%s: Peek at %d got %d bytes, err %v", name, len(got), len(p), err)
+			}
+			got = append(got, p...)
+			if n, err := r.Discard(len(p)); n != len(p) || err != nil {
+				t.Fatalf("%s: Discard(%d) got %d, %v", name, len(p), n, err)
+			}
+		}
+		if !bytes.Equal(got, data) {
+			t.Errorf("%s: got mismatch, expected match", name)
+		}
+		if _, err := r.Peek(1); err != io.EOF {
+			t.Errorf("%s: Peek at end got err %v, expected %v", name, err, io.EOF)
+		}
+		if err := r.Verify(); err != nil {
+			t.Errorf("%s: Verify got err %v", name, err)
+		}
+	}
+}
+
 func TestReaderOwnsKey(t *testing.T) {
 	doTest(t, testOpts{
 		Name: "reader owns key",

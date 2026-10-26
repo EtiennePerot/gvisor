@@ -16,6 +16,7 @@
 package tests
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -129,6 +130,24 @@ func runTestCases(t *testing.T, shouldFail bool, prefix string, objects []any) {
 			}
 			t.Logf("Load stats:\n%s", loadStats.String())
 
+			// Load twice from one small bufio.Reader, then check that
+			// each Load consumes exactly its own bytes.
+			const trailer = "trailer"
+			twice := bytes.Repeat(saveBuffer.Bytes(), 2)
+			br := bufio.NewReaderSize(bytes.NewReader(append(twice, trailer...)), 16)
+			for i := 0; i < 2; i++ {
+				bufObjectPtr := reflect.New(reflect.TypeOf(root))
+				if _, err := state.Load(context.Background(), br, bufObjectPtr.Interface()); err != nil {
+					t.Fatalf("Load %d from bufio.Reader failed unexpectedly: %v", i, err)
+				}
+				if !checkEqual(root, bufObjectPtr.Elem().Interface()) {
+					t.Fatalf("Objects differ after Load %d from bufio.Reader:\n\toriginal: %#v\n\tloaded:   %#v\n", i, root, bufObjectPtr.Elem().Interface())
+				}
+			}
+			if rest, err := io.ReadAll(br); err != nil || string(rest) != trailer {
+				t.Fatalf("bufio.Reader got rest %q, %v, expected %q", rest, err, trailer)
+			}
+
 			// Truncate half the bytes in the byte stream,
 			// and ensure that we can't restore. Then
 			// truncate only the final byte and ensure that
@@ -141,6 +160,10 @@ func runTestCases(t *testing.T, shouldFail bool, prefix string, objects []any) {
 			missingByteReader := bytes.NewReader(saveBuffer.Bytes()[:l-1])
 			if _, err := state.Load(context.Background(), missingByteReader, loadObjectPtr.Interface()); err == nil {
 				t.Errorf("Load with missing byte succeeded unexpectedly.")
+			}
+			missingByteBufReader := bufio.NewReaderSize(bytes.NewReader(saveBuffer.Bytes()[:l-1]), 16)
+			if _, err := state.Load(context.Background(), missingByteBufReader, loadObjectPtr.Interface()); err == nil {
+				t.Errorf("Load with missing byte from bufio.Reader succeeded unexpectedly.")
 			}
 		})
 	}

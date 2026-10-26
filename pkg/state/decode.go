@@ -650,7 +650,8 @@ func (ds *decodeState) Load(obj reflect.Value) {
 		ods     *objectDecodeState
 		id      objectID
 	)
-	if err := safely(func() {
+	ds.r.StartBuffering()
+	err = safely(func() {
 		// Decode all objects in the stream.
 		//
 		// Note that the structure of this decoding loop should match the raw
@@ -685,7 +686,9 @@ func (ds *decodeState) Load(obj reflect.Value) {
 				Failf("wanted type or object ID, got %T", encoded)
 			}
 		}
-	}); err != nil {
+	})
+	ds.r.StopBuffering()
+	if err != nil {
 		// Include as much information as we can, taking into account
 		// the possible state transitions above.
 		if ods != nil {

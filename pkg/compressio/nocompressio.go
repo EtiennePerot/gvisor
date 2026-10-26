@@ -219,6 +219,52 @@ func (r *SimpleReader) ReadByte() (byte, error) {
 	return b[0], nil
 }
 
+// Buffered returns the number of bytes that Peek can give without reading.
+func (r *SimpleReader) Buffered() int {
+	if r.h == nil {
+		return r.bin.Buffered()
+	}
+	if r.err != nil {
+		return 0
+	}
+	return len(r.pending)
+}
+
+// Peek returns the next n bytes without consuming them. With a key, it gives
+// at most the verified data of one chunk, and bufio.ErrBufferFull if this is
+// less than n bytes.
+func (r *SimpleReader) Peek(n int) ([]byte, error) {
+	if r.h == nil {
+		return r.bin.Peek(n)
+	}
+	if r.err != nil {
+		return nil, r.err
+	}
+	if len(r.pending) == 0 && r.streamLeft == 0 {
+		if err := r.nextChunk(); err != nil {
+			_, err = r.fail(err)
+			return nil, err
+		}
+	}
+	if n > len(r.pending) {
+		return r.pending, bufio.ErrBufferFull
+	}
+	return r.pending[:n], nil
+}
+
+// Discard skips the next n bytes. With a key, n must not be more than
+// Buffered.
+func (r *SimpleReader) Discard(n int) (int, error) {
+	if r.h == nil {
+		return r.bin.Discard(n)
+	}
+	if n > r.Buffered() {
+		return 0, bufio.ErrBufferFull
+	}
+	r.pending = r.pending[n:]
+	return n, nil
+}
+
 // nextChunk reads the header of the next chunk. For a small chunk, nextChunk
 // also reads the data and compares the hash. Read gets the data of a large
 // chunk directly from the stream.

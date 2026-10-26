@@ -42,18 +42,78 @@ type Reader struct {
 	// byteReader is Reader as an io.ByteReader, or nil.
 	byteReader io.ByteReader
 
+	// peeker is Reader as a peeker, or nil.
+	peeker peeker
+
+	// buffering is true between StartBuffering and StopBuffering.
+	buffering bool
+
+	// window is the unread part of the bytes that peeker gave. peeked is the
+	// number of bytes that peeker gave; peeker did not discard them yet.
+	window []byte
+	peeked int
+
 	buf [1]byte
+}
+
+// peeker is implemented by bufio.Reader.
+type peeker interface {
+	Buffered() int
+	Peek(n int) ([]byte, error)
+	Discard(n int) (int, error)
 }
 
 // NewReader returns a Reader that reads from r.
 func NewReader(r io.Reader) Reader {
 	br, _ := r.(io.ByteReader)
-	return Reader{Reader: r, byteReader: br}
+	p, _ := r.(peeker)
+	return Reader{Reader: r, byteReader: br, peeker: p}
+}
+
+// StartBuffering lets r read from the buffer of r.Reader without consuming the
+// bytes from r.Reader. Until StopBuffering, callers must not use r.Reader
+// directly.
+func (r *Reader) StartBuffering() {
+	r.buffering = r.peeker != nil
+}
+
+// StopBuffering consumes the bytes that r read from the buffer of r.Reader.
+func (r *Reader) StopBuffering() {
+	r.discard()
+	r.buffering = false
+}
+
+// discard consumes the bytes that r read from r.window.
+func (r *Reader) discard() {
+	if n := r.peeked - len(r.window); n > 0 {
+		_, _ = r.peeker.Discard(n)
+	}
+	r.window = nil
+	r.peeked = 0
+}
+
+// fill sets r.window to the buffered bytes of r.Reader. It returns false if
+// there are none.
+//
+// Precondition: r.buffering && len(r.window) == 0.
+func (r *Reader) fill() bool {
+	r.discard()
+	if r.peeker.Buffered() == 0 {
+		_, _ = r.peeker.Peek(1)
+	}
+	r.window, _ = r.peeker.Peek(r.peeker.Buffered())
+	r.peeked = len(r.window)
+	return r.peeked > 0
 }
 
 // readByte reads a single byte from r.Reader without allocation. It panics on
 // error.
 func (r *Reader) readByte() byte {
+	if len(r.window) > 0 || (r.buffering && r.fill()) {
+		b := r.window[0]
+		r.window = r.window[1:]
+		return b
+	}
 	if r.byteReader != nil {
 		b, err := r.byteReader.ReadByte()
 		if err != nil {
@@ -82,6 +142,12 @@ type Writer struct {
 // error.
 func readFull(r *Reader, p []byte) {
 	for done := 0; done < len(p); {
+		if len(r.window) > 0 || (r.buffering && r.fill()) {
+			n := copy(p[done:], r.window)
+			r.window = r.window[n:]
+			done += n
+			continue
+		}
 		n, err := r.Read(p[done:])
 		done += n
 		if n == 0 && err != nil {
@@ -162,6 +228,21 @@ func loadUint(r *Reader) Uint {
 		u Uint
 		s uint
 	)
+	if w := r.window; len(w) >= 10 {
+		for i := 0; i <= 9; i++ {
+			b := w[i]
+			if b < 0x80 {
+				if i == 9 && b > 1 {
+					panic("overflow")
+				}
+				r.window = w[i+1:]
+				return u | Uint(b)<<s
+			}
+			u |= Uint(b&0x7f) << s
+			s += 7
+		}
+		panic("unreachable")
+	}
 	for i := 0; i <= 9; i++ {
 		b := r.readByte()
 		if b < 0x80 {
