@@ -1229,7 +1229,7 @@ func (f *MemoryFile) LoadFrom(ctx context.Context, r io.Reader, opts *LoadOpts) 
 	}
 
 	// Load committed pages and reconstruct memory accounting state.
-	wr := wire.Reader{Reader: r}
+	wr := wire.NewReader(r)
 	timePagesStart := gohacks.Nanotime()
 	minUnloadedInit := false
 	for maseg := f.memAcct.FirstSegment(); maseg.Ok(); maseg = maseg.NextSegment() {

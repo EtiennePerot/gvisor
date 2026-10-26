@@ -111,7 +111,7 @@ func Load(ctx context.Context, r io.Reader, rootPtr any) (Stats, error) {
 	// Create the decoding state.
 	ds := decodeState{
 		ctx:      ctx,
-		r:        wire.Reader{Reader: r},
+		r:        wire.NewReader(r),
 		types:    makeTypeDecodeDatabase(),
 		deferred: make(map[objectID]wire.Object),
 	}

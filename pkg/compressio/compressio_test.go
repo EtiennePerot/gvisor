@@ -208,6 +208,72 @@ func TestCompress(t *testing.T) {
 	}
 }
 
+func TestReadByte(t *testing.T) {
+	data := initTest(t, 64*1024)
+	type reader interface {
+		io.ByteReader
+		io.Reader
+		Verify() error
+	}
+	for _, compressed := range []bool{false, true} {
+		for _, key := range [][]byte{nil, hashKey} {
+			name := fmt.Sprintf("compressed=%v, key=%s", compressed, key)
+			var b bytes.Buffer
+			var w io.WriteCloser
+			if compressed {
+				var err error
+				if w, err = NewWriter(&b, key, 1024, flate.BestSpeed); err != nil {
+					t.Fatalf("%s: NewWriter got err %v", name, err)
+				}
+			} else {
+				w = NewSimpleWriter(&b, key, 1024)
+			}
+			if _, err := w.Write(data); err != nil {
+				t.Fatalf("%s: Write got err %v", name, err)
+			}
+			if err := w.Close(); err != nil {
+				t.Fatalf("%s: Close got err %v", name, err)
+			}
+			var r reader
+			if compressed {
+				var err error
+				if r, err = NewReader(io.NopCloser(&b), key); err != nil {
+					t.Fatalf("%s: NewReader got err %v", name, err)
+				}
+			} else {
+				r = NewSimpleReader(io.NopCloser(&b), key)
+			}
+			// Mix ReadByte with Read calls that cross chunk boundaries.
+			got := make([]byte, 0, len(data))
+			var p [700]byte
+			for i := 0; len(got) < len(data); i++ {
+				if i%2 == 0 {
+					c, err := r.ReadByte()
+					if err != nil {
+						t.Fatalf("%s: ReadByte at %d got err %v", name, len(got), err)
+					}
+					got = append(got, c)
+					continue
+				}
+				n, err := io.ReadFull(r, p[:min(len(p), len(data)-len(got))])
+				if err != nil {
+					t.Fatalf("%s: Read at %d got err %v", name, len(got), err)
+				}
+				got = append(got, p[:n]...)
+			}
+			if !bytes.Equal(got, data) {
+				t.Errorf("%s: got mismatch, expected match", name)
+			}
+			if _, err := r.ReadByte(); err != io.EOF {
+				t.Errorf("%s: ReadByte at end got err %v, expected %v", name, err, io.EOF)
+			}
+			if err := r.Verify(); err != nil {
+				t.Errorf("%s: Verify got err %v", name, err)
+			}
+		}
+	}
+}
+
 func TestReaderOwnsKey(t *testing.T) {
 	doTest(t, testOpts{
 		Name: "reader owns key",

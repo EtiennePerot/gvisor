@@ -39,12 +39,28 @@ import (
 type Reader struct {
 	io.Reader
 
+	// byteReader is Reader as an io.ByteReader, or nil.
+	byteReader io.ByteReader
+
 	buf [1]byte
+}
+
+// NewReader returns a Reader that reads from r.
+func NewReader(r io.Reader) Reader {
+	br, _ := r.(io.ByteReader)
+	return Reader{Reader: r, byteReader: br}
 }
 
 // readByte reads a single byte from r.Reader without allocation. It panics on
 // error.
 func (r *Reader) readByte() byte {
+	if r.byteReader != nil {
+		b, err := r.byteReader.ReadByte()
+		if err != nil {
+			panic(err)
+		}
+		return b
+	}
 	n, err := r.Read(r.buf[:])
 	if n != 1 {
 		panic(err)

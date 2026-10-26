@@ -195,7 +195,7 @@ func (p *printer) format(graph uint64, depth int, encoded wire.Object) (string, 
 
 // printStream is the basic print implementation.
 func (p *printer) printStream(w io.Writer, r io.Reader) (err error) {
-	wr := wire.Reader{Reader: r}
+	wr := wire.NewReader(r)
 
 	// current graph ID.
 	var graph uint64

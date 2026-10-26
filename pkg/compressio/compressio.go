@@ -434,7 +434,10 @@ type Reader struct {
 	scratch [4]byte
 }
 
-var _ io.Reader = (*Reader)(nil)
+var (
+	_ io.Reader     = (*Reader)(nil)
+	_ io.ByteReader = (*Reader)(nil)
+)
 
 // NewReader returns a new compressed reader. If key is non-empty, the data stream
 // is assumed to contain expected hash values, which will be compared against
@@ -495,6 +498,22 @@ func (r *Reader) Read(p []byte) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.readLocked(p)
+}
+
+// ReadByte implements io.ByteReader.ReadByte.
+//
+// +checklocksexclude:r.mu
+func (r *Reader) ReadByte() (byte, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.err == nil && r.buf != nil && r.buf.Len() > 0 {
+		return r.buf.ReadByte()
+	}
+	var b [1]byte
+	if n, err := r.readLocked(b[:]); n == 0 {
+		return 0, err
+	}
+	return b[0], nil
 }
 
 // readLocked does a read and keeps the first error.

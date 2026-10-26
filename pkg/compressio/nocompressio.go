@@ -103,7 +103,10 @@ type SimpleReader struct {
 	scratch [sha256.Size]byte
 }
 
-var _ io.Reader = (*SimpleReader)(nil)
+var (
+	_ io.Reader     = (*SimpleReader)(nil)
+	_ io.ByteReader = (*SimpleReader)(nil)
+)
 
 const (
 	defaultBufSize = 256 * 1024
@@ -197,6 +200,23 @@ func (r *SimpleReader) Read(p []byte) (int, error) {
 		return r.fail(err)
 	}
 	return n, nil
+}
+
+// ReadByte implements io.ByteReader.ReadByte.
+func (r *SimpleReader) ReadByte() (byte, error) {
+	if r.h == nil {
+		return r.bin.ReadByte()
+	}
+	if r.err == nil && len(r.pending) > 0 {
+		b := r.pending[0]
+		r.pending = r.pending[1:]
+		return b, nil
+	}
+	var b [1]byte
+	if _, err := io.ReadFull(r, b[:]); err != nil {
+		return 0, err
+	}
+	return b[0], nil
 }
 
 // nextChunk reads the header of the next chunk. For a small chunk, nextChunk
