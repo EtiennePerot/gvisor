@@ -151,6 +151,9 @@ func loadMapEntries(t *testing.T, dst any, entries *wire.Map, objects ...wire.Ob
 		wire.Save(&w, wire.Uint(i+2))
 		wire.Save(&w, object)
 	}
+	if err := w.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
 	if _, err := state.Load(t.Context(), &buf, dst); err != nil {
 		t.Fatalf("Load: %v", err)
 	}

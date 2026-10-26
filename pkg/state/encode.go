@@ -828,6 +828,9 @@ func (es *encodeState) Save(obj reflect.Value) {
 			Failf("error serializing type or ID: %w", err)
 		}
 	}
+	if err := es.w.Flush(); err != nil {
+		Failf("error flushing: %w", err)
+	}
 }
 
 // objectFlag indicates that the length is a # of objects, rather than a raw
@@ -841,6 +844,8 @@ const objectFlag uint64 = 1 << 63
 // order to generate statefiles that play nicely with debugging tools, raw
 // writes should be prefixed with a header with object set to false and the
 // appropriate length. This will allow tools to skip these regions.
+//
+// WriteHeader flushes w, so callers may write raw data to w.Writer after it.
 func WriteHeader(w *wire.Writer, length uint64, object bool) error {
 	// Sanity check the length.
 	if length&objectFlag != 0 {
@@ -851,9 +856,12 @@ func WriteHeader(w *wire.Writer, length uint64, object bool) error {
 	}
 
 	// Write a header.
-	return safely(func() {
+	if err := safely(func() {
 		wire.SaveUint(w, length)
-	})
+	}); err != nil {
+		return err
+	}
+	return w.Flush()
 }
 
 // addrSetFunctions is used by addrSet.

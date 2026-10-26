@@ -27,6 +27,7 @@
 package wire
 
 import (
+	"encoding/binary"
 	"fmt"
 	"io"
 	"math"
@@ -52,13 +53,58 @@ func (r *Reader) readByte() byte {
 	return r.buf[0]
 }
 
-// Writer bundles an io.Writer with a buffer used to implement writeByte
-// efficiently.
+// Writer bundles an io.Writer with a buffer that batches small writes.
+//
+// Callers must call Flush before they write to Writer directly.
 type Writer struct {
 	io.Writer
 
-	// buf is used by Uint as a scratch buffer.
-	buf [10]byte
+	// buf holds bytes not yet written to Writer.
+	buf []byte
+}
+
+// bufSize is the size of Writer.buf.
+const bufSize = 4096
+
+// Flush writes all buffered bytes to w.Writer.
+func (w *Writer) Flush() error {
+	if len(w.buf) == 0 {
+		return nil
+	}
+	_, err := w.Write(w.buf)
+	w.buf = w.buf[:0]
+	return err
+}
+
+// reserve ensures that w.buf has room for n more bytes, where n <= bufSize.
+// It panics on error.
+func (w *Writer) reserve(n int) {
+	if cap(w.buf)-len(w.buf) >= n {
+		return
+	}
+	if err := w.Flush(); err != nil {
+		panic(err)
+	}
+	if w.buf == nil {
+		w.buf = make([]byte, 0, bufSize) // Escapes: buffer allocation.
+	}
+}
+
+// write writes p through the buffer. It panics on error.
+func (w *Writer) write(p []byte) {
+	if len(p) > bufSize {
+		if err := w.Flush(); err != nil {
+			panic(err)
+		}
+		if _, err := w.Write(p); err != nil {
+			panic(err)
+		}
+		return
+	}
+	w.reserve(len(p))
+	n := len(w.buf)
+	w.buf = w.buf[:n+len(p)]
+	copy(w.buf[n:], p)
 }
 
 // readFull is a utility. The equivalent is not needed for Write, but the API
@@ -163,16 +209,10 @@ func loadUint(r *Reader) Uint {
 
 // save implements Object.save.
 func (u Uint) save(w *Writer) {
-	i := 0
-	for u >= 0x80 {
-		w.buf[i] = byte(u) | 0x80
-		i++
-		u >>= 7
-	}
-	w.buf[i] = byte(u)
-	if _, err := w.Write(w.buf[:i+1]); err != nil {
-		panic(err)
-	}
+	w.reserve(binary.MaxVarintLen64)
+	n := len(w.buf)
+	n += binary.PutUvarint(w.buf[n:n+binary.MaxVarintLen64], uint64(u))
+	w.buf = w.buf[:n]
 }
 
 // load implements Object.load.
@@ -277,11 +317,7 @@ func loadString(r *Reader) String {
 func (s *String) save(w *Writer) {
 	l := Uint(len(*s))
 	l.save(w)
-	p := gohacks.ImmutableBytesFromString(string(*s))
-	_, err := w.Write(p) // Must write all bytes.
-	if err != nil {
-		panic(err)
-	}
+	w.write(gohacks.ImmutableBytesFromString(string(*s)))
 }
 
 // load implements Object.load.
@@ -363,10 +399,7 @@ func (r *Ref) save(w *Writer) {
 		case *FieldName:
 			d := Int(-len(*x))
 			d.save(w)
-			p := gohacks.ImmutableBytesFromString(string(*x))
-			if _, err := w.Write(p); err != nil {
-				panic(err)
-			}
+			w.write(gohacks.ImmutableBytesFromString(string(*x)))
 		default:
 			panic("unknown dot implementation")
 		}
