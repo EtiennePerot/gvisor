@@ -222,6 +222,9 @@ type decodeState struct {
 	// fields caches struct field indices for reference dots.
 	fields map[fieldKey]int
 
+	// ifaces caches interface type words.
+	ifaces ifaceCache
+
 	// typedNames are the names of types by TypeIndex, for stats.
 	typedNames []string
 
@@ -584,7 +587,7 @@ func (ds *decodeState) decodeInterface(ods *objectDecodeState, obj reflect.Value
 	// set the interface object to be equal to whatever we decode.
 	origObj := obj
 	obj = reflect.New(typ).Elem()
-	defer origObj.Set(obj)
+	defer func() { ds.ifaces.setValue(origObj, obj) }()
 
 	// With the object now having sufficient type information to actually
 	// have Set called on it, we can proceed to decode the value.

@@ -725,8 +725,9 @@ func DecodeValue[T any](d *Decoder, p *T) {
 // each type T. It is used for fields whose kind is not known to go_stateify.
 func DecodeAny(d *Decoder, p any) {
 	rv := reflect.ValueOf(p)
-	if v, set := d.value(rv.UnsafePointer(), rv.Type().Elem(), p); set {
-		rv.Elem().Set(reflect.ValueOf(v))
+	up, typ := rv.UnsafePointer(), rv.Type().Elem()
+	if v, set := d.value(up, typ, p); set {
+		d.ds.ifaces.set(up, typ, v)
 	}
 }
 

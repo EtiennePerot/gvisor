@@ -43,3 +43,43 @@ func reflectValueRWSlice3(arr reflect.Value, i, j, k int) reflect.Value {
 	}
 	return reflectValueRWAddr(arr).Elem().Slice3(i, j, k)
 }
+
+// ifaceCache caches the type words (interface tables or, for empty
+// interfaces, types) of interface values by interface type and dynamic type.
+//
+// reflect.Value.Set checks that the type of the assigned value implements the
+// interface on every call, by walking their method sets, and doesn't cache
+// the result. ifaceCache makes this check once per pair of types.
+type ifaceCache map[ifaceKey]unsafe.Pointer
+
+// ifaceKey identifies an interface type and the dynamic type of a value
+// assigned to an interface of that type.
+type ifaceKey struct {
+	iface reflect.Type
+	// typ is the type word of an empty interface holding the value.
+	typ unsafe.Pointer
+}
+
+// set sets the interface of type ityp at p to v, which must not be nil. It is
+// equivalent to reflect.NewAt(ityp, p).Elem().Set(reflect.ValueOf(v)).
+func (c *ifaceCache) set(p unsafe.Pointer, ityp reflect.Type, v any) {
+	// Interfaces are a type word followed by a data word, and the data
+	// word of an interface holding v is the same as v's.
+	e := (*[2]unsafe.Pointer)(unsafe.Pointer(&v))
+	key := ifaceKey{ityp, e[0]}
+	if word, ok := (*c)[key]; ok {
+		*(*[2]unsafe.Pointer)(p) = [2]unsafe.Pointer{word, e[1]}
+		return
+	}
+	reflect.NewAt(ityp, p).Elem().Set(reflect.ValueOf(v))
+	if *c == nil {
+		*c = make(ifaceCache)
+	}
+	(*c)[key] = (*[2]unsafe.Pointer)(p)[0]
+}
+
+// setValue is equivalent to iface.Set(v), where iface is an addressable
+// interface and v is not an interface.
+func (c *ifaceCache) setValue(iface, v reflect.Value) {
+	c.set(unsafe.Pointer(iface.UnsafeAddr()), iface.Type(), v.Interface())
+}
