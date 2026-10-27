@@ -285,7 +285,9 @@ func (d *Decoder) structValue(p unsafe.Pointer, typ reflect.Type, c Codec) {
 		for int(index) >= len(ds.typedNames) {
 			ds.typedNames = append(ds.typedNames, "")
 		}
-		ds.typedNames[index] = reverseTypeDatabase[typ].Name
+		// Types implementing Type need not be registered.
+		info, _ := lookupTypeInfo(typ)
+		ds.typedNames[index] = info.Name
 		ds.stats.start(typeID(index))
 		defer ds.stats.done()
 	}
