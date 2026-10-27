@@ -101,58 +101,75 @@ func BenchmarkCheckpointFile(b *testing.B) {
 	}
 	plat := stubPlatform{sys}
 
-	b.Run("Decode", func(b *testing.B) {
-		b.ReportAllocs()
-		var cpu time.Duration
-		for i := 0; i < b.N; i++ {
-			b.StopTimer()
-			ctx, cleanup := withHostFDs(b, ctx, names)
-			b.StartTimer()
-			cpu += cpuTime(b, func() error {
-				_, err := loadKernel(ctx, plat, stateFile)
-				return err
-			})
-			b.StopTimer()
-			cleanup()
-			b.StartTimer()
-		}
-		b.ReportMetric(float64(cpu.Nanoseconds())/float64(b.N), "cpu-ns")
-		b.ReportMetric(float64(sizes[checkpointfiles.StateFileName]), "state-file-B")
-		b.ReportMetric(float64(sizes[checkpointfiles.PagesFileName]), "pages-file-B")
-		b.ReportMetric(float64(sizes[checkpointfiles.PagesMetadataFileName]), "pages-metadata-B")
-		var total int64
-		for _, size := range sizes {
-			total += size
-		}
-		b.ReportMetric(float64(total), "checkpoint-total-B")
-	})
-	b.Run("Encode", func(b *testing.B) {
-		b.ReportAllocs()
-		var cpu time.Duration
-		var encodedBytes int64
-		for i := 0; i < b.N; i++ {
-			b.StopTimer()
-			ctx, cleanup := withHostFDs(b, ctx, names)
-			// This kernel is only partially restored.
-			// Acceptable for purposes of benchmarking pkg/state alone.
-			k, err := loadKernel(ctx, plat, stateFile)
-			if err != nil {
-				b.Fatal(err)
+	for _, mode := range []struct {
+		// suffix is appended to the sub-benchmark names.
+		suffix string
+		// statefile is true if the state file is written and read
+		// as runsc does: through statefile.NewWriter with runsc's
+		// default metadata, and directly from statefile.NewReader.
+		// Otherwise, the encoding is written to a counting writer
+		// and read through a bufio.Reader.
+		statefile bool
+	}{
+		{suffix: ""},
+		{suffix: "Statefile", statefile: true},
+	} {
+		b.Run("Decode"+mode.suffix, func(b *testing.B) {
+			b.ReportAllocs()
+			var cpu time.Duration
+			for i := 0; i < b.N; i++ {
+				b.StopTimer()
+				ctx, cleanup := withHostFDs(b, ctx, names)
+				b.StartTimer()
+				cpu += cpuTime(b, func() error {
+					_, err := loadKernel(ctx, plat, stateFile, mode.statefile)
+					return err
+				})
+				b.StopTimer()
+				cleanup()
+				b.StartTimer()
 			}
-			w := &countingWriter{}
-			b.StartTimer()
-			cpu += cpuTime(b, func() error {
-				_, err := state.Save(ctx, w, k)
-				return err
-			})
-			b.StopTimer()
-			encodedBytes = w.n
-			cleanup()
-			b.StartTimer()
-		}
-		b.ReportMetric(float64(cpu.Nanoseconds())/float64(b.N), "cpu-ns")
-		b.ReportMetric(float64(encodedBytes), "encoded-kernel-B")
-	})
+			b.ReportMetric(float64(cpu.Nanoseconds())/float64(b.N), "cpu-ns")
+			b.ReportMetric(float64(sizes[checkpointfiles.StateFileName]), "state-file-B")
+			b.ReportMetric(float64(sizes[checkpointfiles.PagesFileName]), "pages-file-B")
+			b.ReportMetric(float64(sizes[checkpointfiles.PagesMetadataFileName]), "pages-metadata-B")
+			var total int64
+			for _, size := range sizes {
+				total += size
+			}
+			b.ReportMetric(float64(total), "checkpoint-total-B")
+		})
+		b.Run("Encode"+mode.suffix, func(b *testing.B) {
+			b.ReportAllocs()
+			var cpu time.Duration
+			var encodedBytes int64
+			for i := 0; i < b.N; i++ {
+				b.StopTimer()
+				ctx, cleanup := withHostFDs(b, ctx, names)
+				// This kernel is only partially restored.
+				// Acceptable for purposes of benchmarking pkg/state alone.
+				k, err := loadKernel(ctx, plat, stateFile, false)
+				if err != nil {
+					b.Fatal(err)
+				}
+				w := &countingWriter{}
+				b.StartTimer()
+				cpu += cpuTime(b, func() error {
+					if !mode.statefile {
+						_, err := state.Save(ctx, w, k)
+						return err
+					}
+					return saveKernel(ctx, w, k)
+				})
+				b.StopTimer()
+				encodedBytes = w.n
+				cleanup()
+				b.StartTimer()
+			}
+			b.ReportMetric(float64(cpu.Nanoseconds())/float64(b.N), "cpu-ns")
+			b.ReportMetric(float64(encodedBytes), "encoded-kernel-B")
+		})
+	}
 }
 
 // checkpointNginx checkpoints an idle nginx container, and returns the
@@ -355,13 +372,18 @@ func waitQuiescent(ctx context.Context, container *dockerutil.Container) error {
 	return nil
 }
 
-// loadKernel decodes the kernel from the state file data.
-func loadKernel(ctx context.Context, plat platform.Platform, data []byte) (*kernel.Kernel, error) {
+// loadKernel decodes the kernel from the state file data. If direct is true,
+// it reads from the statefile.Reader directly, as runsc restore does;
+// otherwise, it reads through a bufio.Reader.
+func loadKernel(ctx context.Context, plat platform.Platform, data []byte, direct bool) (*kernel.Kernel, error) {
 	sr, _, err := statefile.NewReader(io.NopCloser(bytes.NewReader(data)), nil)
 	if err != nil {
 		return nil, fmt.Errorf("statefile.NewReader: %w", err)
 	}
-	r := bufio.NewReader(sr)
+	var r io.Reader = sr
+	if !direct {
+		r = bufio.NewReader(sr)
+	}
 	var fs cpuid.FeatureSet
 	if _, err := state.Load(ctx, r, &fs); err != nil {
 		return nil, fmt.Errorf("loading the CPUID feature set: %w (the benchmark must be built from the same tree as the runtime)", err)
@@ -372,6 +394,24 @@ func loadKernel(ctx context.Context, plat platform.Platform, data []byte) (*kern
 		return nil, fmt.Errorf("loading the kernel: %w (the benchmark must be built from the same tree as the runtime)", err)
 	}
 	return k, nil
+}
+
+// saveKernel encodes the CPUID feature set and the kernel to w through
+// statefile.NewWriter, with the metadata of runsc checkpoint's defaults, as
+// Kernel.SaveTo does.
+func saveKernel(ctx context.Context, w io.Writer, k *kernel.Kernel) error {
+	wc, err := statefile.NewWriter(w, nil, statefile.CompressionLevelDefault.ToMetadata())
+	if err != nil {
+		return fmt.Errorf("statefile.NewWriter: %w", err)
+	}
+	fs := k.FeatureSet()
+	if _, err := state.Save(ctx, wc, &fs); err != nil {
+		return fmt.Errorf("saving the CPUID feature set: %w", err)
+	}
+	if _, err := state.Save(ctx, wc, k); err != nil {
+		return fmt.Errorf("saving the kernel: %w", err)
+	}
+	return wc.Close()
 }
 
 // cpuTime runs fn with automatic garbage collection disabled, and returns the
