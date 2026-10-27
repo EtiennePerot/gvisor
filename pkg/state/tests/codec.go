@@ -129,3 +129,11 @@ func (n *graphNode) afterLoad(context.Context) {
 type nestedMaps struct {
 	M map[int]map[int32]struct{}
 }
+
+// otherSetKey, otherSetMap and otherSetSlice are the types of the fields of
+// otherSetFields, which is declared in a file of another stateify set.
+type (
+	otherSetKey   uint16
+	otherSetMap   map[otherSetKey]struct{}
+	otherSetSlice []otherSetKey
+)

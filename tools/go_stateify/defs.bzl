@@ -11,11 +11,14 @@ def _go_stateify_impl(ctx):
         args.append("-statepkg=%s" % ctx.attr._statepkg)
     if ctx.attr.imports:
         args.append("-imports=%s" % ",".join(ctx.attr.imports))
+    type_srcs = [f for f in ctx.files.type_srcs if f.extension == "go" and f not in ctx.files.srcs]
+    if type_srcs:
+        args.append("-typesrcs=%s" % ",".join([f.path for f in type_srcs]))
     args.append("--")
     for src in ctx.attr.srcs:
         args += [f.path for f in src.files.to_list()]
     ctx.actions.run(
-        inputs = ctx.files.srcs,
+        inputs = ctx.files.srcs + type_srcs,
         outputs = [output],
         mnemonic = "GoStateify",
         progress_message = "Generating state library %s" % ctx.label,
@@ -33,6 +36,14 @@ The input source files. These files should include all structs in the package
 that need to be saved.
 """,
             mandatory = True,
+            allow_files = True,
+        ),
+        "type_srcs": attr.label_list(
+            doc = """
+Other source files of the package, whose type declarations are used to
+generate typed codecs for fields of types declared in them.
+""",
+            mandatory = False,
             allow_files = True,
         ),
         "imports": attr.string_list(

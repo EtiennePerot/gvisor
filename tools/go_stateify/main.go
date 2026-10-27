@@ -38,6 +38,7 @@ var (
 	imports  = flag.String("imports", "", "extra imports for the output file")
 	output   = flag.String("output", "", "output file")
 	statePkg = flag.String("statepkg", "", "state import package; defaults to empty")
+	typeSrcs = flag.String("typesrcs", "", "comma-separated list of other source files of the package, parsed only for their type declarations")
 )
 
 // resolveTypeName returns a qualified type name.
@@ -307,8 +308,23 @@ func main() {
 	var zeroCheckOut io.Writer = outputFile
 
 	// Record all type declarations, for codec generation.
+	// The package's other source files (in other sets, see
+	// tools/defs.bzl's calculate_sets) may declare the types of fields of
+	// the types declared here, such as the values of segment sets
+	// instantiated from templates.
 	cg := &codecGen{local: make(localTypes), statePrefix: statePrefix}
-	for _, f := range files {
+	typeFiles := files
+	if *typeSrcs != "" {
+		for _, filename := range strings.Split(*typeSrcs, ",") {
+			f, err := parser.ParseFile(token.NewFileSet(), filename, nil, parser.SkipObjectResolution)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Input %q can't be parsed: %v\n", filename, err)
+				os.Exit(1)
+			}
+			typeFiles = append(typeFiles, f)
+		}
+	}
+	for _, f := range typeFiles {
 		for _, decl := range f.Decls {
 			if d, ok := decl.(*ast.GenDecl); ok && d.Tok == token.TYPE {
 				for _, gs := range d.Specs {

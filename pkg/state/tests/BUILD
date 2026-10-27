@@ -15,6 +15,7 @@ go_library(
         "integer.go",
         "load.go",
         "map.go",
+        "other_set_impl.go",
         "register.go",
         "struct.go",
         "tests.go",

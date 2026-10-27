@@ -382,3 +382,20 @@ func TestCodecNestedMaps(t *testing.T) {
 		t.Errorf("got %v, want %v", got.M, root.M)
 	}
 }
+
+// TestCodecOtherSetTypes checks fields of types declared in files of another
+// stateify set.
+func TestCodecOtherSetTypes(t *testing.T) {
+	root := &otherSetFields{K: 3, M: otherSetMap{1: {}, 300: {}}, S: otherSetSlice{7, 8}}
+	data, _, err := save(root, true)
+	if err != nil {
+		t.Fatalf("save failed: %v", err)
+	}
+	loaded, _, err := load(reflect.TypeOf(root), data, true)
+	if err != nil {
+		t.Fatalf("load failed: %v", err)
+	}
+	if got := loaded.(*otherSetFields); !reflect.DeepEqual(got, root) {
+		t.Errorf("got %+v, want %+v", got, root)
+	}
+}

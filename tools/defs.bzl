@@ -183,6 +183,7 @@ def go_library(name, srcs, deps = [], imports = [], stateify = True, force_add_s
             go_stateify(
                 name = name + suffix + "_state_autogen_with_imports",
                 srcs = src_subset,
+                type_srcs = srcs,
                 imports = imports,
                 package = full_pkg,
                 out = name + suffix + "_state_autogen_with_imports.go",
