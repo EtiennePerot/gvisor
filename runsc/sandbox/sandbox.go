@@ -2185,6 +2185,14 @@ type CheckpointOpts struct {
 	// StateEngine, when non-nil, overrides the sandbox's boot-time state
 	// serialization engine for this checkpoint.
 	StateEngine *config.StateEnginePolicy
+
+	// SkipWaitForExit, if set, makes Checkpoint return as soon as the
+	// checkpoint is complete, without waiting for the sandbox to exit.
+	// This must be set when checkpointing a paused sandbox, since its tasks
+	// cannot finish exiting until the sandbox is resumed. For example,
+	// containerd checkpoints containers by doing pause+checkpoint+resume.
+	// Ignored if Resume is set.
+	SkipWaitForExit bool
 }
 
 // Checkpoint sends the checkpoint call for a container in the sandbox.
@@ -2249,6 +2257,12 @@ func (s *Sandbox) Checkpoint(conf *config.Config, cid string, imagePath string, 
 	s.Checkpointed = true
 	if opts.Resume {
 		return s.applyAppCPULimit(cpuPhaseLifecycle)
+	}
+	if opts.SkipWaitForExit {
+		return nil
+	}
+	if err := s.waitForStopped(); err != nil {
+		return fmt.Errorf("waiting for checkpointed sandbox %q to exit: %w", s.ID, err)
 	}
 	return nil
 }

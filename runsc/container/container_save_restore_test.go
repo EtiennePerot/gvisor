@@ -1372,6 +1372,86 @@ func TestCheckpointResume(t *testing.T) {
 	}
 }
 
+// TestCheckpointPaused checks that checkpointing a paused container does not
+// block waiting for the sandbox to exit, and that the sandbox exits once
+// resumed. This is the sequence used by containerd (`docker checkpoint`):
+// pause, checkpoint, resume.
+func TestCheckpointPaused(t *testing.T) {
+	for name, conf := range configs(t, true /* noOverlay */) {
+		t.Run(name, func(t *testing.T) {
+			dir, err := os.MkdirTemp(testutil.TmpDir(), "checkpoint-test")
+			if err != nil {
+				t.Fatalf("os.MkdirTemp failed: %v", err)
+			}
+			defer os.RemoveAll(dir)
+			if err := os.Chmod(dir, 0777); err != nil {
+				t.Fatalf("error chmoding file: %q, %v", dir, err)
+			}
+
+			spec := testutil.NewSpecWithArgs("sleep", "1000")
+			_, bundleDir, cleanup, err := testutil.SetupContainer(spec, conf)
+			if err != nil {
+				t.Fatalf("error setting up container: %v", err)
+			}
+			defer cleanup()
+
+			args := Args{
+				ID:        testutil.RandomContainerID(),
+				Spec:      spec,
+				BundleDir: bundleDir,
+			}
+			cont, err := New(conf, args)
+			if err != nil {
+				t.Fatalf("error creating container: %v", err)
+			}
+			defer cont.Destroy()
+			if err := cont.Start(conf); err != nil {
+				t.Fatalf("error starting container: %v", err)
+			}
+
+			if err := cont.Pause(); err != nil {
+				t.Fatalf("error pausing container: %v", err)
+			}
+
+			// Checkpoint must return even though the paused sandbox
+			// cannot exit yet.
+			checkpointDone := make(chan error, 1)
+			go func() {
+				checkpointDone <- cont.Checkpoint(conf, dir, sandbox.CheckpointOpts{})
+			}()
+			select {
+			case err := <-checkpointDone:
+				if err != nil {
+					t.Fatalf("error checkpointing paused container: %v", err)
+				}
+			case <-time.After(time.Minute):
+				t.Fatalf("checkpoint of paused container did not return")
+			}
+
+			// Once resumed, the checkpointed sandbox exits.
+			if err := cont.Resume(); err != nil {
+				t.Fatalf("error resuming container: %v", err)
+			}
+			waitDone := make(chan error, 1)
+			go func() {
+				_, err := cont.Wait()
+				waitDone <- err
+			}()
+			select {
+			case err := <-waitDone:
+				if err != nil {
+					t.Fatalf("error waiting for container: %v", err)
+				}
+			case <-time.After(time.Minute):
+				t.Fatalf("sandbox did not exit after checkpoint and resume")
+			}
+			if sandboxRunning(t, cont) {
+				t.Fatalf("sandbox %q still running after checkpoint and resume", cont.Sandbox.ID)
+			}
+		})
+	}
+}
+
 // TestUsageDiskBackedOverlay checks that data in a disk backed overlay is not
 // reported as memory usage, before or after a checkpoint and restore.
 func TestUsageDiskBackedOverlay(t *testing.T) {

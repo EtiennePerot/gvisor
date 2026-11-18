@@ -1075,6 +1075,11 @@ func (c *Container) Checkpoint(conf *config.Config, imagePath string, opts sandb
 	if err := c.requireStatus("checkpoint", Created, Running, Paused); err != nil {
 		return err
 	}
+	if c.Status == Paused {
+		// The sandbox's tasks cannot exit until it is resumed, so don't wait
+		// for it to exit. The caller is expected to resume or delete it.
+		opts.SkipWaitForExit = true
+	}
 	return c.Sandbox.Checkpoint(conf, c.ID, imagePath, opts)
 }
 
