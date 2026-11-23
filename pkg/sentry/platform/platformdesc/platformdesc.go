@@ -94,7 +94,7 @@ func (d Desc) OpenDevice(devicePath string) (*fd.FD, error) {
 	if devicePath == "" {
 		devicePath = d.Device
 	}
-	f, err := fd.Open(devicePath, unix.O_RDWR, 0)
+	f, err := fd.Open(devicePath, unix.O_RDWR|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, fmt.Errorf("error opening %s: %v", devicePath, err)
 	}
