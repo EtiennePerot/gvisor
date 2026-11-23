@@ -119,13 +119,9 @@ func groSegmentSize(vnetHdr []byte) uint16 {
 	}
 }
 
-// pullBuffer extracts the enough underlying storage from b.buffer to hold n
-// bytes. It removes this storage from b.buffer, returns a new buffer
-// that holds the storage, and updates pulledIndex to indicate which part
-// of b.buffer's storage must be reallocated during the next call to
-// nextIovecs.
+// pullBuffer removes received payload views and returns them as a Buffer.
 func (b *iovecBuffer) pullBuffer(n int) buffer.Buffer {
-	var views []*buffer.View
+	var used int
 	c := 0
 	if b.skipsVnetHdr {
 		c += virtioNetHdrSize
@@ -139,19 +135,18 @@ func (b *iovecBuffer) pullBuffer(n int) buffer.Buffer {
 		c += v.Size()
 		if c >= n {
 			b.views[i].CapLength(v.Size() - (c - n))
-			views = append(views, b.views[:i+1]...)
+			used = i + 1
 			break
 		}
-	}
-	for i := range views {
-		b.views[i] = nil
 	}
 	if b.skipsVnetHdr {
 		// Exclude the size of the vnet header.
 		n -= virtioNetHdrSize
 	}
 	pulled := buffer.Buffer{}
-	for _, v := range views {
+	for i := range used {
+		v := b.views[i]
+		b.views[i] = nil
 		pulled.Append(v)
 	}
 	pulled.Truncate(int64(n))
