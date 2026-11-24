@@ -258,3 +258,27 @@ func TestMixedWritableMappings(t *testing.T) {
 		t.Errorf("RemoveMapping: got %+v, wanted %+v", got, want)
 	}
 }
+
+func TestInvalidateEmptyOrMalformedRange(t *testing.T) {
+	set := MappingSet{}
+	ms := &testMappingSpace{}
+
+	set.AddMapping(ms, hostarch.AddrRange{0x10000, 0x13000}, 0x1000, true)
+	for _, tc := range []struct {
+		name string
+		mr   MappableRange
+	}{
+		{name: "empty_interior", mr: MappableRange{0x2000, 0x2000}},
+		{name: "empty_start", mr: MappableRange{0x1000, 0x1000}},
+		{name: "empty_end", mr: MappableRange{0x4000, 0x4000}},
+		{name: "malformed_interior", mr: MappableRange{0x3000, 0x2000}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ms.reset()
+			set.Invalidate(tc.mr, InvalidateOpts{})
+			if len(ms.inv) != 0 {
+				t.Errorf("Invalidate(%v): got %+v, want none", tc.mr, ms.inv)
+			}
+		})
+	}
+}

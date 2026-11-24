@@ -234,6 +234,9 @@ func (s *MappingSet) RemoveMapping(ms MappingSpace, ar hostarch.AddrRange, offse
 
 // Invalidate calls MappingSpace.Invalidate for all mappings of offsets in mr.
 func (s *MappingSet) Invalidate(mr MappableRange, opts InvalidateOpts) {
+	if !mr.WellFormed() || mr.Length() == 0 {
+		return
+	}
 	for seg := s.LowerBoundSegment(mr.Start); seg.Ok() && seg.Start() < mr.End; seg = seg.NextSegment() {
 		segMR := seg.Range()
 		for m := range seg.Value() {

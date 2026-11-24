@@ -315,6 +315,13 @@ func (fd *specialFileFD) pwrite(ctx context.Context, src usermem.IOSequence, off
 		return 0, offset, linuxerr.EOPNOTSUPP
 	}
 
+	// As in Linux, a write of no bytes changes nothing, including the file
+	// offset when O_APPEND is set, and the file size. Compare Linux's
+	// fs/read_write.c:generic_write_checks_count().
+	if src.NumBytes() == 0 {
+		return 0, offset, nil
+	}
+
 	d := fd.dentry()
 	if fd.isRegularFile {
 		// If the regular file fd was opened with O_APPEND, make sure the file

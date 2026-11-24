@@ -23,14 +23,17 @@ import (
 	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/fspath"
+	"gvisor.dev/gvisor/pkg/hostarch"
 	"gvisor.dev/gvisor/pkg/lisafs"
 	"gvisor.dev/gvisor/pkg/sentry/contexttest"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
 	"gvisor.dev/gvisor/pkg/sentry/ktime"
+	"gvisor.dev/gvisor/pkg/sentry/memmap"
 	"gvisor.dev/gvisor/pkg/sentry/pgalloc"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/unet"
+	"gvisor.dev/gvisor/pkg/usermem"
 )
 
 func TestDestroyIdempotent(t *testing.T) {
@@ -330,6 +333,11 @@ func (fd *recycledInoOpenFD) Stat() (lisafs.Statx, error) { return fd.stat, nil 
 
 func mountTestLisafsFS(t *testing.T, targetStat lisafs.Statx) (context.Context, *auth.Credentials, *recycledInoConnImpl, *vfs.VirtualFilesystem, vfs.VirtualDentry) {
 	t.Helper()
+	return mountTestLisafsFSWithOpts(t, targetStat, "")
+}
+
+func mountTestLisafsFSWithOpts(t *testing.T, targetStat lisafs.Statx, extraOpts string) (context.Context, *auth.Credentials, *recycledInoConnImpl, *vfs.VirtualFilesystem, vfs.VirtualDentry) {
+	t.Helper()
 	ctx := contexttest.Context(t)
 	creds := auth.CredentialsFromContext(ctx)
 
@@ -374,9 +382,13 @@ func mountTestLisafsFS(t *testing.T, targetStat lisafs.Statx) (context.Context, 
 	if err != nil {
 		t.Fatalf("clientSock.Release: %v", err)
 	}
+	data := fmt.Sprintf("trans=fd,rfdno=%d,wfdno=%d,cache=remote_revalidating", sockFD, sockFD)
+	if extraOpts != "" {
+		data += "," + extraOpts
+	}
 	mntns, err := vfsObj.NewMountNamespace(ctx, creds, "", Name, &vfs.MountOptions{
 		GetFilesystemOptions: vfs.GetFilesystemOptions{
-			Data: fmt.Sprintf("trans=fd,rfdno=%d,wfdno=%d,cache=remote_revalidating", sockFD, sockFD),
+			Data: data,
 		},
 	}, nil)
 	if err != nil {
@@ -480,5 +492,206 @@ func TestOpenAtRecycledInoTypeChange(t *testing.T) {
 	}
 	if got := regInode.size.Load(); got != 256 {
 		t.Fatalf("regInode.size = %d, want 256", got)
+	}
+}
+
+type recordingMappingSpace struct {
+	inv []hostarch.AddrRange
+}
+
+func (ms *recordingMappingSpace) Invalidate(ar hostarch.AddrRange, opts memmap.InvalidateOpts) {
+	ms.inv = append(ms.inv, ar)
+}
+
+func TestRegularFileDirectWriteZeroLength(t *testing.T) {
+	pageSize := uint64(hostarch.PageSize)
+	ctx, creds, _, vfsObj, root := mountTestLisafsFS(t, lisafs.Statx{
+		Mask:     linux.STATX_TYPE | linux.STATX_MODE | linux.STATX_INO | linux.STATX_SIZE,
+		Mode:     linux.S_IFREG | 0666,
+		DevMajor: 0,
+		DevMinor: 1,
+		Ino:      100,
+		Size:     2 * pageSize,
+	})
+
+	pop := vfs.PathOperation{Root: root, Start: root, Path: fspath.Parse("target")}
+	fd, err := vfsObj.OpenAt(ctx, creds, &pop, &vfs.OpenOptions{Flags: linux.O_RDWR | linux.O_DIRECT})
+	if err != nil {
+		t.Fatalf("OpenAt: %v", err)
+	}
+	defer fd.DecRef(ctx)
+	if _, ok := fd.Impl().(*regularFileFD); !ok {
+		t.Fatalf("fd.Impl() = %T, want *regularFileFD", fd.Impl())
+	}
+
+	d := fd.Dentry().Impl().(*dentry)
+	mf := d.inode.fs.mf
+	fr, err := mf.Allocate(2*pageSize, pgalloc.AllocOpts{})
+	if err != nil {
+		t.Fatalf("mf.Allocate: %v", err)
+	}
+	wantCacheMR := memmap.MappableRange{Start: 0, End: 2 * pageSize}
+	d.inode.dataMu.Lock()
+	d.inode.cache.InsertRange(wantCacheMR, fr.Start)
+	d.inode.dataMu.Unlock()
+	defer func() {
+		d.inode.dataMu.Lock()
+		d.inode.cache.DropAll(mf)
+		d.inode.dataMu.Unlock()
+	}()
+
+	ms := &recordingMappingSpace{}
+	mapBase := hostarch.Addr(16 * pageSize)
+	mapAR := hostarch.AddrRange{Start: mapBase, End: mapBase + hostarch.Addr(2*pageSize)}
+	d.inode.mapsMu.Lock()
+	d.inode.mappings.AddMapping(ms, mapAR, 0, true)
+	d.inode.mapsMu.Unlock()
+	defer func() {
+		d.inode.mapsMu.Lock()
+		d.inode.mappings.RemoveMapping(ms, mapAR, 0, true)
+		d.inode.mapsMu.Unlock()
+	}()
+
+	for _, offset := range []int64{0, int64(pageSize), int64(pageSize) + 128, int64(2 * pageSize)} {
+		n, err := fd.PWrite(ctx, usermem.BytesIOSequence(nil), offset, vfs.WriteOptions{})
+		if err != nil || n != 0 {
+			t.Fatalf("PWrite(offset=%#x, len=0) = (%d, %v), want (0, nil)", offset, n, err)
+		}
+		if len(ms.inv) != 0 {
+			t.Fatalf("PWrite(offset=%#x, len=0) triggered invalidations: %+v", offset, ms.inv)
+		}
+		d.inode.dataMu.RLock()
+		cseg := d.inode.cache.FirstSegment()
+		cacheOK := cseg.Ok() && cseg.Range() == wantCacheMR && cseg.Value() == fr.Start && !cseg.NextSegment().Ok()
+		d.inode.dataMu.RUnlock()
+		if !cacheOK {
+			t.Fatalf("PWrite(offset=%#x, len=0) altered cache", offset)
+		}
+	}
+}
+
+func TestSpecialFileZeroLengthWrite(t *testing.T) {
+	t.Run("regular_file", func(t *testing.T) {
+		pageSize := uint64(hostarch.PageSize)
+		ctx, creds, _, vfsObj, root := mountTestLisafsFSWithOpts(t, lisafs.Statx{
+			Mask:     linux.STATX_TYPE | linux.STATX_MODE | linux.STATX_INO | linux.STATX_SIZE,
+			Mode:     linux.S_IFREG | 0666,
+			DevMajor: 0,
+			DevMinor: 1,
+			Ino:      101,
+			Size:     2 * pageSize,
+		}, moptDisableFileHandleSharing)
+
+		pop := vfs.PathOperation{Root: root, Start: root, Path: fspath.Parse("target")}
+		fd, err := vfsObj.OpenAt(ctx, creds, &pop, &vfs.OpenOptions{Flags: linux.O_RDWR})
+		if err != nil {
+			t.Fatalf("OpenAt: %v", err)
+		}
+		defer fd.DecRef(ctx)
+		if _, ok := fd.Impl().(*specialFileFD); !ok {
+			t.Fatalf("fd.Impl() = %T, want *specialFileFD", fd.Impl())
+		}
+
+		d := fd.Dentry().Impl().(*dentry)
+		ms := &recordingMappingSpace{}
+		mapBase := hostarch.Addr(16 * pageSize)
+		mapAR := hostarch.AddrRange{Start: mapBase, End: mapBase + hostarch.Addr(2*pageSize)}
+		d.inode.mapsMu.Lock()
+		d.inode.mappings.AddMapping(ms, mapAR, 0, true)
+		d.inode.mapsMu.Unlock()
+		defer func() {
+			d.inode.mapsMu.Lock()
+			d.inode.mappings.RemoveMapping(ms, mapAR, 0, true)
+			d.inode.mapsMu.Unlock()
+		}()
+
+		for _, offset := range []int64{0, int64(pageSize), int64(pageSize) + 128, int64(2 * pageSize)} {
+			n, err := fd.PWrite(ctx, usermem.BytesIOSequence(nil), offset, vfs.WriteOptions{})
+			if err != nil || n != 0 {
+				t.Fatalf("PWrite(offset=%#x, len=0) = (%d, %v), want (0, nil)", offset, n, err)
+			}
+			if len(ms.inv) != 0 {
+				t.Fatalf("PWrite(offset=%#x, len=0) triggered invalidations: %+v", offset, ms.inv)
+			}
+		}
+	})
+
+	t.Run("non_seekable_fifo", func(t *testing.T) {
+		ctx, creds, _, vfsObj, root := mountTestLisafsFS(t, lisafs.Statx{
+			Mask:     linux.STATX_TYPE | linux.STATX_MODE | linux.STATX_INO,
+			Mode:     linux.S_IFIFO | 0666,
+			DevMajor: 0,
+			DevMinor: 1,
+			Ino:      102,
+		})
+
+		pop := vfs.PathOperation{Root: root, Start: root, Path: fspath.Parse("target")}
+		fd, err := vfsObj.OpenAt(ctx, creds, &pop, &vfs.OpenOptions{Flags: linux.O_WRONLY | linux.O_NONBLOCK})
+		if err != nil {
+			t.Fatalf("OpenAt(fifo): %v", err)
+		}
+		defer fd.DecRef(ctx)
+
+		if n, err := fd.Write(ctx, usermem.BytesIOSequence(nil), vfs.WriteOptions{}); err != nil || n != 0 {
+			t.Fatalf("Write(len=0) on FIFO = (%d, %v), want (0, nil)", n, err)
+		}
+	})
+}
+
+// TestEmptyWriteKeepsOffsetAndSize verifies that a write of no bytes changes
+// neither the file offset nor the file size, as in Linux.
+func TestEmptyWriteKeepsOffsetAndSize(t *testing.T) {
+	pageSize := uint64(hostarch.PageSize)
+	for _, tc := range []struct {
+		name      string
+		mountOpts string
+		ino       uint64
+	}{
+		{name: "regularFileFD", ino: 103},
+		{name: "specialFileFD", mountOpts: moptDisableFileHandleSharing, ino: 104},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, creds, _, vfsObj, root := mountTestLisafsFSWithOpts(t, lisafs.Statx{
+				Mask:     linux.STATX_TYPE | linux.STATX_MODE | linux.STATX_INO | linux.STATX_SIZE,
+				Mode:     linux.S_IFREG | 0666,
+				DevMajor: 0,
+				DevMinor: 1,
+				Ino:      tc.ino,
+				Size:     2 * pageSize,
+			}, tc.mountOpts)
+			pop := vfs.PathOperation{Root: root, Start: root, Path: fspath.Parse("target")}
+
+			// With O_APPEND, the write must not move the offset to the end of
+			// the file.
+			appendFD, err := vfsObj.OpenAt(ctx, creds, &pop, &vfs.OpenOptions{Flags: linux.O_RDWR | linux.O_APPEND})
+			if err != nil {
+				t.Fatalf("OpenAt(O_APPEND): %v", err)
+			}
+			defer appendFD.DecRef(ctx)
+			if _, err := appendFD.Seek(ctx, 1, linux.SEEK_SET); err != nil {
+				t.Fatalf("Seek(1, SEEK_SET): %v", err)
+			}
+			if n, err := appendFD.Write(ctx, usermem.BytesIOSequence(nil), vfs.WriteOptions{}); err != nil || n != 0 {
+				t.Fatalf("Write(len=0) = (%d, %v), want (0, nil)", n, err)
+			}
+			if off, err := appendFD.Seek(ctx, 0, linux.SEEK_CUR); err != nil || off != 1 {
+				t.Errorf("after Write(len=0) with O_APPEND, Seek(0, SEEK_CUR) = (%d, %v), want (1, nil)", off, err)
+			}
+
+			// Past the end of the file, the write must not change the file
+			// size.
+			fd, err := vfsObj.OpenAt(ctx, creds, &pop, &vfs.OpenOptions{Flags: linux.O_RDWR})
+			if err != nil {
+				t.Fatalf("OpenAt: %v", err)
+			}
+			defer fd.DecRef(ctx)
+			if n, err := fd.PWrite(ctx, usermem.BytesIOSequence(nil), int64(3*pageSize), vfs.WriteOptions{}); err != nil || n != 0 {
+				t.Fatalf("PWrite(offset=%#x, len=0) = (%d, %v), want (0, nil)", 3*pageSize, n, err)
+			}
+			d := fd.Dentry().Impl().(*dentry)
+			if got, want := d.inode.size.Load(), 2*pageSize; got != want {
+				t.Errorf("after PWrite(offset=%#x, len=0), file size = %d, want %d", 3*pageSize, got, want)
+			}
+		})
 	}
 }
