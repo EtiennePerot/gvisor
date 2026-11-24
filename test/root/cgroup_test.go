@@ -722,6 +722,7 @@ func TestCgroupDevicesAtCreate(t *testing.T) {
 	if got != sandboxposture.DeviceCgroupConfined {
 		t.Errorf("Sandbox %d after create: device cgroup is %s, want %s", state.Pid, got, sandboxposture.DeviceCgroupConfined)
 	}
+	checkCgroupNamespaceRoot(t, "Sandbox", state.Pid)
 }
 
 // pidCgroupPath returns the path of pid's cgroup in the given controller's

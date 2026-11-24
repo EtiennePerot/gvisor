@@ -46,6 +46,7 @@ import (
 	"gvisor.dev/gvisor/runsc/config"
 	"gvisor.dev/gvisor/runsc/console"
 	"gvisor.dev/gvisor/runsc/donation"
+	"gvisor.dev/gvisor/runsc/hostsettings"
 	"gvisor.dev/gvisor/runsc/profile"
 	"gvisor.dev/gvisor/runsc/sandbox"
 	"gvisor.dev/gvisor/runsc/specutils"
@@ -456,9 +457,8 @@ func (c *Container) createRoot(conf *config.Config, args Args, sandboxID string)
 		}
 	}
 	if err := cgroup.RunInCgroup(containerCgroup, func(cloneIntoCgroupFD *os.File) error {
-		// setupCgroupForRoot confined a cgroup v1 sandbox cgroup; a systemd one
-		// exists only now that it is joined.
 		if cgroup.IsOnlyV2() {
+			hostsettings.ReportCgroupNSDelegate(conf, cgroup.HasNSDelegate())
 			if err := allowDevices(conf, containerCgroup, args.Spec); err != nil {
 				return err
 			}
@@ -1985,9 +1985,8 @@ func (c *Container) createGoferProcess(conf *config.Config, specFile *os.File, m
 		cmd.SysProcAttr.Pdeathsig = unix.SIGKILL
 	}
 
-	// Enter new namespaces to isolate from the rest of the system. Don't unshare
-	// cgroup because gofer is added to a cgroup in the caller's namespace.
 	nss := []specs.LinuxNamespace{
+		{Type: specs.CgroupNamespace},
 		{Type: specs.IPCNamespace},
 		{Type: specs.MountNamespace},
 		{Type: specs.PIDNamespace},

@@ -36,6 +36,7 @@ go_library(
         "//runsc/config",
         "//runsc/console",
         "//runsc/donation",
+        "//runsc/hostsettings",
         "//runsc/profile",
         "//runsc/sandbox",
         "//runsc/specutils",

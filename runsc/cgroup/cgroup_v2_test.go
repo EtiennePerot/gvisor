@@ -799,8 +799,8 @@ func TestNewSelf(t *testing.T) {
 	t.Run("v1 preserves controller paths", func(t *testing.T) {
 		oldRoot := cgroupRoot()
 		root := t.TempDir()
-		cgroupRootInternal = root
-		t.Cleanup(func() { cgroupRootInternal = oldRoot })
+		cgroupRootInternal.path = root
+		t.Cleanup(func() { cgroupRootInternal.path = oldRoot })
 
 		cg, err := newSelf(map[string]string{"cpu": "docker/leaf"}, false /* isV2 */, root)
 		if err != nil {
