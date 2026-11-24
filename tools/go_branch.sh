@@ -34,6 +34,7 @@ readonly tmp_dir
 finish() {
   cd "${orig_dir}"            # Leave tmp_dir.
   rm -rf "${tmp_dir}" || true # Remove all contents.
+  git worktree prune || true  # Prune the removed worktree.
   git checkout -f "${head}"   # Restore commit.
 }
 trap finish EXIT
@@ -62,30 +63,30 @@ go_branch=$( \
 )
 readonly go_branch
 
-# Clone the current repository to the temporary directory, and check out the
-# current go_branch directory. We move to the new repository for convenience.
+# Check out go_branch in a detached worktree in the temporary directory. We move
+# there for convenience.
 declare repo_orig
 repo_orig="$(pwd)"
 readonly repo_orig
 declare -r repo_new="${tmp_dir}/repository"
-git clone . "${repo_new}"
-cd "${repo_new}"
 
-# Setup the repository and checkout the branch.
-git config user.email "gvisor-bot@google.com"
-git config user.name "gVisor bot"
-git config gc.auto 0
-git config maintenance.auto false
-git fetch origin "${go_branch}"
-git checkout -b go "${go_branch}"
+# Setup the repository and add the new worktree.
+declare -ar git_opts=(
+  -c user.email="gvisor-bot@google.com"
+  -c user.name="gVisor bot"
+  -c gc.auto=0
+  -c maintenance.auto=false
+)
+git "${git_opts[@]}" worktree add --detach "${repo_new}" "${go_branch}"
+cd "${repo_new}"
 
 # Start working on a merge commit that combines the previous history with the
 # current history. Note that we don't actually want any changes yet.
 #
 # N.B. The git behavior changed at some point and the relevant flag was added
 # to allow for override, so try the only behavior first then pass the flag.
-git merge --no-commit --strategy ours "${head}" || \
-  git merge --allow-unrelated-histories --no-commit --strategy ours "${head}"
+git "${git_opts[@]}" merge --no-commit --strategy ours "${head}" || \
+  git "${git_opts[@]}" merge --allow-unrelated-histories --no-commit --strategy ours "${head}"
 
 # Normalize the permissions on the old branch. Note that they should be
 # normalized if constructed by this tool, but we do so before the rsync.
@@ -159,7 +160,6 @@ find . -type d -exec chmod 0755 {} \;
 # branch, then we have nothing to commit here. So allow empty commit. This can
 # occur when this script is run parallelly (via pull_request and push events)
 # and the push workflow finishes before the pull_request workflow can run this.
-git add --all && git commit --allow-empty -m "Merge ${head} (automated)"
-
-# Push the branch back to the original repository.
-git remote add orig "${repo_orig}" && git push -f orig go:go
+git "${git_opts[@]}" add --all && \
+  git "${git_opts[@]}" commit --allow-empty -m "Merge ${head} (automated)" && \
+  git "${git_opts[@]}" branch -f go HEAD
