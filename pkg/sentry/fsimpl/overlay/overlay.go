@@ -460,7 +460,7 @@ func (fstype FilesystemType) GetFilesystem(ctx context.Context, vfsObj *vfs.Virt
 	}
 	rootTopVD := root.topLayer()
 	rootCleanup := cleanup.Make(func() {
-		root.destroyLocked(ctx)
+		root.DecRef(ctx)
 		fs.vfsfs.DecRef(ctx)
 	})
 	defer rootCleanup.Clean()
