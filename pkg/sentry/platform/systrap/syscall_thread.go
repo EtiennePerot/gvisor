@@ -158,6 +158,9 @@ func (t *syscallThread) installSeccompNotify() (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := verifySeccompNotifyFD(fd); err != nil {
+		return nil, err
+	}
 	errno := hostsyscall.RawSyscallErrno(unix.SYS_IOCTL, fd, linux.SECCOMP_IOCTL_NOTIF_SET_FLAGS, linux.SECCOMP_USER_NOTIF_FD_SYNC_WAKE_UP)
 	if errno != 0 {
 		t.thread.Debugf("failed to set SECCOMP_USER_NOTIF_FD_SYNC_WAKE_UP")

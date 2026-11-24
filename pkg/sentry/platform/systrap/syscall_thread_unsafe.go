@@ -16,6 +16,7 @@ package systrap
 
 import (
 	"fmt"
+	"math"
 	"sync/atomic"
 	"unsafe"
 
@@ -97,6 +98,24 @@ func (t *syscallThread) kickSeccompNotify() unix.Errno {
 		uintptr(linux.SECCOMP_IOCTL_NOTIF_SEND),
 		uintptr(unsafe.Pointer(&t.seccompNotifyResp)))
 	return errno
+}
+
+// verifySeccompNotifyFD returns an error if fd is not a seccomp listener,
+// identified by virtue of returning ENOENT when no notifications are pending.
+func verifySeccompNotifyFD(fd uintptr) error {
+	// ioctl(2) truncates fd to 32 bits, and the Sentry seccomp filter only
+	// allows non-negative FDs.
+	if fd > math.MaxInt32 {
+		return fmt.Errorf("invalid seccomp listener FD %d", fd)
+	}
+	var resp linux.SeccompNotifResp
+	errno := hostsyscall.RawSyscallErrno(unix.SYS_IOCTL, fd,
+		uintptr(linux.SECCOMP_IOCTL_NOTIF_SEND),
+		uintptr(unsafe.Pointer(&resp)))
+	if errno != unix.ENOENT {
+		return fmt.Errorf("FD %d is not a seccomp listener: SECCOMP_IOCTL_NOTIF_SEND returned %v instead of ENOENT", fd, errno)
+	}
+	return nil
 }
 
 func (t *syscallThread) waitForSeccompNotify() error {
