@@ -1340,6 +1340,99 @@ func TestCheckpointRestoreInodeNumbers(t *testing.T) {
 	}
 }
 
+// TestCheckpointRestoreFileTypeChanged checks that restore fails if a file that
+// the checkpointed container was using is replaced by a file of a different
+// type on the host between checkpoint and restore.
+func TestCheckpointRestoreFileTypeChanged(t *testing.T) {
+	for _, fileAccess := range []config.FileAccessType{config.FileAccessShared, config.FileAccessExclusive} {
+		for _, directfs := range []bool{false, true} {
+			t.Run(fmt.Sprintf("file-access-mounts=%s,directfs=%t", fileAccess, directfs), func(t *testing.T) {
+				testCheckpointRestoreFileTypeChanged(t, fileAccess, directfs)
+			})
+		}
+	}
+}
+
+func testCheckpointRestoreFileTypeChanged(t *testing.T, fileAccess config.FileAccessType, directfs bool) {
+	dir, err := os.MkdirTemp(testutil.TmpDir(), "checkpoint-test")
+	if err != nil {
+		t.Fatalf("os.MkdirTemp() failed: %v", err)
+	}
+	defer os.RemoveAll(dir)
+	if err := os.Chmod(dir, 0777); err != nil {
+		t.Fatalf("error chmoding file: %q, %v", dir, err)
+	}
+	imageDir := filepath.Join(dir, "image")
+	if err := os.Mkdir(imageDir, 0777); err != nil {
+		t.Fatalf("os.Mkdir(%q) failed: %v", imageDir, err)
+	}
+	// The container's working directory remains in use across checkpoint, so
+	// it must be restored.
+	workDir := filepath.Join(dir, "work")
+	if err := os.Mkdir(workDir, 0777); err != nil {
+		t.Fatalf("os.Mkdir(%q) failed: %v", workDir, err)
+	}
+
+	spec, conf := sleepSpecConf(t)
+	conf.DirectFS = directfs
+	conf.FileAccessMounts = fileAccess
+	spec.Process.Cwd = workDir
+	_, bundleDir, cleanup, err := testutil.SetupContainer(spec, conf)
+	if err != nil {
+		t.Fatalf("error setting up container: %v", err)
+	}
+	defer cleanup()
+
+	// Create and start the container.
+	args := Args{
+		ID:        testutil.RandomContainerID(),
+		Spec:      spec,
+		BundleDir: bundleDir,
+	}
+	cont, err := New(conf, args)
+	if err != nil {
+		t.Fatalf("error creating container: %v", err)
+	}
+	defer func() {
+		if cont != nil {
+			cont.Destroy()
+		}
+	}()
+	if err := cont.Start(conf); err != nil {
+		t.Fatalf("error starting container: %v", err)
+	}
+	if err := waitForProcessCount(cont, 1); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := cont.Checkpoint(conf, imageDir, sandbox.CheckpointOpts{Compression: statefile.CompressionLevelFlateBestSpeed}); err != nil {
+		t.Fatalf("error checkpointing container: %v", err)
+	}
+	cont.Destroy()
+	cont = nil
+
+	// Replace the working directory with a regular file.
+	if err := os.Remove(workDir); err != nil {
+		t.Fatalf("os.Remove(%q) failed: %v", workDir, err)
+	}
+	if err := os.WriteFile(workDir, nil, 0666); err != nil {
+		t.Fatalf("os.WriteFile(%q) failed: %v", workDir, err)
+	}
+
+	cont2, err := New(conf, args)
+	if err != nil {
+		t.Fatalf("error creating container: %v", err)
+	}
+	defer cont2.Destroy()
+	err = cont2.Restore(conf, imageDir, sandbox.DirectIOOff, false /* background */, nil /* networkArgs */)
+	if err == nil {
+		t.Fatalf("restore after replacing directory %q with a regular file succeeded, want error", workDir)
+	}
+	if !strings.Contains(err.Error(), "file type validation failed") {
+		t.Errorf("restore failed with %v, want file type validation error", err)
+	}
+}
+
 // TestCheckpointRestoreEROFS does the checkpoint/restore test on each platform using
 // an EROFS image as the rootfs.
 func TestCheckpointRestoreEROFS(t *testing.T) {
