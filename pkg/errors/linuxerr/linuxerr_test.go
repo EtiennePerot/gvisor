@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"golang.org/x/sys/unix"
+	"gvisor.dev/gvisor/pkg/abi/linux/errno"
 	gErrors "gvisor.dev/gvisor/pkg/errors"
 	"gvisor.dev/gvisor/pkg/errors/linuxerr"
 )
@@ -191,6 +192,7 @@ func TestSyscallErrnoToErrors(t *testing.T) {
 		{errno: syscall.EINTR, err: linuxerr.EINTR},
 		{errno: syscall.EINVAL, err: linuxerr.EINVAL},
 		{errno: syscall.EIO, err: linuxerr.EIO},
+		{errno: syscall.Errno(errno.ENONET), err: linuxerr.ENONET},
 		{errno: syscall.ENOTDIR, err: linuxerr.ENOTDIR},
 		{errno: syscall.ENOTTY, err: linuxerr.ENOTTY},
 		{errno: syscall.EPERM, err: linuxerr.EPERM},

@@ -25,6 +25,7 @@ go_test(
     srcs = ["linuxerr_test.go"],
     deps = [
         ":linuxerr",
+        "//pkg/abi/linux/errno",
         "//pkg/errors",
         "@org_golang_x_sys//unix:go_default_library",
     ],
