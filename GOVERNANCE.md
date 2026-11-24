@@ -5,6 +5,7 @@ a secure isolation boundary between untrusted workloads and the host operating
 system, without imposing the overhead or the operational complexity of a virtual
 machine. This document explains how the project is run.
 
+*   [CNCF](#cncf)
 *   [Values](#values)
 *   [Contributors](#contributors)
 *   [Maintainers](#maintainers)
@@ -21,6 +22,20 @@ machine. This document explains how the project is run.
     *   [Org-balanced voting](#org-balanced-voting)
 *   [When to evolve this governance](#when-to-evolve-this-governance)
 *   [Modifying this charter](#modifying-this-charter)
+
+## CNCF
+
+gVisor is a [Cloud Native Computing Foundation (CNCF)](https://www.cncf.io/)
+Sandbox project, organized as gVisor Series of LF Projects, LLC. For the
+trademark policy and other project policies, see
+[lfprojects.org/policies](https://lfprojects.org/policies/).
+
+The project follows the
+[CNCF charter](https://github.com/cncf/foundation/blob/main/charter.md) and CNCF
+policies. Within the scope of these policies, the gVisor project governs itself
+as described in this document. The maintainers administer the project's
+resources, such as the GitHub repository, the website, CI infrastructure, and
+communication channels, on behalf of the project.
 
 ## Values
 
@@ -110,9 +125,9 @@ To become a maintainer you need to demonstrate the following:
     code review, etc),
 *   understanding of the project's codebase and coding and documentation style.
 
-A new maintainer must be proposed by an existing maintainer by sending a message
-to the [gvisor-dev](mailto:gvisor-dev@googlegroups.com) mailing list. The
-nomination is approved by a majority vote of existing maintainers, subject to
+A new maintainer must be proposed by an existing maintainer in one of the public
+[communication channels](#communication-channels). The nomination is approved by
+a majority vote of existing maintainers, subject to
 [org-balanced voting](#org-balanced-voting).
 
 Existing maintainers will also pro-actively identify contributors who have
@@ -184,8 +199,9 @@ Time zones permitting, maintainers are expected to participate.
 Maintainers will also have closed meetings in order to discuss security reports
 or Code of Conduct violations. Such meetings should be scheduled by any
 maintainer on receipt of a security issue or Code of Conduct report. All current
-maintainers must be invited to such closed meetings, except for any maintainer
-who is accused of a Code of Conduct violation.
+maintainers must be invited to such closed meetings, except, for a Code of
+Conduct report, maintainers who are excluded under the
+[Code of Conduct](#code-of-conduct) section.
 
 ## Communication channels
 
@@ -194,7 +210,7 @@ The project maintains the following channels:
 *   [gvisor-users](mailto:gvisor-users@googlegroups.com): public, general
     purpose user list, used for announcements and meeting invitations.
 *   [gvisor-dev](mailto:gvisor-dev@googlegroups.com): public, general purpose
-    development list. Maintainer nominations and votes are held here.
+    development list.
 *   [#gvisor](https://cloud-native.slack.com/archives/C0CCKLKSN31): public Slack
     channel in the CNCF workspace, for user questions and general discussion.
 *   [#gvisor-dev](https://cloud-native.slack.com/archives/C0CCZ4S4V62): public
@@ -221,11 +237,25 @@ and accept it in your email.
 All participation in the gVisor project, including in the communication channels
 listed above, is governed by the [Code of Conduct](CODE_OF_CONDUCT.md).
 
-Code of Conduct violations by community members will be reported and resolved as
-described in that document. Maintainers will discuss reports in private. If a
-maintainer is directly involved in a report, that maintainer is excluded from
-the discussion, and the remaining maintainers will designate two uninvolved
-maintainers to resolve it.
+The CNCF Code of Conduct describes how to report violations. The CNCF Code of
+Conduct Committee sends reports about incidents within gVisor to the
+maintainers, who act as the project's Code of Conduct responders. They handle
+reports as the
+[CNCF Code of Conduct Committee jurisdiction policy](https://github.com/cncf/foundation/blob/main/code-of-conduct/coc-committee-jurisdiction-policy.md)
+and the
+[CNCF incident resolution procedures](https://github.com/cncf/foundation/blob/main/code-of-conduct/coc-incident-resolution-procedures.md)
+describe.
+
+Maintainers discuss reports in private. A maintainer who is directly involved in
+a report, or has a hard conflict of interest as defined in the CNCF incident
+resolution procedures, is excluded from the discussion and from votes about that
+report, and does not count toward the total for those votes, including
+organizational votes. A soft conflict of interest, such as working for the same
+employer as a person involved, does not exclude a maintainer, but the maintainer
+discloses it to the other maintainers. The maintainers who are not excluded
+designate two of them to resolve the report. If fewer than two maintainers are
+not excluded, or when the jurisdiction policy requires it, the maintainers
+transfer the report to the CNCF Code of Conduct Committee.
 
 ## Security Response Team
 
@@ -270,10 +300,10 @@ While most business in gVisor is conducted by
 "[lazy consensus](https://community.apache.org/committers/lazyConsensus.html)",
 periodically the maintainers may need to vote on specific actions or changes.
 
-A vote can be taken on the [gvisor-dev](mailto:gvisor-dev@googlegroups.com)
-mailing list, or in private among the maintainers for security or conduct
-matters. Votes may also be taken at a community meeting. Any maintainer may
-demand a vote be taken.
+A vote can be taken in one of the public
+[communication channels](#communication-channels), or in private among the
+maintainers for security or conduct matters. Votes may also be taken at a
+community meeting. Any maintainer may demand a vote be taken.
 
 Most votes require a simple majority of all active maintainers to succeed,
 except where otherwise noted. Two-thirds majority votes mean at least two-thirds

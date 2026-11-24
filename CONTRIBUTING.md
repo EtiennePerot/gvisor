@@ -193,10 +193,10 @@ Accessing check logs may require membership in the
 
 ## Bug IDs
 
-Some TODOs and NOTEs sprinkled throughout the code have associated IDs of the
-form `b/1234`. These correspond to bugs in our internal bug tracker. Eventually
-these bugs will be moved to the GitHub Issues, but until then they can simply be
-ignored.
+Some TODOs and NOTEs in the code have associated IDs of the form `b/1234`. These
+refer to bugs in Google's internal bug tracker. You can ignore these IDs. Report
+new bugs as [GitHub issues][github-issues]. Report security issues as described
+in [SECURITY.md](SECURITY.md).
 
 ## Build and test with Docker
 
@@ -232,6 +232,7 @@ bazel run //:gazelle -- update-repos -from_file=go.mod
 
 [dco]: https://developercertificate.org/
 [github]: https://github.com/gvisor/gvisor/compare
+[github-issues]: https://github.com/gvisor/gvisor/issues
 [cncf-slack-invite]: https://slack.cncf.io/
 [slack-gvisor-dev]: https://cloud-native.slack.com/archives/C0CCZ4S4V62
 [gvisor-dev-list]: https://groups.google.com/forum/#!forum/gvisor-dev

@@ -156,7 +156,8 @@ the `master` branch, which is then reflected into the `go` branch.
 
 ## Community & Governance
 
-See [GOVERNANCE.md](GOVERNANCE.md) for project governance information.
+See [GOVERNANCE.md](GOVERNANCE.md) for project governance information. gVisor
+follows the CNCF Code of Conduct. See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
 See [ADOPTERS.md](ADOPTERS.md) for a list of known production users and
 adopters.
