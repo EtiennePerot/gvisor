@@ -13,8 +13,6 @@
 // limitations under the License.
 
 #include <asm-generic/errno-base.h>
-#include <bits/types/siginfo_t.h>
-#include <bits/types/struct_iovec.h>
 #include <errno.h>
 #include <linux/futex.h>
 #include <signal.h>
