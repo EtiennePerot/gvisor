@@ -117,6 +117,11 @@ type lineDiscipline struct {
 	// +checklocks:termiosMu
 	numReplicas int
 
+	// replicaOpened indicates if a replica has ever been opened.
+	//
+	// +checklocks:termiosMu
+	replicaOpened bool
+
 	// masterWaiter is used to wait on the master end of the TTY.
 	masterWaiter waiter.Queue
 
@@ -292,7 +297,7 @@ func (l *lineDiscipline) masterReadiness() waiter.EventMask {
 	if l.packet && l.packetStatus != 0 {
 		res |= waiter.EventPri | waiter.ReadableEvents
 	}
-	if l.numReplicas == 0 {
+	if l.replicaHungUp() {
 		res |= waiter.EventHUp
 	}
 	l.termiosMu.RUnlock()
@@ -431,6 +436,18 @@ func (l *lineDiscipline) replicaOpen() {
 	l.termiosMu.Lock()
 	defer l.termiosMu.Unlock()
 	l.numReplicas++
+	l.replicaOpened = true
+}
+
+// replicaHungUp returns whether a replica has been opened and all replica
+// file descriptors have since been closed. Hang up must be suppressed until
+// the terminal has had at least one replica at some point. Otherwise a thread
+// may poll or read the master and immediately get POLLHUP or EIO before the
+// replica is ever opened.
+//
+// +checklocksread:l.termiosMu
+func (l *lineDiscipline) replicaHungUp() bool {
+	return l.numReplicas == 0 && l.replicaOpened
 }
 
 // replicaClose is called when a replica file descriptor is closed.
