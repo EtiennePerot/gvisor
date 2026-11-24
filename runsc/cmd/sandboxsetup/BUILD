@@ -25,6 +25,7 @@ go_library(
         "//pkg/fd",
         "//pkg/log",
         "//pkg/marshal/primitive",
+        "//pkg/sentry/platform/platformdesc",
         "//pkg/timing",
         "//pkg/unet",
         "//runsc/boot/sentryapi",
@@ -44,11 +45,13 @@ go_test(
     name = "sandboxsetup_test",
     size = "small",
     srcs = [
+        "cpu_dma_latency_amd64_test.go",
         "fs_test.go",
         "gofer_mount_test.go",
     ],
     embed = [":sandboxsetup"],
     deps = [
+        "//pkg/cpuid",
         "//runsc/config",
         "//runsc/specutils",
         "@org_golang_x_sys//unix:go_default_library",

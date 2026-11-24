@@ -33,6 +33,7 @@ go_library(
         "//pkg/urpc",
         "//runsc/boot/sentryapi",
         "//runsc/cgroup",
+        "//runsc/cmd/sandboxsetup",
         "//runsc/config",
         "//runsc/console",
         "//runsc/donation",

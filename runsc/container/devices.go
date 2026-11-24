@@ -26,11 +26,19 @@ import (
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"golang.org/x/sys/unix"
+
 	"gvisor.dev/gvisor/pkg/abi/nvgpu"
 	"gvisor.dev/gvisor/pkg/sentry/platform/platformdesc"
 	"gvisor.dev/gvisor/runsc/cgroup"
+	"gvisor.dev/gvisor/runsc/cmd/sandboxsetup"
 	"gvisor.dev/gvisor/runsc/config"
 	"gvisor.dev/gvisor/runsc/specutils"
+)
+
+// Overridden in tests.
+var (
+	cpuIdleStateCapEnabled = sandboxsetup.CPUIdleStateCapEnabled
+	hostDeviceRule         = deviceRuleForPath
 )
 
 // sandboxDeviceRules returns the device cgroup rules for the host devices that
@@ -50,7 +58,7 @@ func sandboxDeviceRules(conf *config.Config, spec *specs.Spec) ([]cgroup.DeviceR
 	// A device that does not exist is left to whatever opens it later, which
 	// reports the error.
 	add := func(path, access string) error {
-		r, err := deviceRuleForPath(path, access)
+		r, err := hostDeviceRule(path, access)
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
@@ -60,9 +68,12 @@ func sandboxDeviceRules(conf *config.Config, spec *specs.Spec) ([]cgroup.DeviceR
 		rules = append(rules, r)
 		return nil
 	}
-	// The sentry holds /dev/cpu_dma_latency open to cap host CPU idle states.
-	if err := add("/dev/cpu_dma_latency", "w"); err != nil {
-		return nil, err
+	// The sentry may hold /dev/cpu_dma_latency open to cap host CPU idle
+	// states. It decides this at boot from the root container's spec.
+	if specutils.IsRootContainer(spec) && cpuIdleStateCapEnabled(spec, conf) {
+		if err := add("/dev/cpu_dma_latency", "w"); err != nil {
+			return nil, err
+		}
 	}
 	// runsc opens the platform's device and donates it to the sentry.
 	p, err := platformdesc.Lookup(conf.Platform)
@@ -78,12 +89,33 @@ func sandboxDeviceRules(conf *config.Config, spec *specs.Spec) ([]cgroup.DeviceR
 			return nil, err
 		}
 	}
-	// The gofer opens the container's devices for the sentry.
-	if spec.Linux != nil {
-		for _, dev := range spec.Linux.Devices {
-			if err := add(dev.Path, "rw"); err != nil {
-				return nil, err
+	// A character device policy that allows passthrough lets the gofer or the
+	// sentry open any of the container's devices. Otherwise, only the device
+	// gofer, if any, opens the container's devices: the ones that it exposes to
+	// the sentry, and the NVIDIA capability and IMEX channel devices that the
+	// container's rootfs provides, which nvproxy opens through it. Every such
+	// NVIDIA device that the spec lists is allowed.
+	// Separately, nvproxy decides which minor numbers it registers, so the
+	// cgroup may allow some that nvproxy never opens.
+	var devs []specs.LinuxDevice
+	switch {
+	case conf.CharacterDevicePolicy.AllowsPassthrough():
+		if spec.Linux != nil {
+			devs = spec.Linux.Devices
+		}
+	case spec.Root != nil && shouldCreateDeviceGofer(spec, conf):
+		devs = sandboxsetup.ExposedDevices(spec, conf)
+		if spec.Linux != nil && specutils.NVProxyEnabled(spec, conf) {
+			for _, dev := range spec.Linux.Devices {
+				if sandboxsetup.IsNvidiaCapDevice(dev.Path) {
+					devs = append(devs, dev)
+				}
 			}
+		}
+	}
+	for _, dev := range devs {
+		if err := add(dev.Path, "rw"); err != nil {
+			return nil, err
 		}
 	}
 	if specutils.GPUFunctionalityRequestedViaHook(spec, conf) {

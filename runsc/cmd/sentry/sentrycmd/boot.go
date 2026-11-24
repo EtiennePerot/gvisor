@@ -210,7 +210,7 @@ type Boot struct {
 
 	// cpuDMALatencyFD is a file descriptor holding /dev/cpu_dma_latency
 	// open to prevent host CPUs from entering deep idle states for the
-	// lifetime of the sandbox. See MaybeCapCPUIdleStates.
+	// lifetime of the sandbox. See sandboxsetup.CPUIdleStateCapEnabled.
 	cpuDMALatencyFD int
 
 	// procMountSyncFD is a file descriptor that has to be closed when the
@@ -443,17 +443,15 @@ func (b *Boot) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcomma
 	}
 	timer.Reached("spec read")
 
-	if specutils.NVProxyEnabled(spec, conf) {
-		if b.cpuDMALatencyFD < 0 {
-			// Best effort; requires root.
-			if gPlatform, err := platformdesc.Lookup(conf.Platform); err == nil && gPlatform.Requirements.FrequentHostThreadWakeups {
-				if fd := sandboxsetup.MaybeCapCPUIdleStates(); fd >= 0 {
-					b.cpuDMALatencyFD = fd
-					argOverride["cpu-dma-latency-fd"] = strconv.Itoa(fd)
-				}
-			}
+	// Best effort; requires root.
+	if b.cpuDMALatencyFD < 0 && sandboxsetup.CPUIdleStateCapEnabled(spec, conf) {
+		if fd := sandboxsetup.CapCPUIdleStates(); fd >= 0 {
+			b.cpuDMALatencyFD = fd
+			argOverride["cpu-dma-latency-fd"] = strconv.Itoa(fd)
 		}
+	}
 
+	if specutils.NVProxyEnabled(spec, conf) {
 		if b.procDriverNvidiaParams == "" {
 			driverCaps, driverCapsErr := specutils.NVProxyDriverCapsAllowed(conf)
 			nvhs, err := nvconf.GetHostSettings(nvconf.HostSettingsOptions{

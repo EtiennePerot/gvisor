@@ -15,9 +15,14 @@
 package sandboxsetup
 
 import (
+	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"golang.org/x/sys/unix"
+
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/marshal/primitive"
+	"gvisor.dev/gvisor/pkg/sentry/platform/platformdesc"
+	"gvisor.dev/gvisor/runsc/config"
+	"gvisor.dev/gvisor/runsc/specutils"
 )
 
 const (
@@ -34,21 +39,26 @@ const (
 	cpuDMALatencyUsec = 10
 )
 
-// MaybeCapCPUIdleStates limits how deep host CPUs may idle if the host CPU
-// takes a long time to exit its deepest idle state. Platforms that report
-// Requirements.FrequentHostThreadWakeups wake sleeping host threads at a
-// very high rate; each wake-up that lands on a deeply idling CPU pays the
-// full exit latency, which is invisible to CPU profilers because the waking
-// CPU isn't executing.
+// CPUIdleStateCapEnabled returns true if the sentry caps host CPU idle states
+// through /dev/cpu_dma_latency for a sandbox with the given spec.
+// This is the case if the host CPU takes a long time to exit its
+// deepest idle state and the platform reports
+// Requirements.FrequentHostThreadWakeups. Such platforms wake sleeping host
+// threads at a very high rate, and each wake-up that lands on a deeply idling
+// CPU pays the full exit latency, which is invisible to CPU profilers because
+// the waking CPU isn't executing.
+func CPUIdleStateCapEnabled(spec *specs.Spec, conf *config.Config) bool {
+	p, err := platformdesc.Lookup(conf.Platform)
+	return err == nil && p.Requirements.FrequentHostThreadWakeups && specutils.NVProxyEnabled(spec, conf) && slowDeepIdleCPU()
+}
+
+// CapCPUIdleStates limits how deep host CPUs may idle.
 //
 // On success, returns an FD for /dev/cpu_dma_latency. The kernel enforces
 // the constraint only while a reference to the open file exists, and drops
 // it when the last reference is released (including on process death). Returns
-// -1 if the host CPU is not affected or on failure; this is best effort.
-func MaybeCapCPUIdleStates() int {
-	if !slowDeepIdleCPU() {
-		return -1
-	}
+// -1 on failure; this is best effort.
+func CapCPUIdleStates() int {
 	fd, err := unix.Open(cpuDMALatencyPath, unix.O_WRONLY, 0)
 	if err != nil {
 		log.Infof("Not capping host CPU idle states: open(%s): %v", cpuDMALatencyPath, err)

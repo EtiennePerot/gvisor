@@ -21,11 +21,38 @@ import (
 	"gvisor.dev/gvisor/pkg/cpuid"
 )
 
+// cpuidOnce queries each CPUID leaf from the CPU at most once.
+type cpuidOnce map[cpuid.In]cpuid.Out
+
+// Query implements cpuid.Function.Query.
+func (c cpuidOnce) Query(in cpuid.In) cpuid.Out {
+	out, ok := c[in]
+	if !ok {
+		out = (&cpuid.Native{}).Query(in)
+		c[in] = out
+	}
+	return out
+}
+
 // slowDeepIdleCPU returns whether the host CPU's deepest idle state has a
 // very high exit latency.
 func slowDeepIdleCPU() bool {
-	cpuid.Initialize()
-	fs := cpuid.HostFeatureSet()
+	return slowDeepIdleCPUFeatures(cpuFeatures(cpuid.HostFeatureSet()))
+}
+
+// cpuFeatures returns host, the host feature set, if the cpuid package is
+// initialized. Otherwise, it returns a feature set that queries the CPU
+// directly, since initializing the package costs much more.
+func cpuFeatures(host cpuid.FeatureSet) cpuid.FeatureSet {
+	if host.Function != nil {
+		return host
+	}
+	return cpuid.FeatureSet{Function: cpuidOnce{}}
+}
+
+// slowDeepIdleCPUFeatures returns whether the deepest idle state of the CPU
+// that fs describes has a very high exit latency.
+func slowDeepIdleCPUFeatures(fs cpuid.FeatureSet) bool {
 	if !fs.Intel() || fs.Family() != 6 {
 		return false
 	}

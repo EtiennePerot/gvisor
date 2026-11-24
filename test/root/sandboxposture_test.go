@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
 	"gvisor.dev/gvisor/pkg/test/dockerutil"
 	"gvisor.dev/gvisor/pkg/test/sandboxposture"
 	"gvisor.dev/gvisor/pkg/test/testutil"
@@ -360,6 +361,19 @@ func checkDeviceCgroup(t *testing.T, sandboxPID, root int) {
 	path := filepath.Join(t.TempDir(), "full")
 	if err := unix.Mknod(path, unix.S_IFCHR|0600, int(unix.Mkdev(1, 7))); !errors.Is(err, unix.EPERM) {
 		t.Errorf("mknod of /dev/full in the sandbox's cgroup: got %v, want %v", err, unix.EPERM)
+	}
+	for _, flags := range []int{unix.O_RDONLY, unix.O_WRONLY} {
+		fd, err := unix.Open("/dev/cpu_dma_latency", flags|unix.O_CLOEXEC, 0)
+		if err == nil {
+			unix.Close(fd)
+		}
+		if errors.Is(err, unix.ENOENT) {
+			t.Logf("/dev/cpu_dma_latency does not exist; not checking it")
+			break
+		}
+		if !errors.Is(err, unix.EPERM) {
+			t.Errorf("open(/dev/cpu_dma_latency, %#x) in the sandbox's cgroup: got %v, want %v", flags, err, unix.EPERM)
+		}
 	}
 }
 

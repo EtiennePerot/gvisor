@@ -88,3 +88,27 @@ func TestShouldExposeTpuDevice(t *testing.T) {
 		})
 	}
 }
+
+func TestIsNvidiaCapDevice(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		want bool
+	}{
+		{"/dev/nvidia-caps/nvidia-cap1", true},
+		{"/dev/nvidia-caps/nvidia-cap42", true},
+		{"/dev/nvidia-caps-imex-channels/channel0", true},
+		{"/dev/nvidia-caps-imex-channels/channel17", true},
+		{"/dev/nvidia-caps/nvidia-cap", false},
+		{"/dev/nvidia-caps/nvidia-cap1a", false},
+		{"/x/dev/nvidia-caps/nvidia-cap1", false},
+		{"/dev/nvidia-caps/../sda1", false},
+		{"/dev/nvidia-caps-imex-channels/channel0/../../sda", false},
+		{"/dev/nvidiactl", false},
+		{"/dev/nvidia0", false},
+		{"", false},
+	} {
+		if got := IsNvidiaCapDevice(tc.path); got != tc.want {
+			t.Errorf("IsNvidiaCapDevice(%q) = %t, want %t", tc.path, got, tc.want)
+		}
+	}
+}
