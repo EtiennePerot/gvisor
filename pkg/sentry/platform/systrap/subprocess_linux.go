@@ -188,7 +188,7 @@ func (t *thread) createStub() (*thread, error) {
 		arch.SyscallArgument{Value: 0},
 		arch.SyscallArgument{Value: 0})
 	if err != nil {
-		return nil, fmt.Errorf("creating stub process: %v", err)
+		return nil, fmt.Errorf("creating stub process: %w", err)
 	}
 
 	// Wait for child to enter group-stop, so we don't stop its
