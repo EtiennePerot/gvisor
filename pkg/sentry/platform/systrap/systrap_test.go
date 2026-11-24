@@ -15,12 +15,14 @@
 package systrap
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 	pkgcontext "gvisor.dev/gvisor/pkg/context"
@@ -251,4 +253,45 @@ func procStatus(t *testing.T, pid string) map[string]string {
 		}
 	}
 	return fields
+}
+
+// TestSyscallLoopSpuriousWakeup checks that the futex loop of syscall
+// threads still work after a futex wakeup that comes before a syscall
+// request.
+func TestSyscallLoopSpuriousWakeup(t *testing.T) {
+	newSystrapTest(t)
+	// The source stub process uses the futex loop.
+	s := globalPool.source
+	tid := s.syscallThread.thread.tid
+	s.syscallThreadMu.Lock()
+	woken := 0
+	for range 10 {
+		woken += futexWakeCount(t, &s.syscallThread.sentryMessage.state)
+		time.Sleep(10 * time.Millisecond)
+	}
+	s.syscallThreadMu.Unlock()
+	if woken == 0 {
+		t.Fatal("no futex wakeup reached the syscall thread")
+	}
+	for range 10 {
+		if threadDead(t, tid) {
+			t.Fatalf("syscall thread %d died after spurious futex wakeups", tid)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	// munmap of an unmapped range succeeds.
+	if _, err := s.syscall(unix.SYS_MUNMAP, arch.SyscallArgument{Value: 0x10000}, arch.SyscallArgument{Value: hostarch.PageSize}); err != nil {
+		t.Fatalf("cannot munmap after spurious futex wakeups: %v", err)
+	}
+}
+
+// threadDead reports whether the thread tid is a zombie or gone.
+func threadDead(t *testing.T, tid int32) bool {
+	t.Helper()
+	stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", tid))
+	if err != nil {
+		return true
+	}
+	fields := strings.Fields(string(stat[bytes.LastIndexByte(stat, ')')+1:]))
+	return len(fields) == 0 || fields[0] == "Z" || fields[0] == "X"
 }

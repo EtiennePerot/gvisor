@@ -128,6 +128,7 @@ go_test(
         "stubfilter_arm64_test.go",
         "stubfilter_test.go",
         "systrap_test.go",
+        "systrap_unsafe_test.go",
     ],
     embed = [":systrap"],
     # Stub processes unmap glibc's registered rseq area, so disable

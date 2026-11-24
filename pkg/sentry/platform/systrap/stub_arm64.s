@@ -140,7 +140,6 @@ syscall_loop:
 	// while (sentryMessage->state != R13) {
 	// 	futex(sentryMessage->state, FUTEX_WAIT, 0, NULL, NULL, 0);
 	// }
-        MOVD R12, R0
 	MOVD $FUTEX_WAIT, R1
 	MOVD $0, R3
 	MOVD $0, R4
@@ -151,6 +150,7 @@ wait_for_syscall:
 	CMPW R2, R13
 	BEQ execute_syscall
 
+	MOVD R12, R0
 	MOVD $SYS_FUTEX, R8
 	SVC
 	JMP wait_for_syscall
