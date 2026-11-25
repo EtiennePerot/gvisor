@@ -53,13 +53,6 @@ cc_library(
 )
 
 cc_library(
-    name = "fuse_util",
-    testonly = 1,
-    srcs = ["fuse_util.cc"],
-    hdrs = ["fuse_util.h"],
-)
-
-cc_library(
     name = "io_uring_util",
     testonly = 1,
     srcs = ["io_uring_util.cc"],
