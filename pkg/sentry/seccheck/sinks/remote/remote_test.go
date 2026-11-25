@@ -16,7 +16,9 @@ package remote
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -193,26 +195,75 @@ func TestExample(t *testing.T) {
 		t.Fatalf("newExampleServer(): %v", err)
 	}
 	defer server.stop()
+	if err := checkExample(server); err != nil {
+		t.Fatal(err)
+	}
+}
 
+// TestExampleStalledClient checks that a client that connects to the example
+// server but never sends the handshake doesn't prevent other clients from
+// connecting, and that the server closes the connection of that client.
+func TestExampleStalledClient(t *testing.T) {
+	server, err := newExampleServer(false)
+	if err != nil {
+		t.Fatalf("newExampleServer(): %v", err)
+	}
+	defer server.stop()
+
+	stalled, err := net.Dial("unixpacket", server.path)
+	if err != nil {
+		t.Fatalf("Dial(%q): %v", server.path, err)
+	}
+	defer stalled.Close()
+
+	// checkExample blocks if the server can't accept another client. Its
+	// goroutine can then outlive the test, so it must not use t.
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- checkExample(server)
+	}()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("Timed out connecting to the server while another client is stalled in the handshake, out: %q", server.out.String())
+	}
+
+	// The server closes the connection of the stalled client after
+	// kHandshakeTimeoutSeconds. The read deadline must be longer than that.
+	if err := stalled.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline(): %v", err)
+	}
+	var buf [1]byte
+	if n, err := stalled.Read(buf[:]); err == nil || errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Errorf("Read() on the stalled client = (%d, %v), want an error that shows that the server closed the connection", n, err)
+	}
+}
+
+// checkExample connects to the example server, sends a point to it, and checks
+// that the server prints the point.
+func checkExample(server *exampleServer) error {
 	endpoint, err := setup(server.path)
 	if err != nil {
-		t.Fatalf("setup(): %v", err)
+		return fmt.Errorf("setup(): %w", err)
 	}
 	endpointFD, err := fd.NewFromFile(endpoint)
 	if err != nil {
 		_ = endpoint.Close()
-		t.Fatalf("NewFromFile(): %v", err)
+		return fmt.Errorf("NewFromFile(): %w", err)
 	}
 	_ = endpoint.Close()
 
 	r, err := new(nil, endpointFD)
 	if err != nil {
-		t.Fatalf("New(): %v", err)
+		return fmt.Errorf("New(): %w", err)
 	}
 
 	info := pb.ExitNotifyParentInfo{ExitStatus: 123}
 	if err := r.ExitNotifyParent(nil, seccheck.FieldSet{}, &info); err != nil {
-		t.Fatalf("ExitNotifyParent: %v", err)
+		return fmt.Errorf("ExitNotifyParent: %w", err)
 	}
 	check := func() error {
 		gotRaw := server.out.String()
@@ -223,9 +274,7 @@ func TestExample(t *testing.T) {
 		}
 		return nil
 	}
-	if err := testutil.Poll(check, time.Second); err != nil {
-		t.Errorf("%s", err.Error())
-	}
+	return testutil.Poll(check, time.Second)
 }
 
 func TestConfig(t *testing.T) {
