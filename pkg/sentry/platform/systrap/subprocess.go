@@ -1255,17 +1255,6 @@ func (s *subprocess) createSysmsgThreadLocked() error {
 	}
 
 	// Install a pre-compiled seccomp rules for the BPF process.
-	_, err = p.syscallIgnoreInterrupt(&p.initRegs, unix.SYS_PRCTL,
-		arch.SyscallArgument{Value: uintptr(linux.PR_SET_NO_NEW_PRIVS)},
-		arch.SyscallArgument{Value: uintptr(1)},
-		arch.SyscallArgument{Value: uintptr(0)},
-		arch.SyscallArgument{Value: uintptr(0)},
-		arch.SyscallArgument{Value: uintptr(0)},
-		arch.SyscallArgument{Value: uintptr(0)})
-	if err != nil {
-		return fmt.Errorf("prctl(PR_SET_NO_NEW_PRIVS) failed: %w", err)
-	}
-
 	_, err = p.syscallIgnoreInterrupt(&p.initRegs, seccomp.SYS_SECCOMP,
 		arch.SyscallArgument{Value: uintptr(linux.SECCOMP_SET_MODE_FILTER)},
 		arch.SyscallArgument{Value: uintptr(0)},
