@@ -26,19 +26,16 @@ Values under `[runsc_config]` can be used to set arbitrary flags to runsc.
 Next, containerd needs to be configured to send the configuration file to the
 shim.
 
-### Containerd 1.3+
-
-Starting in 1.3, containerd supports a configurable `ConfigPath` in the runtime
-configuration. Here is an example:
+Set `ConfigPath` in the runtime options. Here is an example:
 
 ```shell
 cat <<EOF | sudo tee /etc/containerd/config.toml
-version = 2
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+version = 3
+[plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runc]
   runtime_type = "io.containerd.runc.v2"
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]
+[plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runsc]
   runtime_type = "io.containerd.runsc.v1"
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc.options]
+[plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runsc.options]
   TypeUrl = "io.containerd.runsc.v1.options"
   ConfigPath = "/etc/containerd/runsc.toml"
 EOF
@@ -52,23 +49,21 @@ sudo systemctl restart containerd
 
 ## Debug
 
-When `shim_debug` is enabled in `/etc/containerd/config.toml`, containerd will
-forward shim logs to its own log. You can additionally set `level = "debug"` to
-enable debug logs. To see the logs run `sudo journalctl -u containerd`. Here is
-a containerd configuration file that enables both options:
+containerd forwards shim logs to its own log. When the containerd log level is
+`debug`, containerd also starts the shim in debug mode. To see the logs run
+`sudo journalctl -u containerd`. Here is a containerd configuration file that
+enables debug logs:
 
 ```shell
 cat <<EOF | sudo tee /etc/containerd/config.toml
-version = 2
+version = 3
 [debug]
   level = "debug"
-[plugins."io.containerd.runtime.v1.linux"]
-  shim_debug = true
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+[plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runc]
   runtime_type = "io.containerd.runc.v2"
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]
+[plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runsc]
   runtime_type = "io.containerd.runsc.v1"
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc.options]
+[plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runsc.options]
   TypeUrl = "io.containerd.runsc.v1.options"
   ConfigPath = "/etc/containerd/runsc.toml"
 EOF
@@ -123,10 +118,10 @@ The `/etc/containerd/config.toml` file should look like:
 
 ```
 ...
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.nvidia]
+[plugins."io.containerd.cri.v1.runtime".containerd.runtimes.nvidia]
   runtime_type = "io.containerd.runsc.v1"
 
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.nvidia.options]
+[plugins."io.containerd.cri.v1.runtime".containerd.runtimes.nvidia.options]
   TypeUrl = "io.containerd.runsc.v1.options"
   ConfigPath = "/etc/containerd/runsc.toml"
 ...
@@ -167,7 +162,7 @@ In your `/etc/containerd/config.toml`, configure containerd to propagate custom
 gVisor annotations to runsc:
 
 ```toml
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.gvisor]
+[plugins."io.containerd.cri.v1.runtime".containerd.runtimes.gvisor]
   runtime_type = "io.containerd.runsc.v1"
   pod_annotations = [ "dev.gvisor.*" ]
 ```

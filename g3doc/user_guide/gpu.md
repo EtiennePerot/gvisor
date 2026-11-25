@@ -50,7 +50,7 @@ is not yet supported.
 
 NOTE: The `nvidia-container-runtime` shim is a *legacy* GPU injection path. In
 environments where the higher-level container runtime understands the
-[Container Device Interface (CDI)](#cdi) (e.g. containerd ≥ 1.7 or CRI-O) GPUs
+[Container Device Interface (CDI)](#cdi) (e.g. containerd or CRI-O) GPUs
 can be advertised via CDI specs and `runsc` can be invoked directly, without the
 `nvidia-container-runtime` shim or its `prestart` hook. See the [CDI](#cdi)
 section below. The `nvidia-container-toolkit` package is still required on the
@@ -65,7 +65,7 @@ is a vendor-neutral specification for how container runtimes inject devices into
 containers. Instead of relying on a runtime shim, the host publishes CDI spec
 files (typically under `/etc/cdi/` or `/var/run/cdi/`) that describe the device
 nodes, bind mounts, environment variables, and hooks needed to expose a device.
-CDI-aware container runtimes (containerd ≥ 1.7, CRI-O, recent Docker) merge
+CDI-aware container runtimes (containerd, CRI-O, recent Docker) merge
 those specs into the OCI spec before invoking the low-level runtime.
 
 `runsc` is fully CDI-compatible. In particular, it honors the `createContainer`

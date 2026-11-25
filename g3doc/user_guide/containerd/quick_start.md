@@ -14,8 +14,9 @@ containerd runtime handler support on `containerd`. This is a similar setup as
 -   **runsc** and **containerd-shim-runsc-v1**: See the
     [installation guide](/docs/user_guide/install/).
 -   **containerd**: See the [containerd website](https://containerd.io/) for
-    information on how to install containerd. **Minimal version supported: 1.3.9
-    or 1.4.3.**
+    information on how to install containerd. **Minimal version supported:
+    2.0.** containerd 1.x is end of life; see
+    [containerd releases](https://containerd.io/releases/).
 
 ## Configure containerd
 
@@ -24,19 +25,19 @@ Update `/etc/containerd/config.toml`. Make sure `containerd-shim-runsc-v1` is in
 
 ```shell
 cat <<EOF | sudo tee /etc/containerd/config.toml
-version = 2
-[plugins."io.containerd.runtime.v1.linux"]
-  shim_debug = true
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runc]
+version = 3
+[plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runc]
   runtime_type = "io.containerd.runc.v2"
-[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]
+[plugins."io.containerd.cri.v1.runtime".containerd.runtimes.runsc]
   runtime_type = "io.containerd.runsc.v1"
 EOF
 ```
 
-> Consider using the version header `version = 3` if you are using containerd
-> 2.x. See the difference at
-> [containerd version header](https://github.com/containerd/containerd/blob/v2.0.2/docs/PLUGINS.md#version-header)
+> containerd 2.x also accepts configuration files with `version = 2`, which use
+> the `io.containerd.grpc.v1.cri` plugin ID instead of
+> `io.containerd.cri.v1.runtime`. containerd converts them to the current
+> version when it starts. See the
+> [containerd configuration guide](https://github.com/containerd/containerd/blob/main/docs/cri/config.md).
 
 ### Install CNI plugins
 
@@ -83,7 +84,7 @@ You can verify that you are running in gVisor using the dmesg command.
 
 ```shell
 $ sudo ctr image pull docker.io/library/busybox:latest
-$ sudo ctr run --runtime io.containerd.run.runsc.v1 -t --rm docker.io/library/busybox:latest gvisord dmesg
+$ sudo ctr run --runtime io.containerd.runsc.v1 -t --rm docker.io/library/busybox:latest gvisord dmesg
 [   0.000000] Starting gVisor...
 [   0.445958] Forking spaghetti code...
 [   0.794963] Feeding the init monster...
@@ -106,12 +107,15 @@ Alternatively, you can use crictl which designed for CRI-compatible containers.
 
 #### Install crictl
 
-Download and install the `crictl` binary:
+Download and install the `crictl` binary. If you use Kubernetes, use the
+`crictl` version that matches your Kubernetes version; see the
+[cri-tools releases](https://github.com/kubernetes-sigs/cri-tools/releases):
 
 ```shell
 {
-wget https://github.com/kubernetes-sigs/cri-tools/releases/download/v1.13.0/crictl-v1.13.0-linux-amd64.tar.gz
-tar xf crictl-v1.13.0-linux-amd64.tar.gz
+VERSION="v1.37.0"
+wget https://github.com/kubernetes-sigs/cri-tools/releases/download/${VERSION}/crictl-${VERSION}-linux-amd64.tar.gz
+tar xf crictl-${VERSION}-linux-amd64.tar.gz
 sudo mv crictl /usr/local/bin
 }
 ```
