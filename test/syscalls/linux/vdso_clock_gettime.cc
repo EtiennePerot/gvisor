@@ -33,6 +33,7 @@
 
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "absl/base/attributes.h"
 #include "absl/strings/str_cat.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
@@ -167,6 +168,14 @@ void* VDSOFunction(const char* name) {
   return nullptr;
 }
 
+// Calls the VDSO clock_gettime entry point directly without CFI checks, since
+// the VDSO is built outside the test binary and has no CFI type hash preamble.
+ABSL_ATTRIBUTE_NO_SANITIZE_CFI int CallVDSOClockGettime(
+    int (*fn)(clockid_t, struct timespec*), clockid_t clock,
+    struct timespec* ts) {
+  return fn(clock, ts);
+}
+
 // Check that the VDSO reads the clock without making a system call.
 TEST(VDSOClockTest, NoSyscall) {
   // On Linux, whether the VDSO makes a system call depends on the host's clock
@@ -194,7 +203,8 @@ TEST(VDSOClockTest, NoSyscall) {
                 for (int i = 0; i < 1000; i++) {
                   struct timespec ts;
                   // The VDSO returns -errno rather than setting errno.
-                  const int ret = vdso_clock_gettime(CLOCK_MONOTONIC, &ts);
+                  const int ret = CallVDSOClockGettime(vdso_clock_gettime,
+                                                       CLOCK_MONOTONIC, &ts);
                   if (ret == 0) {
                     _exit(0);
                   }

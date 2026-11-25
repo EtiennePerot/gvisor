@@ -5443,6 +5443,7 @@ cc_binary(
         "//test/util:save_util",
         "//test/util:test_main",
         "//test/util:test_util",
+        "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/time",
     ],
