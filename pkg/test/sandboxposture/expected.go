@@ -312,7 +312,7 @@ func expectedNamespaces(opts ExpectedOpts, newUserNS bool) Namespaces {
 		PID:    NSNew,
 		IPC:    NSNew,
 		UTS:    NSNew,
-		Cgroup: NSInherited, // We set IgnoreCgroups, so this doesn't change.
+		Cgroup: NSNew,
 		Time:   NSInherited,
 		User:   NSInherited,
 	}

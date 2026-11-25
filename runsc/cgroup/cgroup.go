@@ -35,6 +35,7 @@ import (
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sys/unix"
+
 	"gvisor.dev/gvisor/pkg/cleanup"
 	"gvisor.dev/gvisor/pkg/log"
 )
@@ -47,8 +48,20 @@ const (
 	procRoot = "/proc"
 )
 
+// cgroupRootInfo contains info on the cgroups mount from /proc/self/mountinfo.
+type cgroupRootInfo struct {
+	// path is the cgroupfs root.
+	path string
+
+	// nsdelegate is whether the cgroupfs mount has the `nsdelegate` option.
+	nsdelegate bool
+}
+
+// defaultCgroupRoot is used when no cgroup mount is found.
+var defaultCgroupRoot = cgroupRootInfo{path: "/sys/fs/cgroup"}
+
 var (
-	cgroupRootInternal string
+	cgroupRootInternal cgroupRootInfo
 	cgroupRootOnce     sync.Once
 )
 
@@ -57,22 +70,29 @@ func cgroupRoot() string {
 	cgroupRootOnce.Do(func() {
 		cgroupRootInternal = findCgroupRoot()
 	})
-	return cgroupRootInternal
+	return cgroupRootInternal.path
 }
 
-// findCgroupRoot parses /proc/self/mountinfo to dynamically detect the cgroup root path.
+// HasNSDelegate returns whether cgroup2 is mounted with the `nsdelegate`
+// option. Only meaningful when `IsOnlyV2` is true.
+func HasNSDelegate() bool {
+	cgroupRoot() // Populates `cgroupRootInternal`.
+	return cgroupRootInternal.nsdelegate
+}
+
+// findCgroupRoot parses /proc/self/mountinfo to dynamically detect the cgroup root.
 // It defaults to "/sys/fs/cgroup" if detection fails.
-func findCgroupRoot() string {
+func findCgroupRoot() cgroupRootInfo {
 	f, err := os.Open(filepath.Join(procRoot, "self/mountinfo"))
 	if err != nil {
-		return "/sys/fs/cgroup"
+		return defaultCgroupRoot
 	}
 	defer f.Close()
 
 	return parseCgroupRoot(f)
 }
 
-func parseCgroupRoot(r io.Reader) string {
+func parseCgroupRoot(r io.Reader) cgroupRootInfo {
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
@@ -81,20 +101,26 @@ func parseCgroupRoot(r io.Reader) string {
 		}
 		fstype := fields[len(fields)-3]
 		if fstype == cgroupv1FsName || fstype == cgroupv2FsName {
+			// The last field holds the superblock options.
+			info := cgroupRootInfo{
+				nsdelegate: fstype == cgroupv2FsName && slices.Contains(strings.Split(fields[len(fields)-1], ","), "nsdelegate"),
+			}
 			mountPoint := fields[4]
 			// If mountPoint is a controller subdirectory (e.g., /sys/fs/cgroup/memory,
-			// /sys/fs/cgroup/cpu,cpuacct, or /sys/fs/cgroup/unified), return its parent
-			// directory as the cgroup root. Otherwise, return mountPoint directly
+			// /sys/fs/cgroup/cpu,cpuacct, or /sys/fs/cgroup/unified), use its parent
+			// directory as the cgroup root. Otherwise, use mountPoint directly
 			// (e.g., /sys/fs/cgroup or /dev/cgroup).
 			base := filepath.Base(mountPoint)
 			name := strings.TrimPrefix(base, "name=")
 			if _, ok := controllers[name]; ok || base == "unified" || strings.Contains(base, ",") {
-				return filepath.Dir(mountPoint)
+				info.path = filepath.Dir(mountPoint)
+			} else {
+				info.path = mountPoint
 			}
-			return mountPoint
+			return info
 		}
 	}
-	return "/sys/fs/cgroup"
+	return defaultCgroupRoot
 }
 
 var controllers = map[string]controller{

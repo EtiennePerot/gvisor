@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -138,7 +139,7 @@ func TestSandboxPostureDocker(t *testing.T) {
 	}
 	checkThreads(t, "after start", pid, got)
 	if !conf.IgnoreCgroups {
-		checkDeviceCgroup(t, pid, shimPID)
+		checkCgroupConfinement(t, pid, shimPID)
 	}
 
 	// Check the threads a second time after forcing the sandbox to create more
@@ -285,7 +286,7 @@ func TestSandboxPostureDo(t *testing.T) {
 	}
 	checkThreads(t, "under `runsc do`", pid, got)
 	if !conf.IgnoreCgroups {
-		checkDeviceCgroup(t, pid, cmd.Process.Pid)
+		checkCgroupConfinement(t, pid, cmd.Process.Pid)
 	}
 	if err := cmd.Process.Kill(); err != nil {
 		t.Fatalf("Killing the `runsc do` process: %v", err)
@@ -309,10 +310,11 @@ func TestSandboxPostureDo(t *testing.T) {
 	}
 }
 
-// checkDeviceCgroup requires that the gofers under root are confined like the
-// sandbox, and that the sandbox's cgroup denies any process in it a device
+// checkCgroupConfinement requires that the sandbox and the gofers under root
+// are at the root of their cgroup namespaces, that the gofers are confined like
+// the sandbox, and that the sandbox's cgroup denies any process in it a device
 // outside the whitelist.
-func checkDeviceCgroup(t *testing.T, sandboxPID, root int) {
+func checkCgroupConfinement(t *testing.T, sandboxPID, root int) {
 	t.Helper()
 	gofers, err := goferPIDsUnder(root)
 	if err != nil {
@@ -321,7 +323,9 @@ func checkDeviceCgroup(t *testing.T, sandboxPID, root int) {
 	if len(gofers) == 0 {
 		t.Fatalf("Found no gofer under PID %d", root)
 	}
+	checkCgroupNamespaceRoot(t, "Sandbox", sandboxPID)
 	for _, pid := range gofers {
+		checkCgroupNamespaceRoot(t, "Gofer", pid)
 		got, err := sandboxposture.DeviceCgroupOf(pid, procPath())
 		if err != nil {
 			t.Fatalf("Device cgroup of gofer %d: %v", pid, err)
@@ -361,6 +365,49 @@ func checkDeviceCgroup(t *testing.T, sandboxPID, root int) {
 	if err := unix.Mknod(path, unix.S_IFCHR|0600, int(unix.Mkdev(1, 7))); !errors.Is(err, unix.EPERM) {
 		t.Errorf("mknod of /dev/full in the sandbox's cgroup: got %v, want %v", err, unix.EPERM)
 	}
+}
+
+// checkCgroupNamespaceRoot requires that the cgroup namespace of the process is
+// rooted at its cgroups, so that it cannot move out of them on hosts that mount
+// cgroup2 with `nsdelegate`.
+func checkCgroupNamespaceRoot(t *testing.T, role string, pid int) {
+	t.Helper()
+	cgroups, err := cgroupsInOwnNamespace(pid)
+	if err != nil {
+		t.Fatalf("%s %d: reading cgroups from its cgroup namespace: %v", role, pid, err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(cgroups), "\n") {
+		if !strings.HasSuffix(line, ":/") {
+			t.Errorf("%s %d: cgroup %q is not the root of its cgroup namespace", role, pid, line)
+		}
+	}
+}
+
+// cgroupsInOwnNamespace returns `/proc/<pid>/cgroup` as read from the cgroup
+// namespace of the process.
+func cgroupsInOwnNamespace(pid int) (string, error) {
+	type result struct {
+		cgroups string
+		err     error
+	}
+	ch := make(chan result)
+	go func() {
+		runtime.LockOSThread() // Don't unlock as this thread moves to a different namespace.
+		ns, err := os.Open(procPath(strconv.Itoa(pid), "ns", "cgroup"))
+		if err != nil {
+			ch <- result{err: err}
+			return
+		}
+		defer ns.Close()
+		if err := unix.Setns(int(ns.Fd()), unix.CLONE_NEWCGROUP); err != nil {
+			ch <- result{err: fmt.Errorf("cannot enter cgroup namespace: %w", err)}
+			return
+		}
+		cgroups, err := os.ReadFile(procPath(strconv.Itoa(pid), "cgroup"))
+		ch <- result{string(cgroups), err}
+	}()
+	r := <-ch
+	return r.cgroups, r.err
 }
 
 // goferPIDsUnder returns the PIDs of the gofers descended from root.

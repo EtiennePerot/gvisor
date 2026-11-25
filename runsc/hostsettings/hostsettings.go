@@ -73,6 +73,26 @@ func Handle(conf *config.Config) error {
 	return nil
 }
 
+// ReportCgroupNSDelegate warns if cgroup2 is not mounted with `nsdelegate`.
+// We never add `nsdelegate` as it changes cgroup semantics for every
+// container on the host.
+func ReportCgroupNSDelegate(conf *config.Config, nsdelegate bool) {
+	const (
+		name    = "cgroup2 mount option nsdelegate"
+		purpose = "nsdelegate makes the cgroup namespaces of the sandbox and gofer a delegation boundary that keeps them in their cgroup and any device restrictions it has"
+	)
+	if conf.HostSettings == config.HostSettingsIgnore {
+		return
+	}
+	if nsdelegate {
+		log.Infof("Host setting %q is optimal", name)
+		return
+	}
+	if conf.HostSettings != config.HostSettingsCheckMandatory {
+		log.Warningf("SECURITY: Host setting %q (currently: \"unset\") is not optimal (%s). gVisor does not remount `cgroupfs`, because `nsdelegate` changes cgroup semantics for every container on the host. It is recommended to mount `cgroupfs` with `nsdelegate`.", name, purpose)
+	}
+}
+
 // Setting is a host setting to check or adjust.
 type Setting interface {
 	// Name is the name of the setting. In most cases this should be the

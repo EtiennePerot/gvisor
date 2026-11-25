@@ -1363,10 +1363,10 @@ func (s *Sandbox) createSandboxProcess(conf *config.Config, args *Args) error {
 	// nss is the set of namespaces to join or create before starting the sandbox
 	// process. Mount, IPC and UTS namespaces from the host are not used as they
 	// are virtualized inside the sandbox. Be paranoid and run inside an empty
-	// namespace for these. Don't unshare cgroup because sandbox is added to a
-	// cgroup in the caller's namespace.
-	log.Infof("Sandbox will be started in new mount, IPC and UTS namespaces")
+	// namespace for these.
+	log.Infof("Sandbox will be started in new cgroup, mount, IPC, PID and UTS namespaces")
 	nss := []specs.LinuxNamespace{
+		{Type: specs.CgroupNamespace},
 		{Type: specs.IPCNamespace},
 		{Type: specs.MountNamespace},
 		{Type: specs.UTSNamespace},

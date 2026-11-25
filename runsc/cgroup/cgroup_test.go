@@ -64,8 +64,8 @@ var dindMountinfo = `
 func TestUninstallEnoent(t *testing.T) {
 	// Keep the missing cgroup paths under a test directory, not the host mount.
 	oldRoot := cgroupRoot()
-	cgroupRootInternal = t.TempDir()
-	t.Cleanup(func() { cgroupRootInternal = oldRoot })
+	cgroupRootInternal.path = t.TempDir()
+	t.Cleanup(func() { cgroupRootInternal.path = oldRoot })
 
 	c := cgroupV1{
 		// Use a non-existent name.
@@ -1117,70 +1117,74 @@ func TestParseCgroupRoot(t *testing.T) {
 	testCases := []struct {
 		name      string
 		mountinfo string
-		want      string
+		want      cgroupRootInfo
 	}{
 		{
 			name:      "debian-v1",
 			mountinfo: debianMountinfo,
-			want:      "/sys/fs/cgroup",
+			want:      cgroupRootInfo{path: "/sys/fs/cgroup"},
 		},
 		{
 			name:      "dind-v1",
 			mountinfo: dindMountinfo,
-			want:      "/sys/fs/cgroup",
+			want:      cgroupRootInfo{path: "/sys/fs/cgroup"},
 		},
 		{
 			name:      "cgroup2-v2",
-			mountinfo: "1 2 0:3 / /sys/fs/cgroup rw shared:4 - cgroup2 cgroup2 rw,seclabel,nsdelegate",
-			want:      "/sys/fs/cgroup",
+			mountinfo: "1 2 0:3 / /sys/fs/cgroup rw shared:4 - cgroup2 cgroup2 rw,seclabel,nsdelegate,memory_recursiveprot",
+			want:      cgroupRootInfo{path: "/sys/fs/cgroup", nsdelegate: true},
+		},
+		{
+			name:      "cgroup2-v2-no-nsdelegate",
+			mountinfo: "1 2 0:3 / /sys/fs/cgroup rw,nsdelegate shared:4 - cgroup2 cgroup2 rw,memory_recursiveprot",
+			want:      cgroupRootInfo{path: "/sys/fs/cgroup"},
 		},
 		{
 			name:      "some-v1-controller-dir",
 			mountinfo: "4 5 0:6 / /dev/cgroup/memory rw shared:9 - cgroup cgroup rw,memory",
-			want:      "/dev/cgroup",
+			want:      cgroupRootInfo{path: "/dev/cgroup"},
 		},
 		{
 			name:      "some-v1-root-dir",
 			mountinfo: "77 88 0:99 / /dev/cgroup rw shared:9 - cgroup cgroup rw,memory",
-			want:      "/dev/cgroup",
+			want:      cgroupRootInfo{path: "/dev/cgroup"},
 		},
 		{
 			name:      "v1-job",
 			mountinfo: "15 1 0:0 / /dev/cgroup/job rw shared:9 - cgroup cgroup rw,job",
-			want:      "/dev/cgroup",
+			want:      cgroupRootInfo{path: "/dev/cgroup"},
 		},
 		{
 			name:      "v1-named-job",
 			mountinfo: "15 1 0:0 / /dev/cgroup/job rw shared:9 - cgroup cgroup rw,name=job",
-			want:      "/dev/cgroup",
+			want:      cgroupRootInfo{path: "/dev/cgroup"},
 		},
 		{
 			name:      "v1-io",
 			mountinfo: "7971 7962 0:39 / /dev/cgroup/io rw master:1563 - cgroup cgroup rw,io,favordynmods",
-			want:      "/dev/cgroup",
+			want:      cgroupRootInfo{path: "/dev/cgroup"},
 		},
 		{
 			name:      "v1-named-borglet",
 			mountinfo: "7972 7962 0:40 / /dev/cgroup/borglet rw master:1564 - cgroup cgroup rw,favordynmods,name=borglet",
-			want:      "/dev/cgroup",
+			want:      cgroupRootInfo{path: "/dev/cgroup"},
 		},
 		{
 			name:      "v1-net",
 			mountinfo: "7974 7962 0:42 / /dev/cgroup/net rw master:1566 - cgroup cgroup rw,net,favordynmods",
-			want:      "/dev/cgroup",
+			want:      cgroupRootInfo{path: "/dev/cgroup"},
 		},
 		{
 			name:      "empty",
 			mountinfo: "",
-			want:      "/sys/fs/cgroup",
+			want:      cgroupRootInfo{path: "/sys/fs/cgroup"},
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := parseCgroupRoot(strings.NewReader(tc.mountinfo))
-			if got != tc.want {
-				t.Errorf("parseCgroupRoot() = %q, want %q", got, tc.want)
+			if got := parseCgroupRoot(strings.NewReader(tc.mountinfo)); got != tc.want {
+				t.Errorf("parseCgroupRoot() = %+v, want %+v", got, tc.want)
 			}
 		})
 	}
@@ -1190,9 +1194,9 @@ func TestCreateController(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	cgroupRoot()
-	oldCgroupRoot := cgroupRootInternal
-	cgroupRootInternal = tmpDir
-	defer func() { cgroupRootInternal = oldCgroupRoot }()
+	oldCgroupRoot := cgroupRootInternal.path
+	cgroupRootInternal.path = tmpDir
+	defer func() { cgroupRootInternal.path = oldCgroupRoot }()
 
 	c := &cgroupV1{Name: "test-cgroup"}
 
@@ -1248,9 +1252,9 @@ func TestInstallMissingNetController(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	cgroupRoot()
-	oldCgroupRoot := cgroupRootInternal
-	cgroupRootInternal = tmpDir
-	defer func() { cgroupRootInternal = oldCgroupRoot }()
+	oldCgroupRoot := cgroupRootInternal.path
+	cgroupRootInternal.path = tmpDir
+	defer func() { cgroupRootInternal.path = oldCgroupRoot }()
 
 	// Provide the mandatory "memory" controller root directory.
 	if err := os.Mkdir(filepath.Join(tmpDir, "memory"), 0755); err != nil {
