@@ -36,6 +36,7 @@
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
 #include "test/syscalls/linux/unix_domain_socket_test_util.h"
+#include "test/util/file_descriptor.h"
 #include "test/util/memory_util.h"
 #include "test/util/posix_error.h"
 #include "test/util/save_util.h"
@@ -381,6 +382,58 @@ TEST_P(UnixNonStreamSocketPairTest, ZeroLengthRecvPeerShutdown) {
           SyscallFailsWithErrno(EAGAIN));
     }
   }
+}
+
+// A zero-length send on a packet socket queues an empty message.
+TEST_P(UnixNonStreamSocketPairTest, ZeroLengthSend) {
+  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
+
+  struct msghdr msg = {};
+  ASSERT_THAT(RetryEINTR(sendmsg)(sockets->second_fd(), &msg, 0),
+              SyscallSucceedsWithValue(0));
+  ASSERT_THAT(RetryEINTR(send)(sockets->second_fd(), nullptr, 0, 0),
+              SyscallSucceedsWithValue(0));
+
+  char buf[1];
+  for (int i = 0; i < 2; i++) {
+    EXPECT_THAT(
+        RetryEINTR(recv)(sockets->first_fd(), buf, sizeof(buf), MSG_DONTWAIT),
+        SyscallSucceedsWithValue(0));
+  }
+  EXPECT_THAT(
+      RetryEINTR(recv)(sockets->first_fd(), buf, sizeof(buf), MSG_DONTWAIT),
+      SyscallFailsWithErrno(EAGAIN));
+}
+
+// A zero-length send on a packet socket delivers its SCM_RIGHTS fds. The
+// received fd stays valid after the sender closes its copy.
+TEST_P(UnixNonStreamSocketPairTest, ZeroLengthSendWithFD) {
+  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
+
+  int pipe_fds[2];
+  ASSERT_THAT(pipe(pipe_fds), SyscallSucceeds());
+  FileDescriptor read_end(pipe_fds[0]);
+  FileDescriptor write_end(pipe_fds[1]);
+
+  ASSERT_NO_FATAL_FAILURE(
+      SendSingleFD(sockets->second_fd(), write_end.get(), nullptr, 0));
+  write_end.reset();
+
+  // Fail now instead of blocking in RecvSingleFD if no message was queued.
+  struct pollfd pfd = {.fd = sockets->first_fd(), .events = POLLIN};
+  ASSERT_THAT(RetryEINTR(poll)(&pfd, 1, 0), SyscallSucceedsWithValue(1));
+
+  int fd = -1;
+  ASSERT_NO_FATAL_FAILURE(RecvSingleFD(sockets->first_fd(), &fd, nullptr, 0));
+  FileDescriptor received_write_end(fd);
+
+  char sent = 'a';
+  ASSERT_THAT(WriteFd(received_write_end.get(), &sent, sizeof(sent)),
+              SyscallSucceedsWithValue(sizeof(sent)));
+  char received;
+  ASSERT_THAT(ReadFd(read_end.get(), &received, sizeof(received)),
+              SyscallSucceedsWithValue(sizeof(received)));
+  EXPECT_EQ(sent, received);
 }
 
 // Shutting down writes fails subsequent sends with EPIPE, and must not

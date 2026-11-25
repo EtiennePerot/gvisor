@@ -1134,8 +1134,8 @@ func sendSingleMsg(t *kernel.Task, s socket.Socket, file *vfs.FileDescription, m
 	// Call the syscall implementation.
 	n, e := s.SendMsg(t, src, to, int(flags), haveDeadline, deadline, controlMessages)
 	err = HandleIOError(t, n != 0, e.ToError(), linuxerr.ERESTARTSYS, "sendmsg", file)
-	// Control messages should be released on error as well as for zero-length
-	// messages, which are discarded by the receiver.
+	// Release the rights that the socket did not take. A socket that takes
+	// the rights clears them in controlMessages.
 	if n == 0 || err != nil {
 		controlMessages.Release(t)
 	}

@@ -675,6 +675,15 @@ func (s *Socket) SendMsg(t *kernel.Task, src usermem.IOSequence, to []byte, flag
 		}
 	}
 
+	// CopyInTo does not call w for an empty src, so send empty packets directly.
+	if src.NumBytes() == 0 && s.stype != linux.SOCK_STREAM {
+		n, notify, err := s.ep.SendMsg(t, [][]byte{}, w.Control, w.To)
+		if notify != nil {
+			notify()
+		}
+		return int(n), err
+	}
+
 	n, err := src.CopyInTo(t, &w)
 	if w.Notify != nil {
 		w.Notify()

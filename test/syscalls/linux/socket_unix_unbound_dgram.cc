@@ -128,6 +128,24 @@ TEST_P(UnboundDgramUnixSocketPairTest, ZeroWriteAllowed) {
               SyscallSucceedsWithValue(0));
 }
 
+TEST_P(UnboundDgramUnixSocketPairTest, ZeroSendtoAllowed) {
+  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
+  ASSERT_THAT(bind(sockets->first_fd(), sockets->first_addr(),
+                   sockets->first_addr_size()),
+              SyscallSucceeds());
+
+  // Send a zero length packet without connecting.
+  ASSERT_THAT(
+      RetryEINTR(sendto)(sockets->second_fd(), nullptr, 0, 0,
+                         sockets->first_addr(), sockets->first_addr_size()),
+      SyscallSucceedsWithValue(0));
+  // Receive the packet.
+  char received_data[3];
+  ASSERT_THAT(RetryEINTR(recv)(sockets->first_fd(), received_data,
+                               sizeof(received_data), MSG_DONTWAIT),
+              SyscallSucceedsWithValue(0));
+}
+
 TEST_P(UnboundDgramUnixSocketPairTest, Listen) {
   auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
   ASSERT_THAT(listen(sockets->first_fd(), 0), SyscallFailsWithErrno(ENOTSUP));
