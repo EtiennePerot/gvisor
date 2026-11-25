@@ -18,6 +18,7 @@
 #include <fcntl.h>
 #include <linux/capability.h>
 #include <net/if.h>
+#include <poll.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
@@ -33,6 +34,7 @@
 #include "gtest/gtest.h"
 #include "test/syscalls/linux/unix_domain_socket_test_util.h"
 #include "test/util/cleanup.h"
+#include "test/util/file_descriptor.h"
 #include "test/util/linux_capability_util.h"
 #include "test/util/memory_util.h"
 #include "test/util/posix_error.h"
@@ -1861,6 +1863,39 @@ TEST_P(UnixSocketPairCmsgTest, ZeroLengthRecvReceivesFD) {
     EXPECT_EQ(received_data, sent_data);
     EXPECT_EQ(CMSG_FIRSTHDR(&recv_msg2), nullptr);
   }
+}
+
+// A zero-length send on a packet socket delivers its SCM_RIGHTS fds. The
+// received fd stays valid after the sender closes its copy.
+TEST_P(UnixSocketPairCmsgTest, ZeroLengthSendWithFD) {
+  SKIP_IF((GetParam().type & ~(SOCK_NONBLOCK | SOCK_CLOEXEC)) == SOCK_STREAM);
+
+  auto sockets = ASSERT_NO_ERRNO_AND_VALUE(NewSocketPair());
+
+  int pipe_fds[2];
+  ASSERT_THAT(pipe(pipe_fds), SyscallSucceeds());
+  FileDescriptor read_end(pipe_fds[0]);
+  FileDescriptor write_end(pipe_fds[1]);
+
+  ASSERT_NO_FATAL_FAILURE(
+      SendSingleFD(sockets->second_fd(), write_end.get(), nullptr, 0));
+  write_end.reset();
+
+  // Fail now instead of blocking in RecvSingleFD if no message was queued.
+  struct pollfd pfd = {.fd = sockets->first_fd(), .events = POLLIN};
+  ASSERT_THAT(RetryEINTR(poll)(&pfd, 1, 0), SyscallSucceedsWithValue(1));
+
+  int fd = -1;
+  ASSERT_NO_FATAL_FAILURE(RecvSingleFD(sockets->first_fd(), &fd, nullptr, 0));
+  FileDescriptor received_write_end(fd);
+
+  char sent = 'a';
+  ASSERT_THAT(WriteFd(received_write_end.get(), &sent, sizeof(sent)),
+              SyscallSucceedsWithValue(sizeof(sent)));
+  char received;
+  ASSERT_THAT(ReadFd(read_end.get(), &received, sizeof(received)),
+              SyscallSucceedsWithValue(sizeof(received)));
+  EXPECT_EQ(sent, received);
 }
 
 }  // namespace
