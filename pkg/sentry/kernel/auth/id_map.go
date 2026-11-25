@@ -122,7 +122,24 @@ type IDMapEntry struct {
 //
 // +checklocksexclude:ns.mu
 func (ns *UserNamespace) SetUIDMap(ctx context.Context, entries []IDMapEntry) error {
+	// The root namespace's ID maps are populated at creation (see
+	// NewRootUserNamespace), so the "write once" check below would return
+	// EPERM anyway. Checking here guarantees ns.parent != nil below.
+	if ns.parent == nil {
+		return linuxerr.EPERM
+	}
+
 	c := CredentialsFromContext(ctx)
+
+	// Map the parent UID before acquiring ns.mu to avoid nested locking of
+	// userNamespaceMutex when ns.parent is itself a non-root namespace.
+	// ns.parent and its ID maps are immutable once ns has been created.
+	hasParentCap := c.HasCapabilityIn(linux.CAP_SETUID, ns.parent)
+	isSingleIDEntry := len(entries) == 1 && entries[0].Length == 1
+	parentKUID := KUID(NoID)
+	if !hasParentCap && isSingleIDEntry {
+		parentKUID = ns.parent.MapToKUID(UID(entries[0].FirstParentID))
+	}
 
 	ns.mu.Lock()
 	defer ns.mu.Unlock()
@@ -162,7 +179,7 @@ func (ns *UserNamespace) SetUIDMap(ctx context.Context, entries []IDMapEntry) er
 	//	* Either the writing process has the CAP_SETUID (CAP_SETGID) capability
 	//		in the parent user namespace.
 	// """
-	if !c.HasCapabilityIn(linux.CAP_SETUID, ns.parent) {
+	if !hasParentCap {
 		// """
 		//	* Or otherwise all of the following restrictions apply:
 		//
@@ -170,7 +187,7 @@ func (ns *UserNamespace) SetUIDMap(ctx context.Context, entries []IDMapEntry) er
 		//			that maps the writing process' effective user ID (group ID) in the
 		//			parent user namespace to a user ID (group ID) in the user namespace.
 		// """
-		if len(entries) != 1 || ns.parent.MapToKUID(UID(entries[0].FirstParentID)) != c.EffectiveKUID || entries[0].Length != 1 {
+		if !isSingleIDEntry || parentKUID != c.EffectiveKUID {
 			return linuxerr.EPERM
 		}
 		// """
@@ -260,7 +277,24 @@ func (ns *UserNamespace) trySetUIDMap(entries []IDMapEntry) error {
 //
 // +checklocksexclude:ns.mu
 func (ns *UserNamespace) SetGIDMap(ctx context.Context, entries []IDMapEntry) error {
+	// The root namespace's ID maps are populated at creation (see
+	// NewRootUserNamespace), so the "write once" check below would return
+	// EPERM anyway. Checking here guarantees ns.parent != nil below.
+	if ns.parent == nil {
+		return linuxerr.EPERM
+	}
+
 	c := CredentialsFromContext(ctx)
+
+	// Map the parent GID before acquiring ns.mu to avoid nested locking of
+	// userNamespaceMutex when ns.parent is itself a non-root namespace.
+	// ns.parent and its ID maps are immutable once ns has been created.
+	hasParentCap := c.HasCapabilityIn(linux.CAP_SETGID, ns.parent)
+	isSingleIDEntry := len(entries) == 1 && entries[0].Length == 1
+	parentKGID := KGID(NoID)
+	if !hasParentCap && isSingleIDEntry {
+		parentKGID = ns.parent.MapToKGID(GID(entries[0].FirstParentID))
+	}
 
 	ns.mu.Lock()
 	defer ns.mu.Unlock()
@@ -276,8 +310,8 @@ func (ns *UserNamespace) SetGIDMap(ctx context.Context, entries []IDMapEntry) er
 	if c.UserNamespace != ns && c.UserNamespace != ns.parent {
 		return linuxerr.EPERM
 	}
-	if !c.HasCapabilityIn(linux.CAP_SETGID, ns.parent) {
-		if len(entries) != 1 || ns.parent.MapToKGID(GID(entries[0].FirstParentID)) != c.EffectiveKGID || entries[0].Length != 1 {
+	if !hasParentCap {
+		if !isSingleIDEntry || parentKGID != c.EffectiveKGID {
 			return linuxerr.EPERM
 		}
 		// It's correct for this to still be UID.
