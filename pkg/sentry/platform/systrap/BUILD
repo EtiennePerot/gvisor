@@ -122,6 +122,7 @@ go_test(
     size = "small",
     srcs = [
         "context_queue_test.go",
+        "seccomp_notify_test.go",
         "shared_context_test.go",
         "stubfilter_test.go",
         "systrap_test.go",
