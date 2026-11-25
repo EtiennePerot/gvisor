@@ -607,6 +607,12 @@ type HostFDProvider interface {
 	HostFD() int
 }
 
+// DMABufProvider is implemented by file descriptions that wrap a host dma-buf
+// FD.
+type DMABufProvider interface {
+	DMABufHostFD() int
+}
+
 // MountRootPathProvider is an interface for filesystems that customize the
 // root path of a mount as displayed in /proc/<pid>/mountinfo.
 type MountRootPathProvider interface {

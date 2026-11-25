@@ -509,7 +509,7 @@ func frontendExportToDMABufFD[Params any, PtrParams hasFrontendFDAndStatusPtr[Pa
 }
 
 // dmaBufFDWrapper wraps a host dma-buf fd returned by the NVIDIA driver's
-// export operation as an application FD. It implements vfs.HostFDProvider so
+// export operation as an application FD. It implements vfs.DMABufProvider so
 // that rdmaproxy can recover the host fd to hand to ibv_reg_dmabuf_mr.
 //
 // +stateify savable
@@ -522,8 +522,8 @@ type dmaBufFDWrapper struct {
 	hostFD int32
 }
 
-// HostFD implements vfs.HostFDProvider.HostFD.
-func (fd *dmaBufFDWrapper) HostFD() int {
+// DMABufHostFD implements vfs.DMABufProvider.DMABufHostFD.
+func (fd *dmaBufFDWrapper) DMABufHostFD() int {
 	return int(fd.hostFD)
 }
 

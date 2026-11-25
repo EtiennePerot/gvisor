@@ -196,7 +196,7 @@ func (fd *uverbsFD) handleRDMAVerbsIoctl(t *kernel.Task, argPtr hostarch.Addr) (
 			}
 			// data_s64; negative means "no fd", forwarded unchanged.
 			if int64(a.Data) >= 0 {
-				hostFD, file, err := fd.translateHostBackedFD(t, int32(a.Data))
+				hostFD, file, err := fd.translateDMABufFD(t, int32(a.Data))
 				if err != nil {
 					return 0, err
 				}
@@ -478,11 +478,11 @@ func (fd *uverbsFD) translateInputFD(t *kernel.Task, appFD int32) (int, *vfs.Fil
 	return int(afd.hostFD), file, nil
 }
 
-// translateHostBackedFD resolves an app fd backed by a host fd (e.g. an
-// nvproxy dma-buf export) to its host fd via vfs.HostFDProvider. The caller
-// takes a ref on the returned file, which must be released once the host fd is
-// no longer needed.
-func (fd *uverbsFD) translateHostBackedFD(t *kernel.Task, appFD int32) (int, *vfs.FileDescription, error) {
+// translateDMABufFD resolves an app fd wrapping a host dma-buf (e.g. an nvproxy
+// dma-buf export) to its host fd via vfs.DMABufProvider. The caller takes a ref
+// on the returned file, which must be released once the host fd is no longer
+// needed.
+func (fd *uverbsFD) translateDMABufFD(t *kernel.Task, appFD int32) (int, *vfs.FileDescription, error) {
 	if appFD < 0 {
 		return 0, nil, linuxerr.EBADF
 	}
@@ -490,13 +490,13 @@ func (fd *uverbsFD) translateHostBackedFD(t *kernel.Task, appFD int32) (int, *vf
 	if file == nil {
 		return 0, nil, linuxerr.EBADF
 	}
-	hp, ok := file.Impl().(vfs.HostFDProvider)
+	dp, ok := file.Impl().(vfs.DMABufProvider)
 	if !ok {
-		log.Warningf("rdmaproxy: unsupported fd=%d type %T (not a vfs.HostFDProvider)", appFD, file.Impl())
+		log.Warningf("rdmaproxy: unsupported fd=%d type %T (not a dma-buf)", appFD, file.Impl())
 		file.DecRef(t)
 		return 0, nil, linuxerr.EINVAL
 	}
-	return hp.HostFD(), file, nil
+	return dp.DMABufHostFD(), file, nil
 }
 
 // findAttr returns the attribute with the given id, or nil.
@@ -569,7 +569,7 @@ func (fd *uverbsFD) prepareDMABufFD(t *kernel.Task, attrs []ib.UverbsAttr, xlats
 	if a == nil {
 		return nil, linuxerr.EINVAL
 	}
-	hostFD, file, err := fd.translateHostBackedFD(t, int32(a.Data))
+	hostFD, file, err := fd.translateDMABufFD(t, int32(a.Data))
 	if err != nil {
 		return nil, err
 	}

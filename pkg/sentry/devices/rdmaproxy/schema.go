@@ -72,8 +72,8 @@ const (
 	// host fd in the sentry process and writes its number into the data
 	// field; the proxy wraps it in a sentry FD and rewrites the field.
 	AttrFdNew
-	// AttrRawFd is a raw file descriptor (len==0, data_s64=fd), translated
-	// like AttrFdIn when non-negative.
+	// AttrRawFd is a raw dma-buf file descriptor (len==0, data_s64=fd),
+	// translated to its host fd when non-negative.
 	AttrRawFd
 	// AttrUnsupported is a modeled-but-rejected attribute (e.g. UMEM or a
 	// buffer-FD path the proxy does not implement). Its presence in a request
