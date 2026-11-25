@@ -471,8 +471,6 @@ func hostFilesystemFilters(access HostFSAccess, vars precompiledseccomp.Values) 
 			seccomp.AnyValue{},
 			seccomp.AnyValue{},
 		},
-		// The Sentry does not check that a mount is writable before it
-		// changes an extended attribute.
 		unix.SYS_FREMOVEXATTR: seccomp.PerArg{
 			seccomp.NonNegativeFD{},
 			seccomp.AnyValue{},
@@ -485,10 +483,10 @@ func hostFilesystemFilters(access HostFSAccess, vars precompiledseccomp.Values) 
 			seccomp.AnyValue{},
 		},
 	})
-	if access < HostFSReadWrite {
+	if access < HostFSReadWriteExistingFiles {
 		return rules
 	}
-	return rules.Merge(seccomp.MakeSyscallRules(map[uintptr]seccomp.SyscallRule{
+	rules.Merge(seccomp.MakeSyscallRules(map[uintptr]seccomp.SyscallRule{
 		unix.SYS_FCHOWNAT: seccomp.PerArg{
 			seccomp.NonNegativeFD{},
 			seccomp.AnyValue{},
@@ -501,12 +499,18 @@ func hostFilesystemFilters(access HostFSAccess, vars precompiledseccomp.Values) 
 			seccomp.AnyValue{},
 		},
 		unix.SYS_FCHMODAT: seccomp.PerArg{
-			seccomp.NonNegativeFD{},
+			seccomp.EqualTo(procSelfFD),
 			seccomp.AnyValue{},
 			seccomp.AnyValue{},
 		},
+	}))
+	if access < HostFSReadWrite {
+		return rules
+	}
+	return rules.Merge(seccomp.MakeSyscallRules(map[uintptr]seccomp.SyscallRule{
+		// Directfs gives a path to utimensat(2) only for a symlink.
 		unix.SYS_UTIMENSAT: seccomp.PerArg{
-			seccomp.NonNegativeFD{},
+			seccomp.EqualTo(procSelfFD),
 			seccomp.AnyValue{},
 			seccomp.AnyValue{},
 			seccomp.AnyValue{},

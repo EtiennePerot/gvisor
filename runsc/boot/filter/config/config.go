@@ -56,6 +56,11 @@ const (
 	// them, except the reopen of a special file such as a device.
 	HostFSReadOnly
 
+	// HostFSReadWriteExistingFiles means that the Sentry can also change
+	// the mode and the owner of a host file. It cannot create, rename or
+	// remove a host file.
+	HostFSReadWriteExistingFiles
+
 	// HostFSReadWrite means that the Sentry can look up, create, rename and
 	// remove host files and directories, and can change their metadata.
 	HostFSReadWrite
@@ -68,6 +73,8 @@ func (a HostFSAccess) String() string {
 		return "none"
 	case HostFSReadOnly:
 		return "readonly"
+	case HostFSReadWriteExistingFiles:
+		return "readwriteexistingfiles"
 	case HostFSReadWrite:
 		return "readwrite"
 	default:

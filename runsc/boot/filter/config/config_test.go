@@ -254,7 +254,7 @@ func filterAllows(t *testing.T, compiled bpf.Program, sysno uintptr, args [6]uin
 func TestMknodat(t *testing.T) {
 	atFDCWD32 := int32(linux.AT_FDCWD)
 	atFDCWD64 := int64(linux.AT_FDCWD)
-	for _, hostFS := range []HostFSAccess{HostFSNone, HostFSReadOnly, HostFSReadWrite} {
+	for _, hostFS := range []HostFSAccess{HostFSNone, HostFSReadOnly, HostFSReadWriteExistingFiles, HostFSReadWrite} {
 		compiled := compileFilter(t, Options{
 			HostFS:   hostFS,
 			Platform: (&systrap.Systrap{}).SeccompInfo(),
@@ -343,10 +343,12 @@ func TestHostFSAccess(t *testing.T) {
 		{"flistxattr", unix.SYS_FLISTXATTR, [6]uint64{dirFD, ptr, 128}, HostFSReadOnly},
 		{"fsetxattr", unix.SYS_FSETXATTR, [6]uint64{dirFD, ptr, ptr, 8, 0}, HostFSReadOnly},
 		{"fremovexattr", unix.SYS_FREMOVEXATTR, [6]uint64{dirFD, ptr}, HostFSReadOnly},
-		{"fchmod", unix.SYS_FCHMOD, [6]uint64{dirFD, 0o644}, HostFSReadWrite},
-		{"fchmodat", unix.SYS_FCHMODAT, [6]uint64{procSelfFD, ptr, 0o644}, HostFSReadWrite},
-		{"fchownat", unix.SYS_FCHOWNAT, [6]uint64{dirFD, ptr, 1, 1, unix.AT_EMPTY_PATH | unix.AT_SYMLINK_NOFOLLOW}, HostFSReadWrite},
+		{"fchmod", unix.SYS_FCHMOD, [6]uint64{dirFD, 0o644}, HostFSReadWriteExistingFiles},
+		{"fchmodat", unix.SYS_FCHMODAT, [6]uint64{procSelfFD, ptr, 0o644}, HostFSReadWriteExistingFiles},
+		{"fchmodat outside procSelfFD", unix.SYS_FCHMODAT, [6]uint64{dirFD, ptr, 0o644}, never},
+		{"fchownat", unix.SYS_FCHOWNAT, [6]uint64{dirFD, ptr, 1, 1, unix.AT_EMPTY_PATH | unix.AT_SYMLINK_NOFOLLOW}, HostFSReadWriteExistingFiles},
 		{"utimensat by name", unix.SYS_UTIMENSAT, [6]uint64{procSelfFD, ptr, ptr, 0}, HostFSReadWrite},
+		{"utimensat by name outside procSelfFD", unix.SYS_UTIMENSAT, [6]uint64{dirFD, ptr, ptr, 0}, never},
 		{"mkdirat", unix.SYS_MKDIRAT, [6]uint64{dirFD, ptr, 0o755}, HostFSReadWrite},
 		{"mknodat", unix.SYS_MKNODAT, [6]uint64{dirFD, ptr, unix.S_IFREG | 0o644, 0}, HostFSReadWrite},
 		{"symlinkat", unix.SYS_SYMLINKAT, [6]uint64{ptr, dirFD, ptr}, HostFSReadWrite},

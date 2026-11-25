@@ -42,9 +42,10 @@ type HostFSAccess = config.HostFSAccess
 
 // Re-exports of the config HostFSAccess values under this package.
 const (
-	HostFSNone      = config.HostFSNone
-	HostFSReadOnly  = config.HostFSReadOnly
-	HostFSReadWrite = config.HostFSReadWrite
+	HostFSNone                   = config.HostFSNone
+	HostFSReadOnly               = config.HostFSReadOnly
+	HostFSReadWriteExistingFiles = config.HostFSReadWriteExistingFiles
+	HostFSReadWrite              = config.HostFSReadWrite
 )
 
 // HostVendorSyscalls returns the vendor-specific syscalls that may be used on

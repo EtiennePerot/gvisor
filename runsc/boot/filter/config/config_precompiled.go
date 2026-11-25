@@ -93,11 +93,13 @@ func optionsToPrecompile() ([]Options, error) {
 		func(opt Options) ([]Options, error) {
 			readWrite := opt
 			readWrite.HostFS = HostFSReadWrite
+			readWriteExistingFiles := opt
+			readWriteExistingFiles.HostFS = HostFSReadWriteExistingFiles
 			readOnly := opt
 			readOnly.HostFS = HostFSReadOnly
 			none := opt
 			none.HostFS = HostFSNone
-			return []Options{readWrite, readOnly, none}, nil
+			return []Options{readWrite, readWriteExistingFiles, readOnly, none}, nil
 		},
 
 		// Expand NVProxy and its possible configurations.
@@ -152,7 +154,7 @@ func optionsToPrecompile() ([]Options, error) {
 		// A device proxy opens host device files for writing on a directory
 		// FD. Of the directfs levels, only HostFSReadWrite allows that.
 		func(opt Options) ([]Options, error) {
-			if opt.HostFS == HostFSReadOnly && (opt.NVProxy || opt.TPUProxy || opt.RDMAProxy) {
+			if opt.HostFS != HostFSNone && opt.HostFS != HostFSReadWrite && (opt.NVProxy || opt.TPUProxy || opt.RDMAProxy) {
 				return nil, nil
 			}
 			return []Options{opt}, nil
