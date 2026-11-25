@@ -1,4 +1,4 @@
-Checks: '-*,misc-include-cleaner'
+Checks: '-*,misc-include-cleaner,bugprone-unused-raii'
 CheckOptions:
   misc-include-cleaner.UnusedIncludes: 'false'
   misc-include-cleaner.IgnoreHeaders: 'new;.*/bits/.*;.*/asm/.*;.*/asm-generic/.*;.*/sys/poll[.]h'

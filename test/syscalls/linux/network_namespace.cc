@@ -445,7 +445,7 @@ TEST(NetworkNamespaceTest, RecursiveBindMount) {
     }
   });
 
-  ScopedThread([&] {
+  ScopedThread mount_thread([&] {
     ASSERT_THAT(unshare(CLONE_NEWNET), SyscallSucceedsWithValue(0));
     ASSERT_THAT(stat("/proc/thread-self/ns/net", &ns_st), SyscallSucceeds());
     EXPECT_NE(ns_st.st_ino, init_st.st_ino);
@@ -454,6 +454,7 @@ TEST(NetworkNamespaceTest, RecursiveBindMount) {
                 SyscallSucceedsWithValue(0));
     mounted = true;
   });
+  mount_thread.Join();
   ASSERT_TRUE(mounted);
 
   struct stat bind_st;
