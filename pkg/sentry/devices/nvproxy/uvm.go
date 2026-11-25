@@ -19,6 +19,7 @@ import (
 
 	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/abi/nvgpu"
+	"gvisor.dev/gvisor/pkg/atomicbitops"
 	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/errors/linuxerr"
 	"gvisor.dev/gvisor/pkg/fdnotifier"
@@ -84,6 +85,12 @@ type uvmFD struct {
 	memmapFile    uvmFDMemmapFile
 
 	queue waiter.Queue
+
+	// multiProcessSharingAdded is true if the host VA space of this FD is in
+	// multi-process sharing mode only because uvmInitialize added
+	// UVM_INIT_FLAGS_MULTI_PROCESS_SHARING_MODE to the flags that the
+	// application passed to UVM_INITIALIZE.
+	multiProcessSharingAdded atomicbitops.Bool `state:"nosave"`
 }
 
 // Release implements vfs.FileDescriptionImpl.Release.
@@ -123,10 +130,10 @@ func (fd *uvmFD) Epollable() bool {
 
 // Ioctl implements vfs.FileDescriptionImpl.Ioctl.
 func (fd *uvmFD) Ioctl(ctx context.Context, uio usermem.IO, sysno uintptr, args arch.SyscallArguments) (uintptr, error) {
-	return uvmIoctl(ctx, fd.dev.nvp, fd.hostFD, nil /* toolsFD */, args)
+	return uvmIoctl(ctx, fd.dev.nvp, fd.hostFD, fd, nil /* toolsFD */, args)
 }
 
-func uvmIoctl(ctx context.Context, nvp *nvproxy, hostFD int32, toolsFD *uvmToolsFD, args arch.SyscallArguments) (uintptr, error) {
+func uvmIoctl(ctx context.Context, nvp *nvproxy, hostFD int32, fd *uvmFD, toolsFD *uvmToolsFD, args arch.SyscallArguments) (uintptr, error) {
 	cmd := args[1].Uint()
 	argPtr := args[2].Pointer()
 
@@ -142,6 +149,7 @@ func uvmIoctl(ctx context.Context, nvp *nvproxy, hostFD int32, toolsFD *uvmTools
 	ui := uvmIoctlState{
 		nvp:             nvp,
 		hostFD:          hostFD,
+		fd:              fd,
 		toolsFD:         toolsFD,
 		ctx:             ctx,
 		t:               t,
@@ -165,12 +173,15 @@ func (fd *uvmFD) IsNvidiaDeviceFD() {}
 type uvmIoctlState struct {
 	nvp    *nvproxy
 	hostFD int32
+	cmd    uint32
+	// fd is the /dev/nvidia-uvm FD the ioctl was issued on, or nil if it was
+	// issued on /dev/nvidia-uvm-tools.
+	fd *uvmFD
 	// toolsFD is the /dev/nvidia-uvm-tools FD the ioctl was issued on, or
 	// nil if it was issued on /dev/nvidia-uvm.
 	toolsFD         *uvmToolsFD
 	ctx             context.Context
 	t               *kernel.Task
-	cmd             uint32
 	ioctlParamsAddr hostarch.Addr
 }
 
@@ -213,6 +224,9 @@ func uvmInitialize(ui *uvmIoctlState) (uintptr, error) {
 	if err != nil {
 		return n, err
 	}
+	if ioctlParams.RMStatus == nvgpu.NV_OK && ui.fd != nil {
+		ui.fd.multiProcessSharingAdded.Store(origFlags&nvgpu.UVM_INIT_FLAGS_MULTI_PROCESS_SHARING_MODE == 0)
+	}
 	if _, err := ioctlParams.CopyOut(ui.t, ui.ioctlParamsAddr); err != nil {
 		return n, err
 	}
@@ -241,6 +255,13 @@ func uvmMMInitialize(ui *uvmIoctlState) (uintptr, error) {
 	ioctlParams.UvmFD = origFD
 	if err != nil {
 		return n, err
+	}
+	// If the host VA space is in multi-process sharing mode only because
+	// uvmInitialize added the flag, the host driver returns
+	// NV_WARN_NOTHING_TO_DO. Return NV_OK instead, as the driver does by
+	// default for the first UVM_MM_INITIALIZE on a VA space without this mode.
+	if ioctlParams.RMStatus == nvgpu.NV_WARN_NOTHING_TO_DO && uvmFile.multiProcessSharingAdded.Load() {
+		ioctlParams.RMStatus = nvgpu.NV_OK
 	}
 	if _, err := ioctlParams.CopyOut(ui.t, ui.ioctlParamsAddr); err != nil {
 		return n, err
