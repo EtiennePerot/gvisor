@@ -36,9 +36,9 @@ pkg_tar(
 
 genrule(
     name = "changelog",
-    srcs = ["//tools/bazeldefs:version"],
+    srcs = [version],
     outs = ["changelog"],
-    cmd = "VERSION=$$(cat $(location //tools/bazeldefs:version)); printf 'runsc (%s) unstable; urgency=medium\\n\\n  * See https://gvisor.dev/docs/ for release details.\\n\\n -- The gVisor Authors <gvisor-dev@googlegroups.com>  %s\\n' \"$$VERSION\" \"$$(date -R)\" > \"$@\"",
+    cmd = "VERSION=$$(cat $(SRCS)); printf 'runsc (%s) unstable; urgency=medium\\n\\n  * See https://gvisor.dev/docs/ for release details.\\n\\n -- The gVisor Authors <gvisor-dev@googlegroups.com>  %s\\n' \"$$VERSION\" \"$$(date -R)\" > \"$@\"",
     stamp = 1,
 )
 
