@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"google.golang.org/protobuf/proto"
+
 	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/errors/linuxerr"
 	"gvisor.dev/gvisor/pkg/log"
@@ -76,7 +77,12 @@ func postResumeTPU(k *kernel.Kernel) error {
 	if tpuTasksVal != nil {
 		tasks := tpuTasksVal.([]*kernel.Task)
 		for _, t := range tasks {
-			info, err := extractTPUTaskInfo(t)
+			hexFd, ok := strings.CutPrefix(t.Name(), tpuThreadNamePrefix)
+			if !ok {
+				t.Warningf("TPU task: %q doesn't have a TPU prefix", t.Name())
+				continue
+			}
+			info, err := extractTPUTaskInfo(t, hexFd)
 			if err != nil {
 				log.Warningf("Failed to extract TPU task info for task %d: %v", t.ThreadID(), err)
 				continue
@@ -118,10 +124,14 @@ func findTPUTasks(k *kernel.Kernel) []*tpuTaskInfo {
 			return
 		}
 
-		tg.ForEachTask(func(t *kernel.Task) bool {
-			tpuInfo, err := extractTPUTaskInfo(t)
+		tg.ForEachTaskLocked(func(t *kernel.Task) bool {
+			hexFd, ok := strings.CutPrefix(t.Name(), tpuThreadNamePrefix)
+			if !ok {
+				return true
+			}
+			tpuInfo, err := extractTPUTaskInfo(t, hexFd)
 			if err != nil {
-				log.Warningf("Failed to extract TPU task info for task %d: %v", t.ThreadID(), err)
+				t.Warningf("Failed to extract TPU task info for thread %q: %v", tpuThreadNamePrefix+hexFd, err)
 				return true
 			}
 			infos = append(infos, tpuInfo)
@@ -293,14 +303,10 @@ func isTPUDevice(file *vfs.FileDescription) bool {
 	return vfio.IsVFIOFD(impl)
 }
 
-func extractTPUTaskInfo(t *kernel.Task) (*tpuTaskInfo, error) {
-	name := t.Name()
-	if !strings.HasPrefix(name, tpuThreadNamePrefix) {
-		return nil, fmt.Errorf("task %d does not have a TPU thread name", t.ThreadID())
-	}
-	hexFd := strings.TrimPrefix(name, tpuThreadNamePrefix)
+// extractTPUTaskInfo parses hex-encoded request and response FDs from a libtpu thread suffix.
+func extractTPUTaskInfo(t *kernel.Task, hexFd string) (*tpuTaskInfo, error) {
 	if len(hexFd) != 8 {
-		return nil, fmt.Errorf("invalid TPU thread name format %s", name)
+		return nil, fmt.Errorf("invalid TPU thread name suffix %q", hexFd)
 	}
 	reqWriteFd, err := strconv.ParseInt(hexFd[:4], 16, 32)
 	if err != nil {
