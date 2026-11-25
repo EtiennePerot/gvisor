@@ -115,7 +115,8 @@ func (s *Server) Destroy() {
 // ConnectionImpl contains the implementation details for a Connection.
 type ConnectionImpl interface {
 	// Mount is called when a Mount RPC is made. It mounts the connection on
-	// mountNode. Mount may optionally donate a host FD to the mount point.
+	// mountNode and transfers a reference on the returned ControlFD to the caller.
+	// Mount may optionally donate a host FD to the mount point.
 	//
 	// Mount has a read concurrency guarantee on mountNode.
 	Mount(c *Connection, mountNode *Node) (*ControlFD, Statx, int, error)

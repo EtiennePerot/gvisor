@@ -73,10 +73,7 @@ type ControlFD struct {
 
 	// All the following fields are immutable.
 
-	// id is the unique FD identifier which identifies this FD on its connection.
-	id FDID
-
-	// conn is the backing connection owning this FD.
+	// conn is the connection associated with this FD.
 	conn *Connection
 
 	// ftype is the file type of the backing inode. ftype.FileType() == ftype.
@@ -102,11 +99,11 @@ func (fd *ControlFD) DecRef(context.Context) {
 	})
 }
 
-// decRefLocked drops a reference with the server's rename mutex already held
+// DecRefLocked drops a reference with the server's rename mutex already held
 // at least for reading, avoiding DecRef's acquisition of that mutex.
 //
 // +checklocksread:fd.conn.server.renameMu
-func (fd *ControlFD) decRefLocked() {
+func (fd *ControlFD) DecRefLocked() {
 	fd.controlFDRefs.DecRef(func() {
 		// The destructor runs synchronously with the required rename lock held;
 		// checklocks does not propagate that lock into the callback.
@@ -128,26 +125,21 @@ func (fd *ControlFD) destroyLocked() {
 	fd.impl.Close()
 }
 
-// Init must be called before first use of fd. It inserts fd into the
-// filesystem tree.
+// Init inserts fd into the filesystem tree with one reference owned by the caller.
 //
 // Precondition: The caller must take a ref on node which is transferred to fd.
 //
 // +checklocksread:c.server.renameMu
-// +checklocksexclude:c.fdsMu
 func (fd *ControlFD) Init(c *Connection, node *Node, mode linux.FileMode, impl ControlFDImpl) {
 	fd.conn = c
 	fd.node = node
 	fd.impl = impl
 	fd.ftype = mode.FileType()
-	// Initialize fd with 1 ref which is transferred to c via c.insertFD().
 	fd.controlFDRefs.InitRefs()
-	// Make fd reachable/discoverable.
-	fd.id = c.insertFD(fd)
 	node.insertFD(fd)
 }
 
-// Conn returns the fd's owning connection.
+// Conn returns the connection associated with fd.
 func (fd *ControlFD) Conn() *Connection {
 	return fd.conn
 }
@@ -182,15 +174,13 @@ func (fd *ControlFD) Node() *Node {
 	return fd.node
 }
 
-// RemoveFromConn removes this control FD from its owning connection.
+// RemoveFromConn drops the caller's reference to an unpublished FD.
 //
-// Precondition: fd must not have been returned to the client. Otherwise the
-// client can still refer to it.
+// Deprecated: Use DecRefLocked.
 //
 // +checklocksread:fd.conn.server.renameMu
-// +checklocksexclude:fd.conn.fdsMu
 func (fd *ControlFD) RemoveFromConn() {
-	fd.conn.removeControlFDLocked(fd.id)
+	fd.DecRefLocked()
 }
 
 // safelyRead executes the given operation with the local path node locked.
@@ -265,9 +255,6 @@ type OpenFD struct {
 	// on controlFD for its entire lifetime.
 	controlFD *ControlFD
 
-	// id is the unique FD identifier which identifies this FD on its connection.
-	id FDID
-
 	// Access mode for this FD.
 	readable bool
 	writable bool
@@ -300,15 +287,12 @@ func (fd *OpenFD) DecRef(context.Context) {
 	})
 }
 
-// Init must be called before first use of fd.
+// Init initializes fd with one reference owned by the caller.
 //
-// +checklocksexclude:cfd.conn.fdsMu
 // +checklocksexclude:cfd.openFDsMu
 func (fd *OpenFD) Init(cfd *ControlFD, flags uint32, impl OpenFDImpl) {
-	// Initialize fd with 1 ref which is transferred to c via c.insertFD().
 	fd.openFDRefs.InitRefs()
 	fd.controlFD = cfd
-	fd.id = cfd.conn.insertFD(fd)
 	accessMode := flags & unix.O_ACCMODE
 	fd.readable = accessMode == unix.O_RDONLY || accessMode == unix.O_RDWR
 	fd.writable = accessMode == unix.O_WRONLY || accessMode == unix.O_RDWR
@@ -331,9 +315,6 @@ type BoundSocketFD struct {
 	// controlFD is the ControlFD on which this FD was bound. BoundSocketFD
 	// holds a ref on controlFD for its entire lifetime.
 	controlFD *ControlFD
-
-	// id is the unique FD identifier which identifies this FD on its connection.
-	id FDID
 
 	// impl is the socket FD implementation which embeds this struct. It
 	// contains all the implementation specific details.
@@ -359,14 +340,10 @@ func (fd *BoundSocketFD) DecRef(context.Context) {
 	})
 }
 
-// Init must be called before first use of fd.
-//
-// +checklocksexclude:cfd.conn.fdsMu
+// Init initializes fd with one reference owned by the caller.
 func (fd *BoundSocketFD) Init(cfd *ControlFD, impl BoundSocketFDImpl) {
-	// Initialize fd with 1 ref which is transferred to c via c.insertFD().
 	fd.boundSocketFDRefs.InitRefs()
 	fd.controlFD = cfd
-	fd.id = cfd.conn.insertFD(fd)
 	fd.impl = impl
 	cfd.IncRef() // Holds a ref on cfd for its lifetime.
 }
@@ -399,7 +376,9 @@ func (fd *BoundSocketFD) Init(cfd *ControlFD, impl BoundSocketFDImpl) {
 
 // ControlFDImpl contains implementation details for a ControlFD.
 // Implementations of ControlFDImpl should contain their associated ControlFD
-// by value as their first field.
+// by value as their first field. Filesystem operations that create LISAFS FDs
+// transfer one reference on each new FD to the caller. These FDs belong to
+// the same connection.
 //
 // The operations that perform path traversal or any modification to the
 // filesystem tree must synchronize those modifications with the server's
@@ -409,8 +388,7 @@ type ControlFDImpl interface {
 	FD() *ControlFD
 
 	// Close should clean up resources used by the control FD implementation.
-	// Close is called after all references on the FD have been dropped and its
-	// FDID has been released.
+	// Close is called when the last reference to the FD is dropped.
 	//
 	// On the server, Close has no concurrency guarantee.
 	Close()
@@ -635,8 +613,7 @@ type OpenFDImpl interface {
 	FD() *OpenFD
 
 	// Close should clean up resources used by the open FD implementation.
-	// Close is called after all references on the FD have been dropped and its
-	// FDID has been released.
+	// Close is called when the last reference to the FD is dropped.
 	//
 	// On the server, Close has no concurrency guarantee.
 	Close()
@@ -712,8 +689,7 @@ type BoundSocketFDImpl interface {
 	// Close should clean up resources used by the bound socket FD
 	// implementation.
 	//
-	// Close is called after all references on the FD have been dropped and its
-	// FDID has been released.
+	// Close is called when the last reference to the FD is dropped.
 	//
 	// On the server, Close has no concurrency guarantee.
 	Close()

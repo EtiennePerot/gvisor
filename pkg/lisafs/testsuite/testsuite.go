@@ -540,6 +540,11 @@ func testWalk(ctx context.Context, t *testing.T, tester Tester, root lisafs.Clie
 		dirNames = append(dirNames, name)
 	}
 
+	// A hard error after a successful step must release the intermediate FD.
+	if _, inodes, err := root.WalkMultiple(ctx, []string{dirNames[0], ""}); err != unix.EINVAL || len(inodes) != 0 {
+		t.Errorf("walk with invalid second component returned %d inodes and %v, want 0 and EINVAL", len(inodes), err)
+	}
+
 	// Walk all these directories. Add some junk at the end which should not be
 	// walked on.
 	dirNames = append(dirNames, []string{"a", "b", "c"}...)

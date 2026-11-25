@@ -463,7 +463,7 @@ func TestUnlinkCloseRace(t *testing.T) {
 			// node while the original ControlFD on name was just closed.
 			tempChildFD := parent.allocateChild(name)
 			retainedSubFD = tempChildFD.allocateChild("sub")
-			tempChildFD.RemoveFromConn() // +checklocksignore
+			tempChildFD.DecRefLocked() // +checklocksignore
 			return nil
 		},
 	}

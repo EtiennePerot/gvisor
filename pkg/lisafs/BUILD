@@ -103,7 +103,6 @@ go_library(
     deps = [
         "//pkg/abi/linux",
         "//pkg/atomicbitops",
-        "//pkg/cleanup",
         "//pkg/context",
         "//pkg/errors",
         "//pkg/errors/linuxerr",
@@ -148,6 +147,14 @@ go_test(
         "//pkg/unet",
         "@org_golang_x_sys//unix:go_default_library",
     ],
+)
+
+go_test(
+    name = "fd_test",
+    size = "small",
+    srcs = ["fd_test.go"],
+    embed = [":lisafs"],
+    deps = ["//pkg/abi/linux"],
 )
 
 go_test(
