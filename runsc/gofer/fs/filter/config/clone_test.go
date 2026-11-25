@@ -22,7 +22,6 @@ import (
 
 	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/abi/linux"
-	"gvisor.dev/gvisor/pkg/bpf"
 	"gvisor.dev/gvisor/pkg/seccomp"
 )
 
@@ -38,23 +37,7 @@ func TestCgoThreadClone(t *testing.T) {
 		goFlags |= unix.CLONE_SETTLS
 	}
 	for _, cgo := range []bool{false, true} {
-		rules, denyRules := Rules(Options{CgoEnabled: cgo})
-		program := seccomp.Program{
-			RuleSets: []seccomp.RuleSet{
-				{Rules: denyRules},
-				{Rules: rules, Action: seccomp.Allow},
-			},
-			// Interpret the filter without querying the host's seccomp support.
-			Options: seccomp.ProgramOptions{DefaultAction: seccomp.KillProcess},
-		}
-		insns, _, err := program.Build()
-		if err != nil {
-			t.Fatal(err)
-		}
-		compiled, err := bpf.Compile(insns, true /* optimize */)
-		if err != nil {
-			t.Fatal(err)
-		}
+		compiled := compileFilter(t, Options{CgoEnabled: cgo})
 		for _, tc := range []struct {
 			name    string
 			args    [6]uint64
@@ -66,13 +49,8 @@ func TestCgoThreadClone(t *testing.T) {
 			{"namespace", [6]uint64{pthreadFlags | unix.CLONE_NEWUSER, 0x1000, 0x2000, 0x3000, 0x4000}, false},
 			{"exit signal", [6]uint64{pthreadFlags | uint64(unix.SIGCHLD), 0x1000, 0x2000, 0x3000, 0x4000}, false},
 		} {
-			data := linux.SeccompData{Nr: unix.SYS_CLONE, Arch: seccomp.LINUX_AUDIT_ARCH, Args: tc.args}
-			got, err := bpf.Exec[bpf.NativeEndian](compiled, seccomp.DataAsBPFInput(&data, make([]byte, data.SizeBytes())))
-			if err != nil {
-				t.Fatalf("cgo=%t %s: %v", cgo, tc.name, err)
-			}
-			if allowed := got == uint32(linux.SECCOMP_RET_ALLOW); allowed != tc.allowed {
-				t.Errorf("cgo=%t %s: action=%#x, want allowed=%t", cgo, tc.name, got, tc.allowed)
+			if allowed := filterAllows(t, compiled, unix.SYS_CLONE, tc.args); allowed != tc.allowed {
+				t.Errorf("cgo=%t %s: allowed=%t, want %t", cgo, tc.name, allowed, tc.allowed)
 			}
 		}
 	}

@@ -39,9 +39,6 @@ var allowedSyscalls = seccomp.MakeSyscallRules(map[uintptr]seccomp.SyscallRule{
 	},
 	unix.SYS_EXIT:       seccomp.MatchAll{},
 	unix.SYS_EXIT_GROUP: seccomp.MatchAll{},
-	unix.SYS_FCHMOD:     seccomp.MatchAll{},
-	unix.SYS_FCHMODAT:   seccomp.MatchAll{},
-	unix.SYS_FCHOWNAT:   seccomp.MatchAll{},
 	unix.SYS_FCNTL: seccomp.Or{
 		seccomp.PerArg{
 			seccomp.AnyValue{},
@@ -144,7 +141,6 @@ var allowedSyscalls = seccomp.MakeSyscallRules(map[uintptr]seccomp.SyscallRule{
 	unix.SYS_MUNMAP:    seccomp.MatchAll{},
 	unix.SYS_NANOSLEEP: seccomp.MatchAll{},
 	unix.SYS_OPENAT:    seccomp.MatchAll{},
-	unix.SYS_OPENAT2:   seccomp.MatchAll{},
 	unix.SYS_PPOLL:     seccomp.MatchAll{},
 	unix.SYS_PRCTL: seccomp.PerArg{
 		seccomp.EqualTo(unix.PR_SET_VMA),
@@ -236,65 +232,102 @@ var udsOpenSyscalls = seccomp.MakeSyscallRules(map[uintptr]seccomp.SyscallRule{
 var udsCreateSyscalls = seccomp.MakeSyscallRules(map[uintptr]seccomp.SyscallRule{
 	unix.SYS_ACCEPT4: seccomp.MatchAll{},
 	unix.SYS_BIND:    seccomp.MatchAll{},
-	unix.SYS_LISTEN:  seccomp.MatchAll{},
+	// The gofer sets the mode and the owner of a socket that it binds.
+	unix.SYS_FCHMOD: seccomp.PerArg{
+		seccomp.NonNegativeFD{},
+		seccomp.AnyValue{},
+	},
+	unix.SYS_FCHOWNAT: seccomp.PerArg{
+		seccomp.NonNegativeFD{},
+		seccomp.AnyValue{},
+		seccomp.AnyValue{},
+		seccomp.AnyValue{},
+		seccomp.EqualTo(unix.AT_EMPTY_PATH | unix.AT_SYMLINK_NOFOLLOW),
+	},
+	unix.SYS_LISTEN: seccomp.MatchAll{},
 })
 
-var lisafsFilters = seccomp.MakeSyscallRules(map[uintptr]seccomp.SyscallRule{
-	unix.SYS_FALLOCATE: seccomp.PerArg{
-		seccomp.AnyValue{},
-		seccomp.EqualTo(0),
-	},
-	unix.SYS_FGETXATTR: seccomp.PerArg{
-		seccomp.NonNegativeFD{},
-		seccomp.AnyValue{},
-		seccomp.AnyValue{},
-		seccomp.AnyValue{},
-	},
-	unix.SYS_FLISTXATTR: seccomp.PerArg{
-		seccomp.NonNegativeFD{},
-		seccomp.AnyValue{},
-		seccomp.AnyValue{},
-	},
-	unix.SYS_FREMOVEXATTR: seccomp.PerArg{
-		seccomp.NonNegativeFD{},
-		seccomp.AnyValue{},
-	},
-	unix.SYS_FSETXATTR: seccomp.PerArg{
-		seccomp.NonNegativeFD{},
-		seccomp.AnyValue{},
-		seccomp.AnyValue{},
-		seccomp.AnyValue{},
-		seccomp.AnyValue{},
-	},
-	unix.SYS_FSTATFS:    seccomp.MatchAll{},
-	unix.SYS_GETDENTS64: seccomp.MatchAll{},
-	unix.SYS_LINKAT: seccomp.PerArg{
-		seccomp.NonNegativeFD{},
-		seccomp.AnyValue{},
-		seccomp.NonNegativeFD{},
-		seccomp.AnyValue{},
-		seccomp.EqualTo(0),
-	},
-	unix.SYS_MKDIRAT: seccomp.MatchAll{},
-	// Allow creating only regular files and (0, 0) character device whiteouts.
-	unix.SYS_MKNODAT: seccomp.Or{
-		seccomp.PerArg{
-			seccomp.NonNegativeFD{},
+func lisafsFilters(procSelfFD uint32) seccomp.SyscallRules {
+	atFDCWD := unix.AT_FDCWD
+	return seccomp.MakeSyscallRules(map[uintptr]seccomp.SyscallRule{
+		unix.SYS_FALLOCATE: seccomp.PerArg{
 			seccomp.AnyValue{},
-			seccomp.MaskedEqual(unix.S_IFMT, unix.S_IFREG),
 			seccomp.EqualTo(0),
 		},
-		seccomp.PerArg{
+		unix.SYS_FCHMOD: seccomp.PerArg{
 			seccomp.NonNegativeFD{},
 			seccomp.AnyValue{},
-			seccomp.MaskedEqual(unix.S_IFMT, unix.S_IFCHR),
+		},
+		unix.SYS_FCHMODAT: seccomp.PerArg{
+			seccomp.EqualTo(procSelfFD),
+			seccomp.AnyValue{},
+			seccomp.AnyValue{},
+		},
+		unix.SYS_FCHOWNAT: seccomp.PerArg{
+			seccomp.NonNegativeFD{},
+			seccomp.AnyValue{},
+			seccomp.AnyValue{},
+			seccomp.AnyValue{},
+			seccomp.EqualTo(unix.AT_EMPTY_PATH | unix.AT_SYMLINK_NOFOLLOW),
+		},
+		unix.SYS_FGETXATTR: seccomp.PerArg{
+			seccomp.NonNegativeFD{},
+			seccomp.AnyValue{},
+			seccomp.AnyValue{},
+			seccomp.AnyValue{},
+		},
+		unix.SYS_FLISTXATTR: seccomp.PerArg{
+			seccomp.NonNegativeFD{},
+			seccomp.AnyValue{},
+			seccomp.AnyValue{},
+		},
+		unix.SYS_FREMOVEXATTR: seccomp.PerArg{
+			seccomp.NonNegativeFD{},
+			seccomp.AnyValue{},
+		},
+		unix.SYS_FSETXATTR: seccomp.PerArg{
+			seccomp.NonNegativeFD{},
+			seccomp.AnyValue{},
+			seccomp.AnyValue{},
+			seccomp.AnyValue{},
+			seccomp.AnyValue{},
+		},
+		unix.SYS_FSTATFS:    seccomp.MatchAll{},
+		unix.SYS_GETDENTS64: seccomp.MatchAll{},
+		unix.SYS_LINKAT: seccomp.PerArg{
+			seccomp.NonNegativeFD{},
+			seccomp.AnyValue{},
+			seccomp.NonNegativeFD{},
+			seccomp.AnyValue{},
 			seccomp.EqualTo(0),
 		},
-	},
-	unix.SYS_READLINKAT: seccomp.MatchAll{},
-	unix.SYS_RENAMEAT2:  seccomp.MatchAll{},
-	unix.SYS_SYMLINKAT:  seccomp.MatchAll{},
-	unix.SYS_FTRUNCATE:  seccomp.MatchAll{},
-	unix.SYS_UNLINKAT:   seccomp.MatchAll{},
-	unix.SYS_UTIMENSAT:  seccomp.MatchAll{},
-})
+		unix.SYS_MKDIRAT: seccomp.MatchAll{},
+		// Allow creating only regular files and (0, 0) character device whiteouts.
+		unix.SYS_MKNODAT: seccomp.Or{
+			seccomp.PerArg{
+				seccomp.NonNegativeFD{},
+				seccomp.AnyValue{},
+				seccomp.MaskedEqual(unix.S_IFMT, unix.S_IFREG),
+				seccomp.EqualTo(0),
+			},
+			seccomp.PerArg{
+				seccomp.NonNegativeFD{},
+				seccomp.AnyValue{},
+				seccomp.MaskedEqual(unix.S_IFMT, unix.S_IFCHR),
+				seccomp.EqualTo(0),
+			},
+		},
+		unix.SYS_OPENAT2: seccomp.PerArg{
+			seccomp.EqualTo(uintptr(atFDCWD)),
+			seccomp.AnyValue{},
+			seccomp.AnyValue{},
+			seccomp.EqualTo(unix.SizeofOpenHow),
+		},
+		unix.SYS_READLINKAT: seccomp.MatchAll{},
+		unix.SYS_RENAMEAT2:  seccomp.MatchAll{},
+		unix.SYS_SYMLINKAT:  seccomp.MatchAll{},
+		unix.SYS_FTRUNCATE:  seccomp.MatchAll{},
+		unix.SYS_UNLINKAT:   seccomp.MatchAll{},
+		unix.SYS_UTIMENSAT:  seccomp.MatchAll{},
+	})
+}

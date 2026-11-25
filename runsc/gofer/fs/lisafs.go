@@ -107,6 +107,15 @@ func OpenProcSelfFD(path string) error {
 	return nil
 }
 
+// ProcSelfFD returns the open /proc/self/fd directory FD, or -1 if it has not
+// been opened.
+func ProcSelfFD() int {
+	if procSelfFD == nil {
+		return -1
+	}
+	return procSelfFD.FD()
+}
+
 // ConnectionOpts returns the lisafs.ConnectionOpts for fsgofer.
 func ConnectionOpts(readonly bool) lisafs.ConnectionOpts {
 	return lisafs.ConnectionOpts{

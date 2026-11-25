@@ -393,12 +393,17 @@ func (g *Gofer) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcomm
 	log.Debugf("Process running as uid=%d euid=%d gid=%d egid=%d groups=%v canSetGroups=%t", ruid, euid, rgid, egid, groups, canSetGroups)
 
 	// Initialize filters.
+	procSelfFD := fsgofer.ProcSelfFD()
+	if procSelfFD < 0 {
+		util.Fatalf("procSelfFD is not open")
+	}
 	opts := filter.Options{
 		UDSOpenEnabled:   conf.GetHostUDS().AllowOpen(),
 		UDSCreateEnabled: conf.GetHostUDS().AllowCreate(),
 		ProfileEnabled:   profileOpts.Enabled(),
 		DirectFS:         conf.DirectFS,
 		LisafsNeeded:     lisafsNeeded,
+		ProcSelfFD:       uint32(procSelfFD),
 		CgoEnabled:       config.CgoEnabled,
 		VendorSyscalls:   filter.HostVendorSyscalls(),
 	}

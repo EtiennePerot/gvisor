@@ -167,3 +167,20 @@ func TestConnectWithGroupsFailureSkipsConnect(t *testing.T) {
 		t.Errorf("connectWithGroups returned %d, want -1", sock)
 	}
 }
+
+func TestProcSelfFD(t *testing.T) {
+	prev := procSelfFD
+	defer func() { procSelfFD = prev }()
+
+	procSelfFD = nil
+	if got := ProcSelfFD(); got != -1 {
+		t.Errorf("ProcSelfFD() with nil procSelfFD = %d, want -1", got)
+	}
+	if err := OpenProcSelfFD("/proc/self/fd"); err != nil {
+		t.Fatalf("OpenProcSelfFD() failed: %v", err)
+	}
+	defer procSelfFD.Close()
+	if got := ProcSelfFD(); got < 0 {
+		t.Errorf("ProcSelfFD() after OpenProcSelfFD = %d, want >= 0", got)
+	}
+}

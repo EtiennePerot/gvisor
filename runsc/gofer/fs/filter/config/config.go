@@ -27,6 +27,8 @@ import (
 	"gvisor.dev/gvisor/runsc/gofer/filter"
 )
 
+const procSelfFDVarName = "proc_self_fd"
+
 // Options are seccomp filter related options.
 type Options struct {
 	UDSOpenEnabled   bool
@@ -34,6 +36,7 @@ type Options struct {
 	ProfileEnabled   bool
 	DirectFS         bool
 	LisafsNeeded     bool
+	ProcSelfFD       uint32
 	CgoEnabled       bool
 	VendorSyscalls   precompiledseccomp.VarSyscallNumbers
 	ExtraRules       []seccomp.SyscallRules
@@ -109,6 +112,9 @@ func Warnings(opt Options) []string {
 func (opt Options) Vars() precompiledseccomp.Values {
 	vars := precompiledseccomp.Values{}
 	vars.SetUint64(filter.SelfPIDVarName, uint64(os.Getpid()))
+	if !opt.DirectFS || opt.LisafsNeeded {
+		vars[procSelfFDVarName] = opt.ProcSelfFD
+	}
 	opt.VendorSyscalls.SetVars(vars)
 	return vars
 }
@@ -148,7 +154,7 @@ func rules(opt Options, vars precompiledseccomp.Values) (seccomp.SyscallRules, s
 	// When DirectFS is not enabled, filters for LisaFS are installed.
 	// Also needed when needing to serve a mount that disallows DirectFS.
 	if !opt.DirectFS || opt.LisafsNeeded {
-		s.Merge(lisafsFilters)
+		s.Merge(lisafsFilters(vars[procSelfFDVarName]))
 	}
 	for _, rules := range opt.ExtraRules {
 		s.Merge(rules)
