@@ -19,11 +19,63 @@ import (
 	"slices"
 	"testing"
 
+	"golang.org/x/sys/unix"
+	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/bpf"
 	"gvisor.dev/gvisor/pkg/hostarch"
 	"gvisor.dev/gvisor/pkg/seccomp"
 	"gvisor.dev/gvisor/pkg/seccomp/precompiledseccomp"
 	"gvisor.dev/gvisor/pkg/sentry/platform/systrap/stubfilter"
+)
+
+// Stub layout used by the tests.
+const (
+	testStubStart   = uint64(0x7f0010000000)
+	testSysmsgStart = testStubStart + 0x2000
+	testROMapEnd    = testStubStart + 0x9000
+
+	// Instruction pointers after a system call instruction in the stub init
+	// code, in the sysmsg code, in the guest code, and in the vsyscall page.
+	testInitIP     = testStubStart + 0x40
+	testSysmsgIP   = testSysmsgStart + 0x80
+	testGuestIP    = uint64(0x13370000)
+	testVsyscallIP = uint64(0xffffffffff600009)
+)
+
+// System call arguments of the stub.
+const (
+	testCloneStub = uint64(unix.CLONE_FILES | unix.CLONE_PARENT | unix.SIGCHLD)
+	testSigstop   = uint64(unix.SIGSTOP)
+)
+
+// Seccomp actions.
+const (
+	allow = uint32(linux.SECCOMP_RET_ALLOW)
+	trap  = uint32(linux.SECCOMP_RET_TRAP)
+)
+
+// Stub program names.
+const (
+	progStub    = stubfilter.StubProcessName
+	progSysmsg  = stubfilter.SysmsgThreadName
+	progSyscall = stubfilter.SyscallThreadName
+)
+
+// Programs that apply to each kind of stub thread.
+var (
+	// Threads with only the StubProcess program: the ptrace thread of the
+	// source stub process, syscall threads that use the futex loop, and new
+	// sysmsg threads of those syscall threads before the Sentry installs the
+	// SysmsgThread program.
+	stackSource = []string{progStub}
+	// Syscall threads that use seccomp notifications.
+	stackSyscall = []string{progStub, progSyscall}
+	// Sysmsg threads of stub processes whose syscall thread uses the futex
+	// loop.
+	stackFutexSysmsg = []string{progStub, progSysmsg}
+	// Sysmsg threads of stub processes whose syscall thread uses seccomp
+	// notifications.
+	stackSysmsg = []string{progStub, progSyscall, progSysmsg}
 )
 
 // TestStubFilterPrecompiled checks that rendering the precompiled stub
@@ -56,6 +108,124 @@ func TestStubFilterPrecompiled(t *testing.T) {
 				t.Errorf("%s: rendered program does not depend on stubStart=%#x", test.name, stubStart)
 			}
 			rendered[test.name] = got
+		}
+	}
+}
+
+// stubFilters contains compiled stub programs.
+type stubFilters map[string]bpf.Program
+
+// compileStubFilters renders and compiles the stub programs for the test
+// layout.
+func compileStubFilters(t *testing.T) stubFilters {
+	t.Helper()
+	vars := map[string]precompiledseccomp.Values{
+		progStub:    stubfilter.StubProcessVars(testStubStart, testROMapEnd-testStubStart),
+		progSysmsg:  stubfilter.SysmsgThreadVars(testStubStart, testSysmsgStart),
+		progSyscall: nil,
+	}
+	filters := stubFilters{}
+	for name, v := range vars {
+		prog, err := bpf.Compile(renderStubFilter(name, v), true)
+		if err != nil {
+			t.Fatalf("cannot compile %s: %v", name, err)
+		}
+		filters[name] = prog
+	}
+	return filters
+}
+
+// run returns the action of program prog for the given input.
+func (f stubFilters) run(t *testing.T, prog string, auditArch uint32, nr uintptr, ip uint64, args [6]uint64) uint32 {
+	t.Helper()
+	return runProgram(t, f[prog], auditArch, nr, ip, args)
+}
+
+// runProgram returns the action of prog for the given input.
+func runProgram(t *testing.T, prog bpf.Program, auditArch uint32, nr uintptr, ip uint64, args [6]uint64) uint32 {
+	t.Helper()
+	data := linux.SeccompData{
+		Nr:                 int32(nr),
+		Arch:               auditArch,
+		InstructionPointer: ip,
+		Args:               args,
+	}
+	buf := make([]byte, data.SizeBytes())
+	ret, err := bpf.Exec[bpf.NativeEndian](prog, seccomp.DataAsBPFInput(&data, buf))
+	if err != nil {
+		t.Fatalf("cannot execute program: %v", err)
+	}
+	return ret
+}
+
+// runStack returns the action that the kernel takes for a thread with the
+// given programs.
+func (f stubFilters) runStack(t *testing.T, progs []string, nr uintptr, ip uint64, args [6]uint64) uint32 {
+	t.Helper()
+	var ret uint32
+	for i, prog := range progs {
+		r := f.run(t, prog, seccomp.LINUX_AUDIT_ARCH, nr, ip, args)
+		// Lower wins.
+		if i == 0 || int32(r&linux.SECCOMP_RET_ACTION_FULL) < int32(ret&linux.SECCOMP_RET_ACTION_FULL) {
+			ret = r
+		}
+	}
+	return ret
+}
+
+// stubFilterCase is a seccomp input and the expected action of one stub
+// program.
+type stubFilterCase struct {
+	prog string
+	name string
+	nr   uintptr
+	ip   uint64
+	args [6]uint64
+	want uint32
+}
+
+// checkStubFilterCases runs each case against the stub programs.
+func checkStubFilterCases(t *testing.T, cases []stubFilterCase) {
+	t.Helper()
+	f := compileStubFilters(t)
+	for _, c := range cases {
+		if got := f.run(t, c.prog, seccomp.LINUX_AUDIT_ARCH, c.nr, c.ip, c.args); got != c.want {
+			t.Errorf("%s/%s: got %#x, want %#x", c.prog, c.name, got, c.want)
+		}
+	}
+}
+
+// TestStubFilterConfinement checks the actions of each stub program
+// against the filters.
+func TestStubFilterConfinement(t *testing.T) {
+	checkStubFilterCases(t, []stubFilterCase{
+		// clone
+		{progStub, "clone_stub", unix.SYS_CLONE, testInitIP, [6]uint64{testCloneStub}, allow},
+		{progStub, "clone_no_parent", unix.SYS_CLONE, testInitIP, [6]uint64{uint64(unix.CLONE_FILES | unix.SIGCHLD)}, trap},
+
+		// prctl
+		{progStub, "prctl_pdeathsig", unix.SYS_PRCTL, testInitIP, [6]uint64{unix.PR_SET_PDEATHSIG, uint64(unix.SIGKILL)}, allow},
+		{progStub, "prctl_no_new_privs", unix.SYS_PRCTL, testInitIP, [6]uint64{linux.PR_SET_NO_NEW_PRIVS, 1}, trap},
+
+		// System calls that the stub does not make:
+		{progStub, "sched_yield", unix.SYS_SCHED_YIELD, testSysmsgIP, [6]uint64{}, trap},
+		{progStub, "tkill", unix.SYS_TKILL, testInitIP, [6]uint64{1234, testSigstop}, trap},
+		{progStub, "gettid", unix.SYS_GETTID, testInitIP, [6]uint64{}, trap},
+		{progStub, "wait4", unix.SYS_WAIT4, testInitIP, [6]uint64{}, trap},
+
+		// SysmsgThread
+		{progSysmsg, "rt_sigreturn", unix.SYS_RT_SIGRETURN, testSysmsgIP, [6]uint64{}, allow},
+		{progSysmsg, "sched_yield", unix.SYS_SCHED_YIELD, testSysmsgIP, [6]uint64{}, trap},
+	})
+}
+
+// TestStubFilterBadArch checks that the StubProcess and SysmsgThread programs
+// trap system calls of other architectures.
+func TestStubFilterBadArch(t *testing.T) {
+	f := compileStubFilters(t)
+	for _, prog := range []string{progStub, progSysmsg} {
+		if got := f.run(t, prog, testBadArch, unix.SYS_RT_SIGRETURN, testSysmsgIP, [6]uint64{}); got != trap {
+			t.Errorf("%s: got %#x, want %#x", prog, got, trap)
 		}
 	}
 }

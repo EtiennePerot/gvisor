@@ -142,14 +142,15 @@ func forkStub(flags uintptr, instrs []bpf.Instruction) (*thread, error) {
 		hostsyscall.RawSyscall(unix.SYS_EXIT, uintptr(errno), 0, 0)
 	}
 
-	// Set an aggressive BPF filter for the stub and all it's children. See
+	// Enable CPUID faulting before installing the seccomp filter, so that
+	// the stub filter does not need to allow arch_prctl(ARCH_SET_CPUID).
+	enableCpuidFault()
+
+	// Set an aggressive BPF filter for the stub and all its children. See
 	// stubfilter.StubProcess.
 	if errno := seccomp.SetFilterInChild(instrs); errno != 0 {
 		hostsyscall.RawSyscall(unix.SYS_EXIT, uintptr(errno), 0, 0)
 	}
-
-	// Enable cpuid-faulting.
-	enableCpuidFault()
 
 	// Call the stub; should not return.
 	stubCall(stubInitProcess, ppid)

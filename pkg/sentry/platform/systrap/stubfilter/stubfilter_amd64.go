@@ -30,20 +30,9 @@ func setSysmsgThreadArchVars(vars precompiledseccomp.Values, stubStart uint64) {
 
 func stubProcessArchRules() []seccomp.RuleSet {
 	return []seccomp.RuleSet{
-		// Rules for trapping vsyscall access.
-		{
-			Rules: seccomp.MakeSyscallRules(map[uintptr]seccomp.SyscallRule{
-				unix.SYS_GETTIMEOFDAY: seccomp.MatchAll{},
-				unix.SYS_TIME:         seccomp.MatchAll{},
-				unix.SYS_GETCPU:       seccomp.MatchAll{}, // SYS_GETCPU was not defined in package syscall on amd64.
-			}),
-			Action:   seccomp.Trap,
-			Vsyscall: true,
-		},
 		{
 			Rules: seccomp.MakeSyscallRules(map[uintptr]seccomp.SyscallRule{
 				unix.SYS_ARCH_PRCTL: seccomp.Or{
-					seccomp.PerArg{seccomp.EqualTo(linux.ARCH_SET_CPUID), seccomp.EqualTo(0)},
 					seccomp.PerArg{seccomp.EqualTo(linux.ARCH_SET_FS)},
 					seccomp.PerArg{seccomp.EqualTo(linux.ARCH_GET_FS)},
 					seccomp.PerArg{seccomp.EqualTo(linux.ARCH_SET_GS)},
@@ -58,16 +47,6 @@ func stubProcessArchRules() []seccomp.RuleSet {
 func sysmsgThreadArchRules(vars precompiledseccomp.Values) []seccomp.RuleSet {
 	stubStart := vars.GetUint64(stubStartVar)
 	return []seccomp.RuleSet{
-		{
-			// Rules for trapping vsyscall access.
-			Rules: seccomp.MakeSyscallRules(map[uintptr]seccomp.SyscallRule{
-				unix.SYS_GETTIMEOFDAY: seccomp.MatchAll{},
-				unix.SYS_TIME:         seccomp.MatchAll{},
-				unix.SYS_GETCPU:       seccomp.MatchAll{}, // SYS_GETCPU was not defined in package syscall on amd64.
-			}),
-			Action:   seccomp.Trap,
-			Vsyscall: true,
-		},
 		{
 			Rules: seccomp.MakeSyscallRules(map[uintptr]seccomp.SyscallRule{
 				unix.SYS_ARCH_PRCTL: seccomp.Or{

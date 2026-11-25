@@ -124,6 +124,8 @@ go_test(
         "context_queue_test.go",
         "seccomp_notify_test.go",
         "shared_context_test.go",
+        "stubfilter_amd64_test.go",
+        "stubfilter_arm64_test.go",
         "stubfilter_test.go",
         "systrap_test.go",
     ],
@@ -132,6 +134,7 @@ go_test(
     # registration at process startup, as runsc does for the sentry.
     env = {"GLIBC_TUNABLES": "glibc.pthread.rseq=0"},
     deps = [
+        "//pkg/abi/linux",
         "//pkg/bpf",
         "//pkg/context",
         "//pkg/cpuid",

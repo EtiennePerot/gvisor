@@ -17,6 +17,8 @@ package systrap
 import (
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -181,4 +183,72 @@ func TestSpinningQueueLayout(t *testing.T) {
 	if stubSpinningThreadQueueAddr < queueStart || stubSpinningThreadQueueAddr+sysmsg.SpinningQueueMemSize > stubContextRegion {
 		t.Errorf("spinning queue %#x not in [%#x, %#x)", stubSpinningThreadQueueAddr, queueStart, stubContextRegion)
 	}
+}
+
+// TestStubFiltersAttached checks the number of seccomp programs and
+// no_new_privs on each kind of stub thread.
+func TestStubFiltersAttached(t *testing.T) {
+	_, as, pctx, ac := newSystrapTest(t)
+	// Run once so that the subprocess creates a sysmsg thread.
+	if _, _, err := pctx.Switch(pkgcontext.Background(), &testMemoryManager{as: as}, ac, 0); err != nil {
+		t.Fatalf("cannot switch: %v", err)
+	}
+	// Stub processes inherit the seccomp programs of the test process.
+	self := procStatus(t, "self")
+	selfFilters, ok := self["Seccomp_filters"]
+	if !ok {
+		t.Skip("Seccomp_filters is not in /proc/self/status (Linux < 5.9)")
+	}
+	base, err := strconv.Atoi(selfFilters)
+	if err != nil {
+		t.Fatalf("cannot parse Seccomp_filters %q: %v", selfFilters, err)
+	}
+	sp := as.(*subprocess)
+	syscallFilters, sysmsgFilters := 1, 2
+	if seccompNotifyIsSupported {
+		syscallFilters, sysmsgFilters = 2, 3
+	}
+	type stubThread struct {
+		name    string
+		tid     int32
+		filters int
+	}
+	threads := []stubThread{
+		{"source", globalPool.source.syscallThread.thread.tid, 1},
+		{"syscall_thread", sp.syscallThread.thread.tid, syscallFilters},
+	}
+	sp.sysmsgThreadsMu.Lock()
+	numSysmsgThreads := len(sp.sysmsgThreads)
+	for _, mt := range sp.sysmsgThreads {
+		threads = append(threads, stubThread{"sysmsg_thread", mt.thread.tid, sysmsgFilters})
+	}
+	sp.sysmsgThreadsMu.Unlock()
+	if numSysmsgThreads == 0 {
+		t.Fatal("the subprocess has no sysmsg thread")
+	}
+	for _, th := range threads {
+		fields := procStatus(t, fmt.Sprint(th.tid))
+		if got := fields["NoNewPrivs"]; got != "1" {
+			t.Errorf("%s %d: NoNewPrivs = %q, want 1", th.name, th.tid, got)
+		}
+		if got, want := fields["Seccomp_filters"], fmt.Sprint(base+th.filters); got != want {
+			t.Errorf("%s %d: Seccomp_filters = %s, want %s", th.name, th.tid, got, want)
+		}
+	}
+}
+
+// procStatus returns the fields of /proc/<pid>/status.
+func procStatus(t *testing.T, pid string) map[string]string {
+	t.Helper()
+	status, err := os.ReadFile(fmt.Sprintf("/proc/%s/status", pid))
+	if err != nil {
+		t.Fatalf("cannot read the status of %s: %v", pid, err)
+	}
+	fields := map[string]string{}
+	for _, line := range strings.Split(string(status), "\n") {
+		if k, v, ok := strings.Cut(line, ":"); ok {
+			fields[k] = strings.TrimSpace(v)
+		}
+	}
+	return fields
 }

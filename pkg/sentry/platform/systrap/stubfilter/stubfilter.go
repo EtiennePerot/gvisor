@@ -72,7 +72,6 @@ func StubProcess(vars precompiledseccomp.Values) *seccomp.Program {
 			unix.SYS_CLONE: seccomp.Or{
 				// Allow creation of new subprocesses (used by the master).
 				seccomp.PerArg{seccomp.EqualTo(unix.CLONE_FILES | unix.CLONE_PARENT | unix.SIGCHLD)},
-				seccomp.PerArg{seccomp.EqualTo(unix.CLONE_FILES | unix.SIGCHLD)},
 				// Allow creation of new sysmsg thread.
 				seccomp.PerArg{seccomp.EqualTo(
 					unix.CLONE_FILES |
@@ -83,13 +82,11 @@ func StubProcess(vars precompiledseccomp.Values) *seccomp.Program {
 			},
 
 			// For the initial process creation.
-			unix.SYS_WAIT4: seccomp.MatchAll{},
-			unix.SYS_EXIT:  seccomp.MatchAll{},
+			unix.SYS_EXIT: seccomp.MatchAll{},
 
 			// For the stub prctl dance (all).
 			unix.SYS_PRCTL: seccomp.Or{
 				seccomp.PerArg{seccomp.EqualTo(unix.PR_SET_PDEATHSIG), seccomp.EqualTo(unix.SIGKILL)},
-				seccomp.PerArg{seccomp.EqualTo(linux.PR_SET_NO_NEW_PRIVS), seccomp.EqualTo(1)},
 				seccomp.PerArg{
 					seccomp.EqualTo(unix.PR_SET_SYSCALL_USER_DISPATCH),
 					seccomp.EqualTo(unix.PR_SYS_DISPATCH_ON),
@@ -112,7 +109,6 @@ func StubProcess(vars precompiledseccomp.Values) *seccomp.Program {
 
 			// For sysmsg threads. Look at sysmsg/sighandler.c for more details.
 			unix.SYS_RT_SIGRETURN: seccomp.MatchAll{},
-			unix.SYS_SCHED_YIELD:  seccomp.MatchAll{},
 			unix.SYS_FUTEX: seccomp.Or{
 				seccomp.PerArg{
 					seccomp.AnyValue{},
@@ -128,12 +124,7 @@ func StubProcess(vars precompiledseccomp.Values) *seccomp.Program {
 				},
 			},
 			unix.SYS_SIGALTSTACK: seccomp.MatchAll{},
-			unix.SYS_TKILL: seccomp.PerArg{
-				seccomp.AnyValue{},
-				seccomp.EqualTo(unix.SIGSTOP),
-			},
-			unix.SYS_GETTID:     seccomp.MatchAll{},
-			unix.SYS_EXIT_GROUP: seccomp.MatchAll{},
+			unix.SYS_EXIT_GROUP:  seccomp.MatchAll{},
 			seccomp.SYS_SECCOMP: seccomp.Or{
 				seccomp.PerArg{
 					seccomp.EqualTo(linux.SECCOMP_SET_MODE_FILTER),
@@ -186,15 +177,6 @@ func SysmsgThread(vars precompiledseccomp.Values) *seccomp.Program {
 				},
 			},
 			unix.SYS_RT_SIGRETURN: seccomp.PerArg{
-				seccomp.AnyValue{},
-				seccomp.AnyValue{},
-				seccomp.AnyValue{},
-				seccomp.AnyValue{},
-				seccomp.AnyValue{},
-				seccomp.AnyValue{},
-				seccomp.GreaterThan(stubSysmsgStart), // rip
-			},
-			unix.SYS_SCHED_YIELD: seccomp.PerArg{
 				seccomp.AnyValue{},
 				seccomp.AnyValue{},
 				seccomp.AnyValue{},
