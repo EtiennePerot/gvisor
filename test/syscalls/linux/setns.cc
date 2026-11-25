@@ -283,56 +283,25 @@ TEST(SetnsTest, ChangeUserNamespaceRejectsMultithreadedCaller) {
 
   int nsfd = child.nsfd.get();
   EXPECT_THAT(InForkedProcess([nsfd] {
-                int ready_fds[2];
-                TEST_PCHECK(pipe(ready_fds) == 0);
-                int stop_fds[2];
-                TEST_PCHECK(pipe(stop_fds) == 0);
-                int done_fds[2];
-                TEST_PCHECK(pipe(done_fds) == 0);
-
-                struct ThreadArgs {
-                  int ready_read_fd;
-                  int ready_write_fd;
-                  int stop_read_fd;
-                  int stop_write_fd;
-                  int done_read_fd;
-                  int done_write_fd;
-                } args = {ready_fds[0], ready_fds[1], stop_fds[0],
-                          stop_fds[1],  done_fds[0],  done_fds[1]};
+                sigset_t mask;
+                TEST_PCHECK(sigfillset(&mask) == 0);
                 struct clone_arg {
-                  char stack[1024] __attribute__((aligned(16)));
+                  char stack[16384] __attribute__((aligned(16)));
                   char stack_ptr[0];
                 } ca;
                 pid_t tid = clone(
                     +[](void* arg) {
-                      ThreadArgs* args = static_cast<ThreadArgs*>(arg);
-                      TEST_PCHECK(close(args->ready_read_fd) == 0);
-                      TEST_PCHECK(close(args->stop_write_fd) == 0);
-                      TEST_PCHECK(close(args->done_read_fd) == 0);
-                      TEST_PCHECK(write(args->ready_write_fd, "R", 1) == 1);
-                      TEST_PCHECK(close(args->ready_write_fd) == 0);
-                      char buf;
-                      TEST_PCHECK(read(args->stop_read_fd, &buf, 1) == 1);
-                      TEST_PCHECK(close(args->stop_read_fd) == 0);
-                      TEST_PCHECK(write(args->done_write_fd, "D", 1) == 1);
-                      TEST_PCHECK(close(args->done_write_fd) == 0);
+                      const sigset_t* mask = static_cast<const sigset_t*>(arg);
+                      for (;;) {
+                        sigsuspend(mask);
+                      }
                       return 0;
                     },
                     ca.stack_ptr, CLONE_SIGHAND | CLONE_THREAD | CLONE_VM,
-                    &args);
+                    &mask);
                 TEST_PCHECK(tid >= 0);
-                TEST_PCHECK(close(ready_fds[1]) == 0);
-                TEST_PCHECK(close(stop_fds[0]) == 0);
-                TEST_PCHECK(close(done_fds[1]) == 0);
-
-                char buf;
-                TEST_PCHECK(read(ready_fds[0], &buf, 1) == 1);
-                TEST_PCHECK(close(ready_fds[0]) == 0);
                 TEST_CHECK_ERRNO(setns(nsfd, CLONE_NEWUSER), EINVAL);
-                TEST_PCHECK(write(stop_fds[1], "S", 1) == 1);
-                TEST_PCHECK(close(stop_fds[1]) == 0);
-                TEST_PCHECK(read(done_fds[0], &buf, 1) == 1);
-                TEST_PCHECK(close(done_fds[0]) == 0);
+                _exit(0);
               }),
               IsPosixErrorOkAndHolds(0));
 }
