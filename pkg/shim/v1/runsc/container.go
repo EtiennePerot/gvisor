@@ -27,7 +27,7 @@ import (
 	cgroupsstats "github.com/containerd/cgroups/v3/cgroup1/stats"
 	cgroupsv2stats "github.com/containerd/cgroups/v3/cgroup2/stats"
 	"github.com/containerd/console"
-	task "github.com/containerd/containerd/api/runtime/task/v2"
+	task "github.com/containerd/containerd/api/runtime/task/v3"
 	types "github.com/containerd/containerd/api/types"
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/pkg/namespaces"

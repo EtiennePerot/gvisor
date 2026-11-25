@@ -24,7 +24,7 @@ import (
 	"testing"
 	"time"
 
-	task "github.com/containerd/containerd/api/runtime/task/v2"
+	task "github.com/containerd/containerd/api/runtime/task/v3"
 	"github.com/containerd/ttrpc"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	pb "gvisor.dev/gvisor/pkg/shim/v1/taskserver/task_server_go_proto"
@@ -270,7 +270,7 @@ func TestGvisorTaskService(t *testing.T) {
 	}
 }
 
-func setupSandboxWithSpec(t *testing.T, containerd *shimutils.MockContainerd, spec *specs.Spec) (*shimutils.Container, task.TaskService) {
+func setupSandboxWithSpec(t *testing.T, containerd *shimutils.MockContainerd, spec *specs.Spec) (*shimutils.Container, task.TTRPCTaskService) {
 	t.Helper()
 	sandbox, err := shimutils.NewContainer(spec, containerd)
 	if err != nil {

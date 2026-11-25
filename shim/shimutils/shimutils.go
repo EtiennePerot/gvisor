@@ -32,7 +32,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	eventtypes "github.com/containerd/containerd/api/events"
-	task "github.com/containerd/containerd/api/runtime/task/v2"
+	task "github.com/containerd/containerd/api/runtime/task/v3"
 	events "github.com/containerd/containerd/api/services/ttrpc/events/v1"
 	ttrpc "github.com/containerd/ttrpc"
 	typeurl "github.com/containerd/typeurl/v2"
@@ -249,7 +249,7 @@ type MockContainerd struct {
 	benchMode  bool
 	shimSocket string
 	shimConn   net.Conn
-	client     task.TaskService
+	client     task.TTRPCTaskService
 	logFile    *os.File
 }
 
@@ -424,7 +424,7 @@ func (m *MockContainerd) StartShim(t testing.TB, c *Container) error {
 			conn, dialErr := net.DialTimeout("unix", m.shimSocket, 100*time.Millisecond)
 			if dialErr == nil {
 				m.shimConn = conn
-				m.client = task.NewTaskClient(ttrpc.NewClient(conn))
+				m.client = task.NewTTRPCTaskClient(ttrpc.NewClient(conn))
 				return nil
 			}
 			time.Sleep(50 * time.Microsecond) // Poll frequently.
@@ -485,11 +485,11 @@ func (m *MockContainerd) StartShim(t testing.TB, c *Container) error {
 }
 
 // GetClient returns a client to the shim socket which can be used to send requests to the shim.
-func (m *MockContainerd) GetClient(t testing.TB) task.TaskService {
+func (m *MockContainerd) GetClient(t testing.TB) task.TTRPCTaskService {
 	if m.client != nil {
 		return m.client
 	}
-	var client task.TaskService
+	var client task.TTRPCTaskService
 	m.withShimContext(t, func(t testing.TB) {
 		conn, err := net.DialTimeout("unix", SocketAddress, 2*time.Second)
 		if err != nil {
@@ -498,7 +498,7 @@ func (m *MockContainerd) GetClient(t testing.TB) task.TaskService {
 		t.Cleanup(func() {
 			conn.Close()
 		})
-		client = task.NewTaskClient(ttrpc.NewClient(conn))
+		client = task.NewTTRPCTaskClient(ttrpc.NewClient(conn))
 	})
 	return client
 }

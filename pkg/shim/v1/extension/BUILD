@@ -12,7 +12,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "@com_github_containerd_console//:go_default_library",
-        "@com_github_containerd_containerd_api//runtime/task/v2:go_default_library",
+        "@com_github_containerd_containerd_api//runtime/task/v3:go_default_library",
         "@com_github_containerd_containerd_v2//pkg/stdio:go_default_library",
     ],
 )

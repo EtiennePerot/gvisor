@@ -17,7 +17,7 @@ package runtimeoptions
 import (
 	"testing"
 
-	task "github.com/containerd/containerd/api/runtime/task/v2"
+	task "github.com/containerd/containerd/api/runtime/task/v3"
 	typeurl "github.com/containerd/typeurl/v2"
 	"google.golang.org/protobuf/encoding/prototext"
 )

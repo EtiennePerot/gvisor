@@ -28,7 +28,7 @@ import (
 
 	"github.com/containerd/console"
 	apievents "github.com/containerd/containerd/api/events"
-	task "github.com/containerd/containerd/api/runtime/task/v2"
+	task "github.com/containerd/containerd/api/runtime/task/v3"
 	coreevents "github.com/containerd/containerd/v2/core/events"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
 	"github.com/containerd/containerd/v2/pkg/stdio"

@@ -31,7 +31,7 @@ go_test(
     srcs = ["runtimeoptions_test.go"],
     embed = [":runtimeoptions"],
     deps = [
-        "@com_github_containerd_containerd_api//runtime/task/v2:go_default_library",
+        "@com_github_containerd_containerd_api//runtime/task/v3:go_default_library",
         "@com_github_containerd_typeurl_v2//:go_default_library",
         "@org_golang_google_protobuf//encoding/prototext:go_default_library",
     ],

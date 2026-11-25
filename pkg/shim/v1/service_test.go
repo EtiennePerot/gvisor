@@ -22,7 +22,7 @@ import (
 	"testing"
 	"time"
 
-	task "github.com/containerd/containerd/api/runtime/task/v2"
+	task "github.com/containerd/containerd/api/runtime/task/v3"
 	"github.com/containerd/containerd/v2/core/events"
 	types "github.com/containerd/containerd/v2/pkg/protobuf/types"
 	"github.com/containerd/containerd/v2/pkg/shim"

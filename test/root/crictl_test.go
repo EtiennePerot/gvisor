@@ -675,10 +675,9 @@ func getPidsRSS(t *testing.T, pids []string) int64 {
 
 // countShimProcesses counts running containerd-shim-runsc-v1 processes whose
 // cwd contains the given ID. This is done by iterating through /proc/<pid>/cwd
-// and checking /proc/<pid>/cmdline for the shim path. When shim grouping is:
-// - Enabled: Only the pod ID should have an associated shim process. The
-// container IDs should not have an associated shim process.
-// - Disabled: The pod ID and container IDs should have different shim processes.
+// and checking /proc/<pid>/cmdline for the shim path. Only the pod ID has an
+// associated shim process; containerd runs the containers of a pod in the shim
+// of the pod.
 func countShimProcesses(t *testing.T, id string) (int, error) {
 	pids, err := getShimPIDs(id)
 	if err != nil {

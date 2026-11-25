@@ -26,7 +26,7 @@ import (
 	"testing"
 	"time"
 
-	task "github.com/containerd/containerd/api/runtime/task/v2"
+	task "github.com/containerd/containerd/api/runtime/task/v3"
 	"gvisor.dev/gvisor/shim/shimutils"
 )
 

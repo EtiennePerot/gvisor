@@ -21,7 +21,7 @@ import (
 	"time"
 
 	"github.com/containerd/console"
-	task "github.com/containerd/containerd/api/runtime/task/v2"
+	task "github.com/containerd/containerd/api/runtime/task/v3"
 	"github.com/containerd/containerd/v2/pkg/stdio"
 )
 
@@ -95,7 +95,7 @@ type RestoreRequest struct {
 
 // TaskServiceExt extends TaskRequest with extra functionality required by the shim.
 type TaskServiceExt interface {
-	task.TaskService
+	task.TTRPCTaskService
 	CreateWithFSRestore(ctx context.Context, req *CreateWithFSRestoreRequest) (*task.CreateTaskResponse, error)
 	Restore(ctx context.Context, req *RestoreRequest) (*task.StartResponse, error)
 }

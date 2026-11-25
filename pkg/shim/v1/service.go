@@ -21,7 +21,7 @@ import (
 	"os"
 
 	api "github.com/containerd/containerd/api/runtime/sandbox/v1"
-	task "github.com/containerd/containerd/api/runtime/task/v2"
+	task "github.com/containerd/containerd/api/runtime/task/v3"
 	types "github.com/containerd/containerd/v2/pkg/protobuf/types"
 	"github.com/containerd/containerd/v2/pkg/shim"
 	"github.com/containerd/containerd/v2/pkg/shutdown"
@@ -402,7 +402,7 @@ func (s *shimRedirector) Restore(ctx context.Context, r *extension.RestoreReques
 }
 
 func (s *shimRedirector) RegisterTTRPC(server *ttrpc.Server) error {
-	task.RegisterTaskService(server, s)
+	task.RegisterTTRPCTaskService(server, s)
 	api.RegisterTTRPCSandboxService(server, s)
 	return nil
 }
