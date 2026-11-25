@@ -936,17 +936,49 @@ func SafeSetupAndMount(src, dst, typ string, flags uint32, procPath string) erro
 		if err := os.MkdirAll(parent, 0777); err != nil {
 			return fmt.Errorf("mkdir(%q) failed: %v", parent, err)
 		}
-		// Create the destination file if it does not exist.
-		f, err := os.OpenFile(dst, unix.O_CREAT, 0777)
-		if err != nil {
-			return fmt.Errorf("open(%q) failed: %v", dst, err)
+		if err := CreateMountPointFile(dst); err != nil {
+			return err
 		}
-		f.Close()
 	}
 
 	// Do the mount.
 	if err := SafeMount(src, dst, typ, uintptr(flags), "", procPath); err != nil {
-		return fmt.Errorf("mount(%q, %q, %d) failed: %v", src, dst, flags, err)
+		return fmt.Errorf("mount(%q, %q, %d) failed: %w", src, dst, flags, err)
+	}
+	return nil
+}
+
+// CreateMountPointFile creates an empty regular file at dst for a file mount
+// point. It does nothing if dst already exists, including as a symlink or
+// another file type: the caller must verify dst before it mounts on it. It
+// never follows symlinks in any path component of dst.
+func CreateMountPointFile(dst string) error {
+	how := &unix.OpenHow{
+		// O_CREAT|O_EXCL refuses to follow a symlink at the final path component
+		// and returns EEXIST for any existing path without opening it.
+		// RESOLVE_NO_SYMLINKS also rejects symlinks in parent components.
+		Flags:   unix.O_RDONLY | unix.O_CREAT | unix.O_EXCL | unix.O_NOFOLLOW | unix.O_NOCTTY | unix.O_CLOEXEC,
+		Mode:    0644,
+		Resolve: unix.RESOLVE_NO_SYMLINKS,
+	}
+	var (
+		fd  int
+		err error
+	)
+	for {
+		fd, err = unix.Openat2(unix.AT_FDCWD, dst, how)
+		if err != unix.EINTR {
+			break
+		}
+	}
+	if err != nil {
+		if err == unix.EEXIST {
+			return nil
+		}
+		return fmt.Errorf("creating mount point %q: %w", dst, err)
+	}
+	if err := unix.Close(fd); err != nil {
+		return fmt.Errorf("closing mount point %q: %w", dst, err)
 	}
 	return nil
 }

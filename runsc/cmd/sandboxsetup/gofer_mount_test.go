@@ -15,7 +15,12 @@
 package sandboxsetup
 
 import (
+	"errors"
+	"os"
+	"path/filepath"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestShouldExposeNvidiaDevice(t *testing.T) {
@@ -86,5 +91,38 @@ func TestShouldExposeTpuDevice(t *testing.T) {
 				t.Errorf("ShouldExposeTpuDevice(%q) = %v, want %v", tst.path, got, tst.want)
 			}
 		})
+	}
+}
+
+func TestSafeSetupAndMoveMountDanglingSymlink(t *testing.T) {
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("filepath.EvalSymlinks(t.TempDir()) failed: %v", err)
+	}
+	src := filepath.Join(dir, "src")
+	if err := os.WriteFile(src, nil, 0644); err != nil {
+		t.Fatalf("os.WriteFile(%q) failed: %v", src, err)
+	}
+	srcFD, err := unix.OpenTree(unix.AT_FDCWD, src, unix.OPEN_TREE_CLONE|unix.OPEN_TREE_CLOEXEC)
+	if err != nil {
+		if errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.EPERM) {
+			t.Skipf("open_tree unavailable: %v", err)
+		}
+		t.Fatalf("unix.OpenTree(%q) failed: %v", src, err)
+	}
+	defer unix.Close(srcFD)
+
+	missing := filepath.Join(dir, "missing")
+	dst := filepath.Join(dir, "dst-dangling")
+	if err := os.Symlink(missing, dst); err != nil {
+		t.Fatalf("os.Symlink() failed: %v", err)
+	}
+	if err := safeSetupAndMoveMount(srcFD, src, dst, ""); err == nil {
+		t.Errorf("safeSetupAndMoveMount(%q -> %q) unexpectedly succeeded", dst, missing)
+	} else if errors.Is(err, unix.ENOSYS) || errors.Is(err, os.ErrPermission) {
+		t.Fatalf("safeSetupAndMoveMount(%q -> %q) failed unexpectedly: %v", dst, missing, err)
+	}
+	if _, err := os.Lstat(missing); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("os.Lstat(%q) err = %v, want %v", missing, err, os.ErrNotExist)
 	}
 }
