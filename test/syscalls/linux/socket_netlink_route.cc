@@ -4138,6 +4138,9 @@ TEST(NetlinkRouteTest, VethLinkLocalAddrOnUpDown) {
 TEST(NetlinkRouteTest, BridgeAddUnnamed) {
   SKIP_IF(!ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_NET_ADMIN)));
   SKIP_IF(IsRunningWithHostinet());
+  // Netstack state is not restored across save/restore.
+  // TODO(gvisor.dev/issue/4595): enable cooperative save tests.
+  const DisableSave ds;
 
   const FileDescriptor curr_nsfd =
       ASSERT_NO_ERRNO_AND_VALUE(Open("/proc/thread-self/ns/net", O_RDONLY));
