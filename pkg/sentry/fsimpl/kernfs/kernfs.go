@@ -246,6 +246,9 @@ type Dentry struct {
 
 	parent atomic.Pointer[Dentry] `state:".(*Dentry)"`
 
+	// +checklocks:fs.mu
+	// +checklocks:fs.ancestryMu
+	// +checklocksreadany
 	name string
 
 	// If cached is true, dentryEntry links dentry into
@@ -479,7 +482,7 @@ func (d *Dentry) evictLocked(ctx context.Context) {
 			for _, rc := range rcs {
 				d.fs.deferDecRef(rc)
 			}
-			delete(parent.children, d.name)
+			delete(parent.children, d.name) // +checklocksignore: d.fs.mu is held for writing per precondition.
 			parent.dirMu.Unlock()
 		}
 		d.destroy(ctx)
@@ -649,7 +652,7 @@ func (d *Dentry) insertChildLocked(name string, child *Dentry) {
 	}
 	d.IncRef() // DecRef in child's Dentry.destroy.
 	child.parent.Store(d)
-	child.name = name
+	child.name = name // +checklocksignore: child is newly allocated and not yet published.
 	if d.children == nil {
 		d.children = make(map[string]*Dentry)
 	}

@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+
 	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/errors/linuxerr"
@@ -716,4 +717,50 @@ func TestEvictCachedDentriesPreservesWatched(t *testing.T) {
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("unexpected inotify events after EvictCachedDentries (-want +got):\n%s", diff)
 	}
+}
+
+// TestRenameConcurrentWithPathAndInotify races RenameAt against ancestryMu readers.
+func TestRenameConcurrentWithPathAndInotify(t *testing.T) {
+	sys := newTestSystem(t, func(ctx context.Context, creds *auth.Credentials, fs *filesystem) kernfs.Inode {
+		return fs.newDir(ctx, creds, 0777 /* mode */, nil /* contents */)
+	})
+	defer sys.Destroy()
+	ctx := vfs.WithMountNamespace(sys.Ctx, sys.MntNs)
+
+	// Toggle between different length names.
+	const nameA, nameB = "a", "bbbbbbbbbbbbbbbb"
+	if err := sys.VFS.MkdirAt(ctx, sys.Creds, sys.PathOpAtRoot(nameA), &vfs.MkdirOptions{Mode: 0755}); err != nil {
+		t.Fatalf("MkdirAt(%q) failed: %v", nameA, err)
+	}
+	childVD := sys.GetDentryOrDie(sys.PathOpAtRoot(nameA))
+	defer childVD.DecRef(ctx)
+
+	// Concurrently read d.name.
+	done, exited := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(exited)
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			childVD.Dentry().InotifyWithParent(ctx, linux.IN_ACCESS, 0 /* cookie */, vfs.PathEvent)
+			if p, err := sys.VFS.PathnameWithDeleted(ctx, sys.Root, childVD); err != nil || (p != "/"+nameA && p != "/"+nameB) {
+				t.Errorf("PathnameWithDeleted = (%q, %v), want /%s or /%s", p, err, nameA, nameB)
+				return
+			}
+		}
+	}()
+
+	// Repeatedly rename the child directory to race RenameAt against the reader.
+	for cur, next, i := nameA, nameB, 0; i < 200; cur, next, i = next, cur, i+1 {
+		if err := sys.VFS.RenameAt(ctx, sys.Creds, sys.PathOpAtRoot(cur), sys.PathOpAtRoot(next), &vfs.RenameOptions{}); err != nil {
+			close(done)
+			<-exited
+			t.Fatalf("RenameAt(%q -> %q) failed: %v", cur, next, err)
+		}
+	}
+	close(done)
+	<-exited
 }

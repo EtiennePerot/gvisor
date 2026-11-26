@@ -115,7 +115,7 @@ func (fs *Filesystem) revalidateChildLocked(ctx context.Context, vfsObj *vfs.Vir
 		if child.inode.Valid(ctx, parent, name) {
 			break
 		}
-		delete(parent.children, child.name)
+		delete(parent.children, name)
 		parent.dirMu.Unlock()
 		fs.invalidateRemovedChildLocked(ctx, vfsObj, child)
 		parent.dirMu.Lock()
@@ -948,19 +948,18 @@ func (fs *Filesystem) RenameAt(ctx context.Context, rp *vfs.ResolvingPath, oldPa
 	if err != nil {
 		return err
 	}
-	err = srcDir.inode.Rename(ctx, src.name, newName, src.inode, dstDir.inode)
+	err = srcDir.inode.Rename(ctx, oldName, newName, src.inode, dstDir.inode)
 	if err != nil {
 		virtfs.AbortRenameDentry(&handle, srcVFSD, dstVFSD)
 		return err
 	}
 	virtfs.RenameBegin(&handle)
-	delete(srcDir.children, src.name)
+	delete(srcDir.children, oldName)
 	if srcDir != dstDir {
 		fs.deferDecRef(srcDir) // child (src) drops ref on old parent.
 		dstDir.IncRef()        // child (src) takes a ref on the new parent.
 	}
-	src.parent.Store(dstDir)
-	src.name = newName
+	genericSetParentAndName(fs, src, dstDir, newName)
 	if dstDir.children == nil {
 		dstDir.children = make(map[string]*Dentry)
 	}
@@ -1024,11 +1023,11 @@ func (fs *Filesystem) RmdirAt(ctx context.Context, rp *vfs.ResolvingPath) error 
 		return err // +checklocksforce: vfsd is not locked.
 	}
 
-	if err := parent.inode.RmDir(ctx, child.name, child.inode); err != nil {
+	if err := parent.inode.RmDir(ctx, name, child.inode); err != nil {
 		virtfs.AbortDeleteDentry(vfsd)
 		return err
 	}
-	delete(parent.children, child.name)
+	delete(parent.children, name)
 	// Linux sends the parent's IN_DELETE|IN_ISDIR at rmdir() time, but
 	// defers the child's IN_DELETE_SELF/IN_IGNORED until the last ref is
 	// dropped. A removed kernfs dentry keeps one tree ref until we drop it
@@ -1037,7 +1036,7 @@ func (fs *Filesystem) RmdirAt(ctx context.Context, rp *vfs.ResolvingPath) error 
 	if child.refs.Load() == 1 {
 		child.inode.Watches().HandleDeletion(ctx)
 	}
-	parent.inode.Watches().Notify(ctx, child.name, linux.IN_DELETE|linux.IN_ISDIR, 0, vfs.InodeEvent, true /* unlinked */)
+	parent.inode.Watches().Notify(ctx, name, linux.IN_DELETE|linux.IN_ISDIR, 0, vfs.InodeEvent, true /* unlinked */)
 	// Defer decref so that fs.mu and parentDentry.dirMu are unlocked by then.
 	fs.deferDecRef(child)
 	rcs := virtfs.CommitDeleteDentry(ctx, vfsd)
@@ -1177,12 +1176,13 @@ func (fs *Filesystem) UnlinkAt(ctx context.Context, rp *vfs.ResolvingPath) error
 	if err := virtfs.PrepareDeleteDentry(mntns, vfsd); err != nil {
 		return err
 	}
-	if err := parentDentry.inode.Unlink(ctx, d.name, d.inode); err != nil {
+	name := d.name // +checklocksignore: d.fs == fs and fs.mu is held for writing.
+	if err := parentDentry.inode.Unlink(ctx, name, d.inode); err != nil {
 		virtfs.AbortDeleteDentry(vfsd)
 		return err
 	}
-	delete(parentDentry.children, d.name)
-	vfs.InotifyRemoveChild(ctx, d.inode.Watches(), parentDentry.inode.Watches(), d.name)
+	delete(parentDentry.children, name)
+	vfs.InotifyRemoveChild(ctx, d.inode.Watches(), parentDentry.inode.Watches(), name)
 	// Defer decref so that fs.mu and parentDentry.dirMu are unlocked by then.
 	fs.deferDecRef(d)
 	rcs := virtfs.CommitDeleteDentry(ctx, vfsd)
