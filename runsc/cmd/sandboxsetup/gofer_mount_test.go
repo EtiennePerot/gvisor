@@ -16,6 +16,7 @@ package sandboxsetup
 
 import (
 	"errors"
+	"math/bits"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -225,5 +226,99 @@ func TestWriteReadMounts(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("ReadMounts() = %+v, want %+v", got, want)
+	}
+}
+
+func TestLockedMountFlags(t *testing.T) {
+	const atimeMask = unix.MS_NOATIME | unix.MS_RELATIME | unix.MS_STRICTATIME
+	for _, tc := range []struct {
+		name        string
+		flags       uint32
+		statfsFlags int64
+		want        uint32
+		wantAttr    uint64
+	}{
+		{
+			name:     "strictatime mount kept",
+			want:     unix.MS_STRICTATIME,
+			wantAttr: unix.MOUNT_ATTR_STRICTATIME,
+		},
+		{
+			name:        "relatime mount kept",
+			statfsFlags: unix.ST_RELATIME,
+			want:        unix.MS_RELATIME,
+			wantAttr:    unix.MOUNT_ATTR_RELATIME,
+		},
+		{
+			name:        "noatime mount kept",
+			statfsFlags: unix.ST_NOATIME,
+			want:        unix.MS_NOATIME,
+			wantAttr:    unix.MOUNT_ATTR_NOATIME,
+		},
+		{
+			name:        "nodiratime without atime flag keeps noatime",
+			flags:       unix.MS_BIND | unix.MS_REC | unix.MS_NOSUID | unix.MS_NODIRATIME,
+			statfsFlags: unix.ST_NOATIME,
+			want:        unix.MS_NOATIME,
+			wantAttr:    unix.MOUNT_ATTR_NOSUID | unix.MOUNT_ATTR_NOATIME | unix.MOUNT_ATTR_NODIRATIME,
+		},
+		{
+			name:        "strictatime replaces relatime",
+			flags:       unix.MS_STRICTATIME,
+			statfsFlags: unix.ST_RELATIME,
+			want:        0,
+			wantAttr:    unix.MOUNT_ATTR_STRICTATIME,
+		},
+		{
+			name:        "strictatime replaces noatime",
+			flags:       unix.MS_STRICTATIME,
+			statfsFlags: unix.ST_NOATIME,
+			want:        0,
+			wantAttr:    unix.MOUNT_ATTR_STRICTATIME,
+		},
+		{
+			name:        "relatime replaces noatime",
+			flags:       unix.MS_RELATIME,
+			statfsFlags: unix.ST_NOATIME,
+			want:        0,
+			wantAttr:    unix.MOUNT_ATTR_RELATIME,
+		},
+		{
+			name:        "noatime replaces relatime",
+			flags:       unix.MS_NOATIME,
+			statfsFlags: unix.ST_RELATIME,
+			want:        0,
+			wantAttr:    unix.MOUNT_ATTR_NOATIME,
+		},
+		{
+			name:        "other flags kept with explicit atime",
+			flags:       unix.MS_STRICTATIME,
+			statfsFlags: unix.ST_RDONLY | unix.ST_NOEXEC | unix.ST_NODEV | unix.ST_NODIRATIME | unix.ST_RELATIME,
+			want:        unix.MS_RDONLY | unix.MS_NOEXEC | unix.MS_NODEV | unix.MS_NODIRATIME,
+			wantAttr:    unix.MOUNT_ATTR_RDONLY | unix.MOUNT_ATTR_NOEXEC | unix.MOUNT_ATTR_NODEV | unix.MOUNT_ATTR_NODIRATIME | unix.MOUNT_ATTR_STRICTATIME,
+		},
+		{
+			name:        "ST_NOSUID not kept",
+			statfsFlags: unix.ST_NOSUID,
+			want:        unix.MS_STRICTATIME,
+			wantAttr:    unix.MOUNT_ATTR_STRICTATIME,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := lockedMountFlags(tc.flags, tc.statfsFlags)
+			if got != tc.want {
+				t.Errorf("lockedMountFlags(%#x, %#x) = %#x, want %#x", tc.flags, tc.statfsFlags, got, tc.want)
+			}
+			if n := bits.OnesCount32((tc.flags | got) & atimeMask); n != 1 {
+				t.Errorf("flags %#x | locked %#x has %d atime flags, want 1", tc.flags, got, n)
+			}
+			attrSet, attrClr := msFlagsToMountAttr(tc.flags | got)
+			if attrSet != tc.wantAttr {
+				t.Errorf("msFlagsToMountAttr(%#x) attrSet = %#x, want %#x", tc.flags|got, attrSet, tc.wantAttr)
+			}
+			if attrClr != unix.MOUNT_ATTR__ATIME {
+				t.Errorf("msFlagsToMountAttr(%#x) attrClr = %#x, want %#x", tc.flags|got, attrClr, unix.MOUNT_ATTR__ATIME)
+			}
+		})
 	}
 }

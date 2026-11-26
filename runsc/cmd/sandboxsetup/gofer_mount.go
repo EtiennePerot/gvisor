@@ -25,6 +25,7 @@ import (
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"golang.org/x/sys/unix"
+
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/unet"
 	"gvisor.dev/gvisor/runsc/cmd/util"
@@ -297,6 +298,38 @@ func SetupRootFS(spec *specs.Spec, conf *config.Config, mountConfs []specutils.G
 	return nil
 }
 
+// lockedMountFlags returns the `MS_*` flags to keep from an existing mount with
+// statfs `ST_*` flags `statfsFlags`, when the `MS_*` flags in `flags` are
+// applied to it with `MS_BIND|MS_REMOUNT` or `mount_setattr`.
+func lockedMountFlags(flags uint32, statfsFlags int64) uint32 {
+	var lockedFlags uint32
+	for _, f := range []struct {
+		st int64
+		ms uint32
+	}{
+		// MS_NOSUID are always set.
+		{unix.ST_RDONLY, unix.MS_RDONLY},
+		{unix.ST_NOEXEC, unix.MS_NOEXEC},
+		{unix.ST_NODEV, unix.MS_NODEV},
+		{unix.ST_NODIRATIME, unix.MS_NODIRATIME},
+	} {
+		if statfsFlags&f.st == f.st {
+			lockedFlags |= f.ms
+		}
+	}
+	if flags&(unix.MS_NOATIME|unix.MS_RELATIME|unix.MS_STRICTATIME) == 0 {
+		switch {
+		case statfsFlags&unix.ST_NOATIME == unix.ST_NOATIME:
+			lockedFlags |= unix.MS_NOATIME
+		case statfsFlags&unix.ST_RELATIME == unix.ST_RELATIME:
+			lockedFlags |= unix.MS_RELATIME
+		default:
+			lockedFlags |= unix.MS_STRICTATIME
+		}
+	}
+	return lockedFlags
+}
+
 func msFlagsToMountAttr(flags uint32) (attrSet uint64, attrClr uint64) {
 	if flags&unix.MS_RDONLY != 0 {
 		attrSet |= unix.MOUNT_ATTR_RDONLY
@@ -464,25 +497,7 @@ func SetupMounts(conf *config.Config, mounts []specs.Mount, root, procPath strin
 			if err := unix.Fstatfs(dstFD, &statfs); err != nil {
 				return fmt.Errorf("stat dst %q: %w", dst, err)
 			}
-			lockedFlags := uint32(0)
-			for _, f := range []struct {
-				st, ms int
-			}{
-				// MS_NOSUID are always set.
-				{unix.ST_RDONLY, unix.MS_RDONLY},
-				{unix.ST_NOEXEC, unix.MS_NOEXEC},
-				{unix.ST_NODEV, unix.MS_NODEV},
-				{unix.ST_NOATIME, unix.MS_NOATIME},
-				{unix.ST_NODIRATIME, unix.MS_NODIRATIME},
-				{unix.ST_RELATIME, unix.MS_RELATIME},
-			} {
-				if int(statfs.Flags)&f.st == f.st {
-					lockedFlags |= uint32(f.ms)
-				}
-			}
-			if lockedFlags&(unix.MS_NOATIME|unix.MS_RELATIME) == 0 {
-				lockedFlags |= unix.MS_STRICTATIME
-			}
+			lockedFlags := lockedMountFlags(flags, statfs.Flags)
 
 			if isIDMapped {
 				attrSet, attrClr := msFlagsToMountAttr(flags | lockedFlags)

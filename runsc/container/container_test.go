@@ -3225,6 +3225,32 @@ func TestIDMappedMountFlags(t *testing.T) {
 				// An explicit mount on an rro tree keeps its own flags.
 				specs.Mount{Destination: overmount, Source: dir2, Type: "bind", Options: []string{"bind", "rw", "relatime"}},
 			)
+
+			// An explicit atime option replaces the atime mode of the source mount.
+			atimeMounts := []struct {
+				name        string
+				sourceFlags uintptr
+				option      string
+				want        int64
+			}{
+				{name: "relatime-over-noatime", sourceFlags: unix.MS_NOATIME, option: "relatime", want: unix.ST_RELATIME},
+				{name: "strictatime-over-relatime", sourceFlags: unix.MS_RELATIME, option: "strictatime", want: 0},
+			}
+			for _, am := range atimeMounts {
+				src := filepath.Join(dir, am.name)
+				if err := os.Mkdir(src, 0755); err != nil {
+					t.Fatal(err)
+				}
+				if err := unix.Mount("tmpfs", src, "tmpfs", am.sourceFlags, ""); err != nil {
+					t.Fatal(err)
+				}
+				defer unix.Unmount(src, unix.MNT_DETACH)
+				m := plain
+				m.Destination = src
+				m.Source = src
+				m.Options = []string{"bind", "idmap", am.option}
+				spec.Mounts = append(spec.Mounts, m)
+			}
 			spec.Root.Readonly = false
 
 			_, bundleDir, cleanup, err := testutil.SetupContainer(spec, conf)
@@ -3316,6 +3342,14 @@ func TestIDMappedMountFlags(t *testing.T) {
 			}
 			if st.Flags&unix.ST_NOEXEC != 0 {
 				t.Errorf("explicit overmount inherited noexec from its rro parent")
+			}
+			for _, am := range atimeMounts {
+				if err := unix.Statfs(filepath.Join(goferRoot, dir, am.name), &st); err != nil {
+					t.Fatal(err)
+				}
+				if got := st.Flags & (unix.ST_NOATIME | unix.ST_RELATIME); got != am.want {
+					t.Errorf("%s: atime statfs flags %#x, want %#x", am.name, got, am.want)
+				}
 			}
 		})
 	}
