@@ -646,13 +646,15 @@ func (b *Boot) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcomma
 	if b.mountsFD >= 0 {
 		// Read resolved mount list and replace the original one from the spec.
 		mountsFile := os.NewFile(uintptr(b.mountsFD), "mounts file")
-		cleanMounts, err := specutils.ReadMounts(mountsFile)
+		resolved, err := specutils.ReadMounts(mountsFile)
 		if err != nil {
 			mountsFile.Close()
 			util.Fatalf("Error reading mounts file: %v", err)
 		}
 		mountsFile.Close()
-		spec.Mounts = cleanMounts
+		if err := specutils.ApplyResolvedMounts(spec, b.goferMountConfs, resolved); err != nil {
+			util.Fatalf("Error applying resolved mounts: %v", err)
+		}
 		timer.Reached("resolved mounts read")
 	}
 

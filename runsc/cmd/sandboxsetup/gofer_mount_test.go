@@ -18,9 +18,13 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
+	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"golang.org/x/sys/unix"
+	"gvisor.dev/gvisor/runsc/config"
+	"gvisor.dev/gvisor/runsc/specutils"
 )
 
 func TestShouldExposeNvidiaDevice(t *testing.T) {
@@ -124,5 +128,102 @@ func TestSafeSetupAndMoveMountDanglingSymlink(t *testing.T) {
 	}
 	if _, err := os.Lstat(missing); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("os.Lstat(%q) err = %v, want %v", missing, err, os.ErrNotExist)
+	}
+}
+
+func TestResolveMountsNonDir(t *testing.T) {
+	root := t.TempDir()
+	dirDst := filepath.Join(root, "dir")
+	if err := os.Mkdir(dirDst, 0755); err != nil {
+		t.Fatalf("os.Mkdir(%q) failed: %v", dirDst, err)
+	}
+	fileDst := filepath.Join(root, "file")
+	if err := os.WriteFile(fileDst, nil, 0644); err != nil {
+		t.Fatalf("os.WriteFile(%q) failed: %v", fileDst, err)
+	}
+	erofsDst := filepath.Join(root, "erofs")
+	if err := os.WriteFile(erofsDst, nil, 0644); err != nil {
+		t.Fatalf("os.WriteFile(%q) failed: %v", erofsDst, err)
+	}
+	fifoDst := filepath.Join(root, "fifo")
+	if err := unix.Mkfifo(fifoDst, 0644); err != nil {
+		t.Fatalf("unix.Mkfifo(%q) failed: %v", fifoDst, err)
+	}
+	if err := os.Symlink("/file", filepath.Join(root, "file-link")); err != nil {
+		t.Fatalf("os.Symlink failed: %v", err)
+	}
+	if err := os.Symlink("/dir", filepath.Join(root, "dir-link")); err != nil {
+		t.Fatalf("os.Symlink failed: %v", err)
+	}
+
+	mounts := []specs.Mount{
+		{Type: "bind", Source: "/src/dir", Destination: "/dir"},
+		{Type: "bind", Source: "/src/file", Destination: "/file"},
+		{Type: "tmpfs", Destination: "/tmp"},
+		{Type: "bind", Source: "/src/erofs", Destination: "/erofs"},
+		{Type: "bind", Source: "/src/file", Destination: "/file-link"},
+		{Type: "bind", Source: "/src/dir", Destination: "/dir-link"},
+		{Type: "bind", Source: "/src/fifo", Destination: "/fifo"},
+	}
+	mountConfs := []specutils.GoferMountConf{
+		{Lower: specutils.Lisafs, Upper: specutils.NoOverlay}, // rootfs
+		{Lower: specutils.Lisafs, Upper: specutils.NoOverlay},
+		{Lower: specutils.Lisafs, Upper: specutils.NoOverlay},
+		{Lower: specutils.Erofs, Upper: specutils.NoOverlay},
+		{Lower: specutils.Lisafs, Upper: specutils.MemoryOverlay},
+		{Lower: specutils.Lisafs, Upper: specutils.NoOverlay},
+		{Lower: specutils.Lisafs, Upper: specutils.NoOverlay},
+	}
+
+	// /erofs is a file too, but the gofer does not serve it.
+	wantNonDir := []bool{false, true, false, false, true, false, true}
+	wantDst := []string{"/dir", "/file", "/tmp", "/erofs", "/file", "/dir", "/fifo"}
+	for _, withoutChroot := range []bool{false, true} {
+		conf := &config.Config{TestOnlyAllowRunAsCurrentUserWithoutChroot: withoutChroot}
+		resolved, err := ResolveMounts(conf, mounts, root, mountConfs)
+		if err != nil {
+			t.Fatalf("ResolveMounts(withoutChroot=%t) failed: %v", withoutChroot, err)
+		}
+		if len(resolved) != len(mounts) {
+			t.Fatalf("ResolveMounts(withoutChroot=%t) returned %d mounts, want %d", withoutChroot, len(resolved), len(mounts))
+		}
+		for i, m := range resolved {
+			if m.NonDir != wantNonDir[i] {
+				t.Errorf("ResolveMounts(withoutChroot=%t): mount %d at %q has NonDir = %t, want %t", withoutChroot, i, mounts[i].Destination, m.NonDir, wantNonDir[i])
+			}
+			if m.Spec.Destination != wantDst[i] {
+				t.Errorf("ResolveMounts(withoutChroot=%t): mount %d at %q has destination %q, want %q", withoutChroot, i, mounts[i].Destination, m.Spec.Destination, wantDst[i])
+			}
+		}
+	}
+}
+
+func TestWriteReadMounts(t *testing.T) {
+	var fds [2]int
+	if err := unix.Pipe(fds[:]); err != nil {
+		t.Fatalf("unix.Pipe() failed: %v", err)
+	}
+	r := os.NewFile(uintptr(fds[0]), "mounts read")
+	defer r.Close()
+
+	want := []specutils.ResolvedMount{
+		{Spec: specs.Mount{Type: "bind", Source: "/src", Destination: "/dst", Options: []string{"ro"}}},
+		{Spec: specs.Mount{Type: "tmpfs", Destination: "/tmp"}},
+		{Spec: specs.Mount{Type: "bind", Source: "/file", Destination: "/file"}, NonDir: true},
+	}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- WriteMounts(fds[1], want)
+	}()
+
+	got, err := specutils.ReadMounts(r)
+	if err != nil {
+		t.Fatalf("ReadMounts() failed: %v", err)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatalf("WriteMounts() failed: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ReadMounts() = %+v, want %+v", got, want)
 	}
 }

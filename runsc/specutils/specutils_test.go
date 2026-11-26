@@ -1725,3 +1725,74 @@ func TestSafeSetupAndMountDanglingSymlink(t *testing.T) {
 		t.Errorf("os.Lstat(%q) err = %v, want %v", missing, err, os.ErrNotExist)
 	}
 }
+
+func TestApplyResolvedMounts(t *testing.T) {
+	// Mounts without a config are between the two mounts that are not
+	// directories, so that config and mount indices differ.
+	resolved := []ResolvedMount{
+		{Spec: specs.Mount{Type: "bind", Source: "/src/dir", Destination: "/dir"}},
+		{Spec: specs.Mount{Type: "bind", Source: "/src/file", Destination: "/file"}, NonDir: true},
+		{Spec: specs.Mount{Type: "tmpfs", Destination: "/tmp"}},
+		{Spec: specs.Mount{Type: "erofs", Source: "/src/erofs", Destination: "/erofs"}},
+		{Spec: specs.Mount{Type: "bind", Source: "/src/file", Destination: "/file2"}, NonDir: true},
+		{Spec: specs.Mount{Type: "proc", Destination: "/proc"}},
+		{Spec: specs.Mount{Type: "bind", Source: "/src/dir", Destination: "/dir2"}},
+	}
+	var wantMounts []specs.Mount
+	for _, m := range resolved {
+		wantMounts = append(wantMounts, m.Spec)
+	}
+	newConfs := func() []GoferMountConf {
+		return []GoferMountConf{
+			{Lower: Lisafs, Upper: NoOverlay}, // rootfs
+			{Lower: Lisafs, Upper: NoOverlay},
+			{Lower: Lisafs, Upper: NoOverlay},
+			{Lower: Erofs, Upper: NoOverlay},
+			{Lower: Lisafs, Upper: MemoryOverlay, Size: "1g"},
+			// /dir2 is a directory, so ApplyResolvedMounts clears NonDir.
+			{Lower: Lisafs, Upper: NoOverlay, NonDir: true},
+		}
+	}
+
+	t.Run("Valid", func(t *testing.T) {
+		spec := &specs.Spec{Mounts: []specs.Mount{{Type: "bind", Source: "/old", Destination: "/old"}}}
+		confs := newConfs()
+		if err := ApplyResolvedMounts(spec, confs, resolved); err != nil {
+			t.Fatalf("ApplyResolvedMounts() failed: %v", err)
+		}
+		if !reflect.DeepEqual(spec.Mounts, wantMounts) {
+			t.Errorf("spec.Mounts = %+v, want %+v", spec.Mounts, wantMounts)
+		}
+		wantConfs := newConfs()
+		wantConfs[2].NonDir = true
+		wantConfs[4].NonDir = true
+		wantConfs[5].NonDir = false
+		if !reflect.DeepEqual(confs, wantConfs) {
+			t.Errorf("mount configs = %#v, want %#v", confs, wantConfs)
+		}
+	})
+
+	for _, tc := range []struct {
+		name  string
+		confs []GoferMountConf
+	}{
+		{name: "TooFewConfigs", confs: newConfs()[:5]},
+		{name: "TooManyConfigs", confs: append(newConfs(), GoferMountConf{Lower: Lisafs, Upper: NoOverlay})},
+		{name: "NoConfigs"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			oldMounts := []specs.Mount{{Type: "bind", Source: "/old", Destination: "/old"}}
+			spec := &specs.Spec{Mounts: append([]specs.Mount(nil), oldMounts...)}
+			confs := append([]GoferMountConf(nil), tc.confs...)
+			if err := ApplyResolvedMounts(spec, confs, resolved); err == nil {
+				t.Fatalf("ApplyResolvedMounts() succeeded with %d configs, want an error", len(confs))
+			}
+			if !reflect.DeepEqual(spec.Mounts, oldMounts) {
+				t.Errorf("spec.Mounts = %+v after an error, want %+v", spec.Mounts, oldMounts)
+			}
+			if !reflect.DeepEqual(confs, tc.confs) {
+				t.Errorf("mount configs = %#v after an error, want %#v", confs, tc.confs)
+			}
+		})
+	}
+}

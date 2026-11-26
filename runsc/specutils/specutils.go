@@ -400,17 +400,54 @@ func FixConfig(conf *config.Config, spec *specs.Spec) error {
 	return conf.Validate()
 }
 
-// ReadMounts reads mount list from a file.
-func ReadMounts(f *os.File) ([]specs.Mount, error) {
+// ResolvedMount is a mount of the spec after the gofer has set it up.
+type ResolvedMount struct {
+	Spec specs.Mount `json:"spec"`
+
+	// NonDir is true if the gofer serves the mount and its target is not a
+	// directory.
+	NonDir bool `json:"nonDir,omitempty"`
+}
+
+// ReadMounts reads the resolved mounts from a file.
+func ReadMounts(f *os.File) ([]ResolvedMount, error) {
 	bytes, err := io.ReadAll(f)
 	if err != nil {
 		return nil, fmt.Errorf("error reading mounts: %v", err)
 	}
-	var mounts []specs.Mount
+	var mounts []ResolvedMount
 	if err := json.Unmarshal(bytes, &mounts); err != nil {
 		return nil, fmt.Errorf("error unmarshaling mounts: %v\nJSON bytes:\n%s", err, string(bytes))
 	}
 	return mounts, nil
+}
+
+// ApplyResolvedMounts replaces the mounts of spec with the resolved mounts,
+// and copies NonDir to the gofer mount config of each mount that has one.
+// mountConfs holds the config of the root, then the configs of those mounts
+// in order. On error, nothing changes.
+func ApplyResolvedMounts(spec *specs.Spec, mountConfs []GoferMountConf, resolved []ResolvedMount) error {
+	numConfs := 1 // First config is for rootfs.
+	for _, m := range resolved {
+		if HasMountConfig(m.Spec) {
+			numConfs++
+		}
+	}
+	if numConfs != len(mountConfs) {
+		return fmt.Errorf("the root and the resolved mounts need %d gofer mount configs, but there are %d", numConfs, len(mountConfs))
+	}
+	mounts := make([]specs.Mount, 0, len(resolved))
+	mountIdx := 1 // First index is for rootfs.
+	for _, m := range resolved {
+		mounts = append(mounts, m.Spec)
+		if !HasMountConfig(m.Spec) {
+			continue
+		}
+		mountConfs[mountIdx].NonDir = m.NonDir
+		mountIdx++
+	}
+	spec.Mounts = mounts
+	return nil
 }
 
 // ChangeMountType changes m.Type to the specified type. It may do necessary

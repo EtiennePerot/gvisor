@@ -1743,6 +1743,67 @@ func TestExecWait(t *testing.T) {
 
 // TestMultiContainerMount tests that bind mounts can be used with multiple
 // containers.
+// TestMultiContainerMountNonDir verifies that the gofer mount configs of a
+// started subcontainer tell which bind mounts are not directories.
+func TestMultiContainerMountNonDir(t *testing.T) {
+	dir, err := os.MkdirTemp(testutil.TmpDir(), "container")
+	if err != nil {
+		t.Fatal("os.MkdirTemp failed:", err)
+	}
+	defer os.RemoveAll(dir)
+	file := filepath.Join(dir, "file")
+	if err := os.WriteFile(file, nil, 0644); err != nil {
+		t.Fatalf("os.WriteFile(%q) failed: %v", file, err)
+	}
+
+	// The tmpfs mount has no gofer mount config.
+	sps, ids := createSpecs(sleepCmd, sleepCmd)
+	sps[1].Mounts = append(sps[1].Mounts,
+		specs.Mount{Type: "tmpfs", Destination: "/mnt/tmpfs"},
+		specs.Mount{Type: "bind", Source: dir, Destination: dir},
+		specs.Mount{Type: "bind", Source: file, Destination: file + ".dst"},
+	)
+
+	rootDir, cleanup, err := testutil.SetupRootDir()
+	if err != nil {
+		t.Fatalf("error creating root dir: %v", err)
+	}
+	defer cleanup()
+
+	conf := testutil.TestConfig(t)
+	conf.RootDir = rootDir
+
+	containers, cleanup, err := startContainers(conf, sps, ids)
+	if err != nil {
+		t.Fatalf("error starting containers: %v", err)
+	}
+	defer cleanup()
+
+	c, err := Load(rootDir, FullID{ContainerID: containers[1].ID}, LoadOpts{})
+	if err != nil {
+		t.Fatalf("error loading container: %v", err)
+	}
+	sawFile := false
+	confIdx := 1 // First config is for rootfs.
+	for _, m := range c.Spec.Mounts {
+		if !specutils.HasMountConfig(m) {
+			continue
+		}
+		if confIdx >= len(c.GoferMountConfs) {
+			t.Fatalf("mount %q has no gofer mount config: there are %d configs", m.Destination, len(c.GoferMountConfs))
+		}
+		want := m.Source == file
+		sawFile = sawFile || want
+		if got := c.GoferMountConfs[confIdx].NonDir; got != want {
+			t.Errorf("mount of %q: config %d has NonDir = %t, want %t", m.Source, confIdx, got, want)
+		}
+		confIdx++
+	}
+	if !sawFile {
+		t.Errorf("no mount of %q in %+v", file, c.Spec.Mounts)
+	}
+}
+
 func TestMultiContainerMount(t *testing.T) {
 	// 'src != dst' ensures that 'dst' doesn't exist in the host and must be
 	// properly mapped inside the container to work.

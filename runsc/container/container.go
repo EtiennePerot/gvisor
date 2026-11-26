@@ -679,11 +679,13 @@ func (c *Container) startLocked(conf *config.Config, action string, startRoot fu
 			}()
 
 			if mountsFile != nil {
-				cleanMounts, err := specutils.ReadMounts(mountsFile)
+				resolved, err := specutils.ReadMounts(mountsFile)
 				if err != nil {
 					return fmt.Errorf("reading mounts file: %v", err)
 				}
-				c.Spec.Mounts = cleanMounts
+				if err := specutils.ApplyResolvedMounts(c.Spec, c.GoferMountConfs, resolved); err != nil {
+					return fmt.Errorf("applying resolved mounts: %v", err)
+				}
 			}
 
 			// Setup stdios if the container is not using terminal. Otherwise TTY was

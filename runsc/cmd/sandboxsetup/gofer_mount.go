@@ -66,7 +66,7 @@ func NewSocket(ioFD int) *unet.Socket {
 
 // WriteMounts serializes the given mounts as JSON and writes them to the
 // given file descriptor.
-func WriteMounts(mountsFD int, mounts []specs.Mount) error {
+func WriteMounts(mountsFD int, mounts []specutils.ResolvedMount) error {
 	bytes, err := json.Marshal(mounts)
 	if err != nil {
 		return err
@@ -574,27 +574,28 @@ func SetupDev(spec *specs.Spec, conf *config.Config, root, procPath string) erro
 
 // ResolveMounts resolves relative paths and symlinks in mount point
 // destinations. It also adjusts mount options based on the underlying
-// filesystem type.
+// filesystem type, and reports whether the target of each mount that the
+// gofer serves is not a directory.
 //
 // Note: mount points must already be in place for resolution to work.
 // Otherwise, it may follow symlinks to locations that would be overwritten
 // with another mount point and return the wrong location. In short, make sure
 // SetupMounts() has been called before.
-func ResolveMounts(conf *config.Config, mounts []specs.Mount, root string, mountConfs []specutils.GoferMountConf) ([]specs.Mount, error) {
+func ResolveMounts(conf *config.Config, mounts []specs.Mount, root string, mountConfs []specutils.GoferMountConf) ([]specutils.ResolvedMount, error) {
 	mountIdx := 1 // First index is for rootfs.
-	cleanMounts := make([]specs.Mount, 0, len(mounts))
+	resolved := make([]specutils.ResolvedMount, 0, len(mounts))
 	for _, m := range mounts {
 		if !specutils.HasMountConfig(m) {
-			cleanMounts = append(cleanMounts, m)
+			resolved = append(resolved, specutils.ResolvedMount{Spec: m})
 			continue
 		}
 		mountConf := mountConfs[mountIdx]
 		mountIdx++
 		if !mountConf.ShouldUseLisafs() {
-			cleanMounts = append(cleanMounts, m)
+			resolved = append(resolved, specutils.ResolvedMount{Spec: m})
 			continue
 		}
-		dst, err := ResolveSymlinks(root, m.Destination)
+		dst, fi, err := resolveSymlinks(root, m.Destination)
 		if err != nil {
 			return nil, fmt.Errorf("resolving symlinks to %q: %v", m.Destination, err)
 		}
@@ -611,7 +612,10 @@ func ResolveMounts(conf *config.Config, mounts []specs.Mount, root string, mount
 		cpy := m
 		cpy.Destination = filepath.Join("/", relDst)
 		cpy.Options = opts
-		cleanMounts = append(cleanMounts, cpy)
+		resolved = append(resolved, specutils.ResolvedMount{
+			Spec:   cpy,
+			NonDir: fi != nil && !fi.IsDir(),
+		})
 	}
-	return cleanMounts, nil
+	return resolved, nil
 }

@@ -125,6 +125,11 @@ type GoferMountConf struct {
 	Lower GoferMountConfLowerType `json:"lower"`
 	Upper GoferMountConfUpperType `json:"upper"`
 	Size  string                  `json:"size,omitempty"`
+
+	// NonDir is true if the gofer reported that the mounted target is not a
+	// directory. It is not part of the string form: ApplyResolvedMounts sets
+	// it.
+	NonDir bool `json:"nonDir,omitempty"`
 }
 
 // String returns a human-readable string representing the gofer mount config.

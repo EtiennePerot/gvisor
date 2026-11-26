@@ -290,13 +290,15 @@ func (g *Gofer) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcomm
 	//
 	// Note that all mount points have been mounted in the proper location in
 	// setupRootFS().
-	cleanMounts, err := sandboxsetup.ResolveMounts(conf, spec.Mounts, root, g.mountConfs)
+	resolved, err := sandboxsetup.ResolveMounts(conf, spec.Mounts, root, g.mountConfs)
 	if err != nil {
 		util.Fatalf("Failure to resolve mounts: %v", err)
 	}
-	spec.Mounts = cleanMounts
+	if err := specutils.ApplyResolvedMounts(spec, g.mountConfs, resolved); err != nil {
+		util.Fatalf("Failure to apply resolved mounts: %v", err)
+	}
 	go func() {
-		if err := sandboxsetup.WriteMounts(g.mountsFD, cleanMounts); err != nil {
+		if err := sandboxsetup.WriteMounts(g.mountsFD, resolved); err != nil {
 			panic(fmt.Sprintf("Failed to write mounts: %v", err))
 		}
 	}()

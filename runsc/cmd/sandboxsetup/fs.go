@@ -75,14 +75,22 @@ func CopyFile(dst, src string) error {
 // are symlinks, they are evaluated relative to 'root' to ensure the end
 // result is the same as if the process was running inside the container.
 func ResolveSymlinks(root, rel string) (string, error) {
+	path, _, err := resolveSymlinks(root, rel)
+	return path, err
+}
+
+// resolveSymlinks is like ResolveSymlinks. It also returns the Lstat result of
+// the resolved path, or nil if the path does not exist or is root.
+func resolveSymlinks(root, rel string) (string, os.FileInfo, error) {
 	return resolveSymlinksImpl(root, root, rel, 255)
 }
 
-func resolveSymlinksImpl(root, base, rel string, followCount uint) (string, error) {
+func resolveSymlinksImpl(root, base, rel string, followCount uint) (string, os.FileInfo, error) {
 	if followCount == 0 {
-		return "", fmt.Errorf("too many symlinks to follow, path: %q", filepath.Join(base, rel))
+		return "", nil, fmt.Errorf("too many symlinks to follow, path: %q", filepath.Join(base, rel))
 	}
 
+	var lastFI os.FileInfo
 	rel = filepath.Clean(rel)
 	for _, name := range strings.Split(rel, string(filepath.Separator)) {
 		if name == "" {
@@ -94,35 +102,38 @@ func resolveSymlinksImpl(root, base, rel string, followCount uint) (string, erro
 		if !strings.HasPrefix(path, root) {
 			// One cannot '..' their way out of root.
 			base = root
+			lastFI = nil
 			continue
 		}
 		fi, err := os.Lstat(path)
 		if err != nil {
 			if !os.IsNotExist(err) {
-				return "", err
+				return "", nil, err
 			}
 			// Not found means there is no symlink to check. Just
 			// keep walking dirs.
 			base = path
+			lastFI = nil
 			continue
 		}
 		if fi.Mode()&os.ModeSymlink != 0 {
 			link, err := os.Readlink(path)
 			if err != nil {
-				return "", err
+				return "", nil, err
 			}
 			if filepath.IsAbs(link) {
 				base = root
 			}
-			base, err = resolveSymlinksImpl(root, base, link, followCount-1)
+			base, lastFI, err = resolveSymlinksImpl(root, base, link, followCount-1)
 			if err != nil {
-				return "", err
+				return "", nil, err
 			}
 			continue
 		}
 		base = path
+		lastFI = fi
 	}
-	return base, nil
+	return base, lastFI, nil
 }
 
 // AdjustMountOptions adds filesystem-specific gofer mount options. An option
