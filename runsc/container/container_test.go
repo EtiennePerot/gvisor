@@ -7012,3 +7012,155 @@ func TestReadFile(t *testing.T) {
 		t.Errorf("Got %q (%d bytes), want 'inux' (4 bytes)", string(content3), len(content3))
 	}
 }
+
+// TestBindAtCleanup verifies that when creating a host socket fails after
+// bind(2), the gofer removes the socket and is not killed by its seccomp
+// filters.
+func TestBindAtCleanup(t *testing.T) {
+	app, err := testutil.FindFile("test/cmd/test_app/test_app")
+	if err != nil {
+		t.Fatalf("error finding test_app: %v", err)
+	}
+	hostDir, err := os.MkdirTemp(testutil.TmpDir(), "bind-at")
+	if err != nil {
+		t.Fatalf("os.MkdirTemp() failed: %v", err)
+	}
+	defer os.RemoveAll(hostDir)
+	if err := os.Chmod(hostDir, 0777); err != nil {
+		t.Fatalf("os.Chmod(%q) failed: %v", hostDir, err)
+	}
+
+	spec, conf := sleepSpecConf(t)
+	conf.DebugLog = filepath.Join(t.TempDir(), "runsc.log.%TIMESTAMP%.%COMMAND%.txt")
+	conf.DirectFS = true
+	conf.HostUDS = config.HostUDSCreate
+	if err := conf.Overlay2.Set("none"); err != nil {
+		t.Fatalf("Overlay2.Set(none) failed: %v", err)
+	}
+	spec.Mounts = slices.DeleteFunc(spec.Mounts, func(m specs.Mount) bool {
+		return m.Destination == testutil.TmpDir() || m.Destination == "/tmp"
+	})
+	spec.Mounts = append(spec.Mounts, specs.Mount{
+		Destination: "/tmp",
+		Source:      hostDir,
+		Type:        "bind",
+	})
+	// Map only UID and GID 0 so that fchown(2) in the gofer fails for UID 1
+	// after bind(2) has created the socket on the host.
+	spec.Linux = &specs.Linux{
+		Namespaces: []specs.LinuxNamespace{
+			{Type: specs.UserNamespace},
+			{Type: specs.PIDNamespace},
+			{Type: specs.MountNamespace},
+		},
+		UIDMappings: []specs.LinuxIDMapping{{
+			ContainerID: 0,
+			HostID:      uint32(os.Getuid()),
+			Size:        1,
+		}},
+		GIDMappings: []specs.LinuxIDMapping{{
+			ContainerID: 0,
+			HostID:      uint32(os.Getgid()),
+			Size:        1,
+		}},
+	}
+
+	_, bundleDir, cleanup, err := testutil.SetupContainer(spec, conf)
+	if err != nil {
+		t.Fatalf("error setting up container: %v", err)
+	}
+	defer cleanup()
+
+	c, err := New(conf, Args{
+		ID:        testutil.RandomContainerID(),
+		Spec:      spec,
+		BundleDir: bundleDir,
+	})
+	if err != nil {
+		t.Fatalf("error creating container: %v", err)
+	}
+	defer c.Destroy()
+	if err := c.Start(conf); err != nil {
+		t.Fatalf("error starting container: %v", err)
+	}
+
+	pattern := strings.NewReplacer("%TIMESTAMP%", "*", "%COMMAND%", "gofer").Replace(conf.DebugLog)
+	logs, err := filepath.Glob(pattern)
+	if err != nil {
+		t.Fatalf("filepath.Glob(%q) failed: %v", pattern, err)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("got log files %v for %q, want 1 file", logs, pattern)
+	}
+	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
+		if goferLog, err := os.ReadFile(logs[0]); err == nil {
+			t.Logf("gofer log %q:\n%s", logs[0], goferLog)
+		}
+	})
+	data, err := os.ReadFile(logs[0])
+	if err != nil {
+		t.Fatalf("os.ReadFile(%q) failed: %v", logs[0], err)
+	}
+	if !bytes.Contains(data, []byte("HostFS=none ")) {
+		t.Fatalf("gofer log %q does not show HostFS=none", logs[0])
+	}
+
+	// Run twice on the same path: the second run fails with EADDRINUSE if
+	// the first run left the socket behind, and with EIO if the gofer died.
+	wantErr := fmt.Sprintf("BindAndListen(%q) failed: %v", "/tmp/sock", unix.EINVAL)
+	for i := range 2 {
+		execFile, err := os.Open(app)
+		if err != nil {
+			t.Fatalf("os.Open(%q) failed: %v", app, err)
+		}
+		r, w, err := os.Pipe()
+		if err != nil {
+			execFile.Close()
+			t.Fatalf("os.Pipe() failed: %v", err)
+		}
+		type readResult struct {
+			out []byte
+			err error
+		}
+		readCh := make(chan readResult, 1)
+		go func() {
+			out, err := io.ReadAll(r)
+			readCh <- readResult{out: out, err: err}
+		}()
+		execArgs := &controlapi.ExecArgs{
+			Argv: []string{app, "fd_receiver", "--socket=/tmp/sock"},
+			KUID: 1,
+			KGID: 1,
+			FilePayload: controlapi.NewFilePayload(map[int]*os.File{
+				0: os.Stdin, 1: w, 2: w,
+			}, execFile),
+		}
+		ws, execErr := c.executeSync(conf, execArgs)
+		execFile.Close()
+		w.Close()
+		res := <-readCh
+		r.Close()
+		out, readErr := res.out, res.err
+		if execErr != nil {
+			t.Fatalf("attempt %d: executeSync failed: %v", i, execErr)
+		}
+		if readErr != nil {
+			t.Fatalf("attempt %d: io.ReadAll() failed: %v", i, readErr)
+		}
+		if !ws.Exited() {
+			t.Fatalf("attempt %d: fd_receiver did not exit normally (waitStatus=%#x): %s", i, ws, out)
+		}
+		if ws.ExitStatus() == 0 {
+			t.Fatalf("attempt %d: fd_receiver succeeded unexpectedly: %s", i, out)
+		}
+		if !strings.Contains(string(out), wantErr) {
+			t.Fatalf("attempt %d: got output %q, want %q", i, out, wantErr)
+		}
+		if _, err := os.Lstat(filepath.Join(hostDir, "sock")); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("attempt %d: os.Lstat(sock) = %v, want not exist", i, err)
+		}
+	}
+}

@@ -232,7 +232,8 @@ var udsOpenSyscalls = seccomp.MakeSyscallRules(map[uintptr]seccomp.SyscallRule{
 var udsCreateSyscalls = seccomp.MakeSyscallRules(map[uintptr]seccomp.SyscallRule{
 	unix.SYS_ACCEPT4: seccomp.MatchAll{},
 	unix.SYS_BIND:    seccomp.MatchAll{},
-	// The gofer sets the mode and the owner of a socket that it binds.
+	// The gofer sets the mode and the owner of a socket that it binds, and
+	// removes the socket if a later step fails.
 	unix.SYS_FCHMOD: seccomp.PerArg{
 		seccomp.NonNegativeFD{},
 		seccomp.AnyValue{},
@@ -245,6 +246,11 @@ var udsCreateSyscalls = seccomp.MakeSyscallRules(map[uintptr]seccomp.SyscallRule
 		seccomp.EqualTo(unix.AT_EMPTY_PATH | unix.AT_SYMLINK_NOFOLLOW),
 	},
 	unix.SYS_LISTEN: seccomp.MatchAll{},
+	unix.SYS_UNLINKAT: seccomp.PerArg{
+		seccomp.NonNegativeFD{},
+		seccomp.AnyValue{},
+		seccomp.EqualTo(0),
+	},
 })
 
 func lisafsFilters(procSelfFD uint32) seccomp.SyscallRules {

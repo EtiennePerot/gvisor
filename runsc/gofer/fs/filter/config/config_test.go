@@ -290,6 +290,14 @@ func TestRPCSyscalls(t *testing.T) {
 				{"openat2 oversized open_how", unix.SYS_OPENAT2, [6]uint64{uint64(atFDCWD64), ptr, ptr, unix.SizeofOpenHow + 8}, false},
 				{"openat2 high size bits", unix.SYS_OPENAT2, [6]uint64{uint64(atFDCWD64), ptr, ptr, (1 << 32) | unix.SizeofOpenHow}, false},
 
+				{"unlinkat file", unix.SYS_UNLINKAT, [6]uint64{fd, ptr, 0}, fileRPCs || bindRPC},
+				{"unlinkat AT_FDCWD 32-bit", unix.SYS_UNLINKAT, [6]uint64{uint64(uint32(atFDCWD32)), ptr, 0}, fileRPCs},
+				{"unlinkat AT_FDCWD 64-bit", unix.SYS_UNLINKAT, [6]uint64{uint64(atFDCWD64), ptr, 0}, fileRPCs},
+				{"unlinkat negative FD", unix.SYS_UNLINKAT, [6]uint64{negOne, ptr, 0}, fileRPCs},
+				{"unlinkat high FD bits", unix.SYS_UNLINKAT, [6]uint64{(1 << 32) | fd, ptr, 0}, fileRPCs},
+				{"unlinkat directory", unix.SYS_UNLINKAT, [6]uint64{fd, ptr, unix.AT_REMOVEDIR}, fileRPCs},
+				{"unlinkat unknown flag", unix.SYS_UNLINKAT, [6]uint64{fd, ptr, 1}, fileRPCs},
+				{"unlinkat high flag bits", unix.SYS_UNLINKAT, [6]uint64{fd, ptr, 1 << 32}, fileRPCs},
 				{"fchmodat2", unix.SYS_FCHMODAT2, [6]uint64{fd, ptr, 0o644, 0}, false},
 				{"fchown", unix.SYS_FCHOWN, [6]uint64{fd, 1, 1}, false},
 			} {

@@ -1150,7 +1150,7 @@ func (fd *controlFDLisa) BindAt(name string, sockType uint32, mode linux.FileMod
 		return nil, lisafs.Statx{}, nil, -1, err
 	}
 	cu.Add(func() {
-		_ = unix.Unlink(socketPath)
+		_ = unix.Unlinkat(fd.hostFD, name, 0)
 	})
 
 	sockFileFD, err := tryOpen(func(flags int) (int, error) {
