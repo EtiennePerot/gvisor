@@ -15,8 +15,13 @@
 package systrap
 
 import (
+	"errors"
+	"fmt"
 	"math/rand/v2"
+	"runtime"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -25,6 +30,7 @@ import (
 	"gvisor.dev/gvisor/pkg/hostarch"
 	"gvisor.dev/gvisor/pkg/seccomp"
 	"gvisor.dev/gvisor/pkg/seccomp/precompiledseccomp"
+	"gvisor.dev/gvisor/pkg/sentry/arch"
 	"gvisor.dev/gvisor/pkg/sentry/platform/systrap/stubfilter"
 )
 
@@ -226,6 +232,84 @@ func TestStubFilterBadArch(t *testing.T) {
 	for _, prog := range []string{progStub, progSysmsg} {
 		if got := f.run(t, prog, testBadArch, unix.SYS_RT_SIGRETURN, testSysmsgIP, [6]uint64{}); got != trap {
 			t.Errorf("%s: got %#x, want %#x", prog, got, trap)
+		}
+	}
+}
+
+// newTestStub creates a stub process for the test.
+// Current OS thread stays locked until end of test.
+func newTestStub(t *testing.T) *thread {
+	t.Helper()
+	newSystrapTest(t)
+	runtime.LockOSThread()
+	t.Cleanup(runtime.UnlockOSThread)
+	th, err := createStub()
+	if err != nil {
+		t.Fatalf("cannot create stub: %v", err)
+	}
+	t.Cleanup(func() {
+		// The stub may be in any state, including ptrace exit stop
+		// (that `thread.wait` may already have consumed) or reaped,
+		// so do not use `thread.destroy`. Resume before each wait,
+		// as stopped stubs may have no new event.
+		unix.Kill(int(th.tgid), unix.SIGKILL)
+		for {
+			unix.PtraceCont(int(th.tid), 0)
+			var status unix.WaitStatus
+			_, err := unix.Wait4(int(th.tid), &status, unix.WALL, nil)
+			if err == unix.EINTR {
+				continue
+			}
+			if err != nil || status.Exited() || status.Signaled() {
+				return
+			}
+		}
+	})
+	return th
+}
+
+// TestInjectedSyscallRejected checks that syscalls the Sentry injects
+// into stub threads fail when blocked by seccomp.
+func TestInjectedSyscallRejected(t *testing.T) {
+	th := newTestStub(t)
+	_, err := th.syscallIgnoreInterrupt(&th.initRegs, unix.SYS_MPROTECT,
+		arch.SyscallArgument{Value: uintptr(stubStart)},
+		arch.SyscallArgument{Value: hostarch.PageSize},
+		arch.SyscallArgument{Value: unix.PROT_READ | unix.PROT_WRITE})
+	if err == nil {
+		t.Fatal("injected mprotect succeeded, want error")
+	}
+	if !errors.Is(err, errStubSeccompRejected) {
+		t.Errorf("injected mprotect: got error %v, want %v", err, errStubSeccompRejected)
+	}
+	if want := fmt.Sprintf("cannot inject system call %d", unix.SYS_MPROTECT); !strings.Contains(err.Error(), want) {
+		t.Errorf("injected mprotect: got error %q, want it to contain %q", err, want)
+	}
+}
+
+// TestInjectedSyscallOtherSIGSYS checks that `SIGSYS` from another sender
+// (tgkill) is correctly dropped.
+func TestInjectedSyscallOtherSIGSYS(t *testing.T) {
+	th := newTestStub(t)
+	if err := unix.Tgkill(int(th.tgid), int(th.tid), unix.SIGSYS); err != nil {
+		t.Fatalf("cannot send SIGSYS: %v", err)
+	}
+	pid, err := th.syscallIgnoreInterrupt(&th.initRegs, unix.SYS_GETPID)
+	if err != nil {
+		t.Fatalf("cannot inject getpid after a SIGSYS from tgkill: %v", err)
+	}
+	if want := uintptr(th.tgid); pid != want {
+		t.Errorf("injected getpid: got %d, want %d", pid, want)
+	}
+	// The SIGSYS must have been delivered (and dropped) during the system call.
+	fields := procStatus(t, fmt.Sprint(th.tid))
+	for _, k := range []string{"SigPnd", "ShdPnd"} {
+		mask, err := strconv.ParseUint(fields[k], 16, 64)
+		if err != nil {
+			t.Fatalf("cannot parse %s: %v", k, err)
+		}
+		if mask&(1<<(unix.SIGSYS-1)) != 0 {
+			t.Errorf("SIGSYS is still pending in %s", k)
 		}
 	}
 }

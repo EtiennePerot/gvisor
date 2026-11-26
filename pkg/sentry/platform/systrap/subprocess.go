@@ -189,6 +189,10 @@ type subprocess struct {
 	dead atomicbitops.Bool
 }
 
+// errStubSeccompRejected is returned when the stub seccomp filter rejects a
+// syscall that the Sentry injects with ptrace.
+var errStubSeccompRejected = errors.New("seccomp says no")
+
 var seccompNotifyIsSupported = false
 
 func initSeccompNotify() {
@@ -797,14 +801,21 @@ func (t *thread) syscall(regs *arch.Registers) (uintptr, error) {
 			return 0, err
 		}
 		if sig == unix.SIGTRAP {
-			// Reached syscall-enter-stop.
+			// Reached the trap instruction after the system call.
 			break
-		} else {
-			// Some other signal caused a thread stop; ignore.
-			if sig != unix.SIGSTOP && sig != unix.SIGCHLD {
-				log.Warningf("The thread %d:%d has been interrupted by %d", t.tgid, t.tid, sig)
+		}
+		if sig == unix.SIGSYS {
+			var si linux.SignalInfo
+			if err := t.getSignalInfo(&si); err != nil {
+				return 0, fmt.Errorf("cannot get signal info: %w", err)
 			}
-			continue
+			if si.Code == linux.SYS_SECCOMP {
+				return 0, errStubSeccompRejected
+			}
+		}
+		// Some other signal caused a thread stop. Ignore.
+		if sig != unix.SIGSTOP && sig != unix.SIGCHLD {
+			log.Warningf("The thread %d:%d has been interrupted by %d", t.tgid, t.tid, sig)
 		}
 	}
 
@@ -831,6 +842,8 @@ func (t *thread) syscallIgnoreInterrupt(
 			continue
 		case ERESTARTNOHAND:
 			continue
+		case errStubSeccompRejected:
+			return rval, fmt.Errorf("cannot inject system call %d: %w", sysno, err)
 		default:
 			return rval, err
 		}
