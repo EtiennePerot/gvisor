@@ -115,6 +115,31 @@ def go_has_source(target):
     """Returns whether the target exposes its canonical Go source view."""
     return GoInfo in target
 
+def _go_library_srcs_impl(ctx):
+    by_name = {}
+    ambiguous = {}
+    for f in go_source_files(ctx.attr.library):
+        if f.basename in by_name and by_name[f.basename] != f:
+            ambiguous[f.basename] = True
+        by_name[f.basename] = f
+    files = []
+    for name in ctx.attr.srcs:
+        if name not in by_name:
+            fail("%s has no source file %s" % (ctx.attr.library.label, name))
+        if name in ambiguous:
+            fail("%s has multiple source files named %s" % (ctx.attr.library.label, name))
+        files.append(by_name[name])
+    return [DefaultInfo(files = depset(files))]
+
+go_library_srcs = rule(
+    implementation = _go_library_srcs_impl,
+    doc = "Gives the source files of a Go library that have the names in `srcs`, in the same order.",
+    attrs = {
+        "library": attr.label(mandatory = True, providers = [GoInfo], doc = "The Go library."),
+        "srcs": attr.string_list(mandatory = True, doc = "The file names of the source files."),
+    },
+)
+
 def go_binary_archive(target):
     """Returns compiled Go archive metadata for a binary target."""
     return target[GoArchive].data
