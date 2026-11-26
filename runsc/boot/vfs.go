@@ -66,6 +66,7 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/usage"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
 	"gvisor.dev/gvisor/pkg/timing"
+	"gvisor.dev/gvisor/runsc/boot/filter"
 	"gvisor.dev/gvisor/runsc/boot/sentryapi"
 	"gvisor.dev/gvisor/runsc/config"
 	"gvisor.dev/gvisor/runsc/specutils"
@@ -435,7 +436,13 @@ func parseMountOption(opt string, allowedKeys ...string) (bool, error) {
 	if len(kv) > 2 {
 		return false, fmt.Errorf("invalid option %q", opt)
 	}
-	return slices.Contains(allowedKeys, kv[0]), nil
+	if !slices.Contains(allowedKeys, kv[0]) {
+		return false, nil
+	}
+	if strings.ContainsRune(opt, ',') {
+		return false, fmt.Errorf("invalid option %q: contains ','", opt)
+	}
+	return true, nil
 }
 
 type fdDispenser struct {
@@ -502,6 +509,13 @@ type containerMounter struct {
 	// rootfsUpperTarFD is the file descriptor to the tar file containing the rootfs
 	// upper layer changes.
 	rootfsUpperTarFD *fd.FD
+
+	// conf is the container's configuration.
+	conf *config.Config
+
+	// hostFS is the host filesystem access that the sandbox seccomp filters
+	// allow.
+	hostFS filter.HostFSAccess
 }
 
 // +checklocks:l.mu
@@ -518,6 +532,8 @@ func (l *Loader) newContainerMounter(info *containerInfo) *containerMounter {
 		containerID:       info.cid,
 		containerName:     info.containerName,
 		rootfsUpperTarFD:  info.rootfsUpperTarFD,
+		conf:              info.conf,
+		hostFS:            l.hostFS,
 	}
 }
 
@@ -548,8 +564,13 @@ func (c *containerMounter) mountAll(rootCtx context.Context, rootCreds *auth.Cre
 	if err != nil {
 		return nil, fmt.Errorf("creating mount namespace: %w", err)
 	}
-	rootProcArgs.StartupTimeline.Reached("rootfs mounted")
 	rootProcArgs.MountNamespace = mns
+	cu := cleanup.Make(func() {
+		rootProcArgs.MountNamespace = nil
+		mns.DecRef(rootCtx)
+	})
+	defer cu.Clean()
+	rootProcArgs.StartupTimeline.Reached("rootfs mounted")
 
 	root := mns.Root(rootCtx)
 	defer root.DecRef(rootCtx)
@@ -571,13 +592,13 @@ func (c *containerMounter) mountAll(rootCtx context.Context, rootCreds *auth.Cre
 		return nil, fmt.Errorf("mounting submounts: %w", err)
 	}
 	rootProcArgs.StartupTimeline.Reached("submounts mounted")
+	cu.Release()
 
 	return mns, nil
 }
 
 // createMountNamespace creates the container's root mount and namespace.
 func (c *containerMounter) createMountNamespace(ctx context.Context, spec *specs.Spec, conf *config.Config, creds *auth.Credentials) (*vfs.MountNamespace, error) {
-	ioFD := c.goferFDs.remove()
 	rootfsConf := c.goferMountConfs[0]
 
 	rootfsHint, err := sentryapi.NewRootfsHint(spec)
@@ -585,6 +606,18 @@ func (c *containerMounter) createMountNamespace(ctx context.Context, spec *specs
 		return nil, fmt.Errorf("parsing rootfs hint: %w", err)
 	}
 	suppressDirectFS := rootfsHint != nil && rootfsHint.SuppressDirectFS
+
+	if rootfsConf.ShouldUseLisafs() && conf.DirectFS && !suppressDirectFS && !c.l.root.conf.DisableSeccomp {
+		need := filter.HostFSReadWrite
+		if rootfsConf.ShouldUseOverlayfs() {
+			need = filter.HostFSReadOnly
+		}
+		if c.hostFS < need {
+			return nil, fmt.Errorf("root mount needs %v access to the host filesystem, but the seccomp filters of the sandbox only allow %v", need, c.hostFS)
+		}
+	}
+
+	ioFD := c.goferFDs.remove()
 
 	var (
 		fsName string
@@ -843,7 +876,7 @@ func (c *containerMounter) configureOverlay(ctx context.Context, conf *config.Co
 }
 
 func (c *containerMounter) mountSubmounts(ctx context.Context, spec *specs.Spec, conf *config.Config, mns *vfs.MountNamespace, creds *auth.Credentials, timeline *timing.Timeline) error {
-	mounts, err := c.prepareMounts()
+	mounts, err := c.prepareMounts(conf)
 	if err != nil {
 		return err
 	}
@@ -925,9 +958,12 @@ type mountInfo struct {
 	filestoreFD    *fd.FD
 }
 
-func (c *containerMounter) prepareMounts() ([]mountInfo, error) {
+func (c *containerMounter) prepareMounts(conf *config.Config) ([]mountInfo, error) {
 	// If device gofer exists, connect to it.
 	if c.devGoferFD != nil {
+		if conf != nil && conf.DirectFS && !c.l.root.conf.DisableSeccomp && c.hostFS < filter.HostFSReadWrite {
+			return nil, fmt.Errorf("device gofer needs %v access to the host filesystem, but the seccomp filters of the sandbox only allow %v", filter.HostFSReadWrite, c.hostFS)
+		}
 		if err := c.l.k.AddDevGofer(c.containerName, c.devGoferFD.Release()); err != nil {
 			return nil, err
 		}
@@ -942,9 +978,18 @@ func (c *containerMounter) prepareMounts() ([]mountInfo, error) {
 			mount: &c.mounts[i],
 			hint:  c.l.mountHints.FindMount(c.mounts[i].Source),
 		}
-		specutils.MaybeConvertToBindMount(info.mount)
+		isErofs := specutils.IsErofsMount(*info.mount)
+		if !isErofs {
+			specutils.MaybeConvertToBindMount(info.mount)
+		}
 		if specutils.HasMountConfig(*info.mount) {
+			if goferMntIdx >= len(c.goferMountConfs) {
+				return nil, fmt.Errorf("missing gofer mount config for mount %q (dest: %q)", info.mount.Source, info.mount.Destination)
+			}
 			info.goferMountConf = c.goferMountConfs[goferMntIdx]
+			if !info.goferMountConf.ShouldUseTmpfs() && info.goferMountConf.ShouldUseErofs() != isErofs {
+				return nil, fmt.Errorf("mount %q (dest: %q, type: %q) does not match gofer mount config %v", info.mount.Source, info.mount.Destination, info.mount.Type, info.goferMountConf)
+			}
 			if info.goferMountConf.ShouldUseLisafs() || info.goferMountConf.ShouldUseErofs() {
 				info.goferFD = c.goferFDs.removeAsFD()
 			}
@@ -970,6 +1015,21 @@ func (c *containerMounter) prepareMounts() ([]mountInfo, error) {
 	return mounts, nil
 }
 
+func (c *containerMounter) checkDirectFSMountAllowed(conf *config.Config, submount *mountInfo, overlaid bool) error {
+	directFS := conf.DirectFS && (submount.hint == nil || !submount.hint.SuppressDirectFS)
+	if !directFS || c.l.root.conf.DisableSeccomp || submount.mount.Type != sentryapi.Bind {
+		return nil
+	}
+	need := filter.HostFSReadWrite
+	if overlaid {
+		need = filter.HostFSReadOnly
+	}
+	if c.hostFS < need {
+		return fmt.Errorf("mount %q (dest: %q) needs %v access to the host filesystem, but the seccomp filters of the sandbox only allow %v", submount.mount.Source, submount.mount.Destination, need, c.hostFS)
+	}
+	return nil
+}
+
 // getPathMode returns file mode for the specified path.
 func (c *containerMounter) getPathMode(ctx context.Context, creds *auth.Credentials, path *vfs.PathOperation) (linux.FileMode, error) {
 	stat, err := c.l.k.VFS().StatAt(ctx, creds, path, &vfs.StatOptions{
@@ -985,6 +1045,9 @@ func (c *containerMounter) getPathMode(ctx context.Context, creds *auth.Credenti
 }
 
 func (c *containerMounter) mountSubmount(ctx context.Context, spec *specs.Spec, conf *config.Config, mns *vfs.MountNamespace, creds *auth.Credentials, submount *mountInfo) (*vfs.Mount, error) {
+	if err := c.checkDirectFSMountAllowed(conf, submount, submount.goferMountConf.ShouldUseOverlayfs()); err != nil {
+		return nil, err
+	}
 	fsName, opts, err := getMountNameAndOptions(spec, conf, submount, c.l.productName, c.containerName, c.containerID, c.l.fsRestore, c.l.rdmaSysfs)
 	if err != nil {
 		return nil, fmt.Errorf("mountOptions failed: %w", err)
@@ -1646,6 +1709,10 @@ func (c *containerMounter) mountCgroupSubmounts(ctx context.Context, spec *specs
 // mountSharedMaster mounts the master of a volume that is shared among
 // containers in a pod.
 func (c *containerMounter) mountSharedMaster(ctx context.Context, spec *specs.Spec, conf *config.Config, mntInfo *mountInfo, creds *auth.Credentials) (*vfs.Mount, error) {
+	// mountSharedMaster never mounts an overlay on top of the master.
+	if err := c.checkDirectFSMountAllowed(conf, mntInfo, false /* overlaid */); err != nil {
+		return nil, err
+	}
 	// Mount the master using the options from the hint (mount annotations).
 	origOpts := mntInfo.mount.Options
 	mntInfo.mount.Options = mntInfo.hint.Mount.Options
@@ -1788,7 +1855,7 @@ func (c *containerMounter) configureRestore(restoreMnts *restoreMounts) error {
 		}
 	}
 	// prepareMounts() consumes the remaining FDs for submounts.
-	mounts, err := c.prepareMounts()
+	mounts, err := c.prepareMounts(c.conf)
 	if err != nil {
 		return err
 	}

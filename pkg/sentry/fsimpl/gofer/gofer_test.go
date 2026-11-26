@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/unix"
@@ -795,5 +796,19 @@ func TestValidateRestoredFileType(t *testing.T) {
 				t.Errorf("validateRestoredFileType(%#o, %d, %d) = %v, want vfs.ErrCorruption", test.restoredMode, test.restoredRdev[0], test.restoredRdev[1], err)
 			}
 		})
+	}
+}
+
+func TestCompleteRestoreDirectFSNoProcSelfFD(t *testing.T) {
+	prev := procSelfFD
+	defer func() { procSelfFD = prev }()
+	procSelfFD = -1
+
+	ctx := contexttest.Context(t)
+	var fs filesystem
+	fs.opts.directfs.enabled = true
+	err := fs.CompleteRestore(ctx, vfs.CompleteRestoreOptions{})
+	if err == nil || !strings.Contains(err.Error(), "SetProcSelfFD") {
+		t.Fatalf("CompleteRestore() = %v, want SetProcSelfFD error", err)
 	}
 }

@@ -465,7 +465,8 @@ func (r *restorer) restore(l *Loader) error {
 
 	// Seccomp filters have to be applied before vfs restore and before parsing
 	// the state file.
-	if err := l.installSeccompFilters(); err != nil {
+	hostFS := l.restoreHostFSAccess()
+	if err := l.installSeccompFilters(hostFS); err != nil {
 		return err
 	}
 
@@ -474,6 +475,7 @@ func (r *restorer) restore(l *Loader) error {
 		l.mu.Unlock()
 	})
 	defer cu.Clean()
+	l.hostFS = hostFS
 
 	restoreMnts := restoreMounts{
 		fdmap:             make(map[checkpoint.ResourceID]int),

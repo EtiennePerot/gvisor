@@ -235,3 +235,37 @@ func TestFindByResourceID(t *testing.T) {
 		t.Errorf("findByResourceID ambiguous match got (%v, %v, %v), want zero, false, error", got, ok, err)
 	}
 }
+
+func TestParseMountOption(t *testing.T) {
+	allowed := []string{"dcache", "overlayfs_stale_read"}
+	for _, tc := range []struct {
+		name    string
+		opt     string
+		wantOK  bool
+		wantErr bool
+	}{
+		{name: "allowed bare option", opt: "overlayfs_stale_read", wantOK: true},
+		{name: "allowed key value", opt: "dcache=100", wantOK: true},
+		{name: "allowed option with comma rejected", opt: "dcache=100,directfs", wantErr: true},
+		{name: "allowed bare option with comma rejected", opt: "overlayfs_stale_read=1,directfs", wantErr: true},
+		{name: "too many equals rejected", opt: "dcache=1=2", wantErr: true},
+		{name: "unrecognized option ignored", opt: "rw", wantOK: false},
+		{name: "unrecognized option with comma ignored", opt: "mpol=bind:0,1", wantOK: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ok, err := parseMountOption(tc.opt, allowed...)
+			if tc.wantErr {
+				if err == nil {
+					t.Errorf("parseMountOption(%q) = (%t, nil), want error", tc.opt, ok)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseMountOption(%q) unexpected error: %v", tc.opt, err)
+			}
+			if ok != tc.wantOK {
+				t.Errorf("parseMountOption(%q) = %t, want %t", tc.opt, ok, tc.wantOK)
+			}
+		})
+	}
+}

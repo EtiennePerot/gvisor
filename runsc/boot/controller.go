@@ -94,7 +94,10 @@ func (c *controller) registerHandlers() {
 	l := c.manager.l
 	c.srv.Register(c.manager)
 	c.srv.Register(&control.Cgroups{Kernel: l.k})
-	c.srv.Register(&control.Fs{Kernel: l.k})
+	c.srv.Register(&control.Fs{
+		Kernel:             l.k,
+		CheckDirectFSMount: l.checkDirectFSMount,
+	})
 	c.srv.Register(&control.Lifecycle{Kernel: l.k})
 	c.srv.Register(&control.Logging{})
 	c.srv.Register(&control.Proc{Kernel: l.k})

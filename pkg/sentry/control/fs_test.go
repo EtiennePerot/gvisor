@@ -15,15 +15,20 @@
 package control
 
 import (
+	"errors"
 	"io"
+	"os"
+	"strings"
 	"testing"
 
 	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/context"
 	"gvisor.dev/gvisor/pkg/errors/linuxerr"
 	"gvisor.dev/gvisor/pkg/sentry/contexttest"
+	"gvisor.dev/gvisor/pkg/sentry/fsimpl/testutil"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
+	"gvisor.dev/gvisor/pkg/urpc"
 	"gvisor.dev/gvisor/pkg/usermem"
 )
 
@@ -165,5 +170,137 @@ func TestFdReader_NonSeekable(t *testing.T) {
 	_, err = reader6.Read(buf6)
 	if !linuxerr.Equals(linuxerr.ESPIPE, err) {
 		t.Fatalf("got %v, want ESPIPE", err)
+	}
+}
+
+func TestIsDirectFSMount(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		fsType string
+		data   string
+		want   bool
+	}{
+		{name: "gofer directfs", fsType: "gofer", data: "directfs", want: true},
+		{name: "9p directfs with options", fsType: "9p", data: "cache=remote,directfs,dcache=100", want: true},
+		{name: "9p subtype directfs", fsType: "9p.foo", data: "directfs", want: true},
+		{name: "9p empty subtype directfs", fsType: "9p.", data: "directfs", want: true},
+		{name: "gofer subtype directfs", fsType: "gofer.foo", data: "directfs", want: true},
+		{name: "directfs with zero value", fsType: "9p", data: "directfs=0", want: true},
+		{name: "directfs with false value", fsType: "9p", data: "directfs=false", want: true},
+		{name: "gofer without directfs", fsType: "gofer", data: "cache=remote", want: false},
+		{name: "9p without directfs", fsType: "9p", data: "cache=remote", want: false},
+		{name: "empty data", fsType: "9p", data: "", want: false},
+		{name: "gofer option substring", fsType: "gofer", data: "nodirectfs,foo=directfs", want: false},
+		{name: "tmpfs", fsType: "tmpfs", data: "directfs", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isDirectFSMount(tc.fsType, tc.data); got != tc.want {
+				t.Errorf("isDirectFSMount(%q, %q) = %t, want %t", tc.fsType, tc.data, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFsMountCheckDirectFS(t *testing.T) {
+	wantErr := errors.New("directfs denied")
+	f := &Fs{
+		CheckDirectFSMount: func() error { return wantErr },
+	}
+	for _, fsType := range []string{"gofer", "9p", "9p.foo", "9p."} {
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatalf("os.Pipe() failed: %v", err)
+		}
+		defer w.Close()
+		err = f.Mount(&MountOpts{
+			Target:      "/mnt",
+			FSType:      fsType,
+			Data:        "cache=remote,directfs",
+			FilePayload: urpc.FilePayload{Files: []*os.File{r}},
+		}, nil)
+		if !errors.Is(err, wantErr) {
+			t.Errorf("Mount(FSType=%q) = %v, want %v", fsType, err, wantErr)
+		}
+		if _, statErr := r.Stat(); !errors.Is(statErr, os.ErrClosed) {
+			t.Errorf("Mount(FSType=%q) did not close FilePayload file: Stat err = %v", fsType, statErr)
+		}
+	}
+
+	nilCheck := &Fs{}
+	if err := nilCheck.Mount(&MountOpts{
+		Target: "/mnt",
+		FSType: "9p",
+		Data:   "directfs",
+	}, nil); err == nil || !strings.Contains(err.Error(), "not permitted") {
+		t.Errorf("Mount with nil CheckDirectFSMount = %v, want error containing %q", err, "not permitted")
+	}
+
+	k, err := testutil.Boot()
+	if err != nil {
+		t.Fatalf("testutil.Boot() failed: %v", err)
+	}
+	defer k.Timekeeper().Destroy()
+	k.GlobalInit().Release(k.SupervisorContext())
+	k.TestOnlySetGlobalInit(nil)
+
+	for _, tc := range []struct {
+		name       string
+		fsType     string
+		data       string
+		checkFn    func() error
+		wantCalled bool
+	}{
+		{
+			name:   "gofer without directfs bypasses check",
+			fsType: "gofer",
+			data:   "cache=remote",
+			checkFn: func() error {
+				return wantErr
+			},
+		},
+		{
+			name:   "tmpfs with directfs bypasses check",
+			fsType: "tmpfs",
+			data:   "directfs",
+			checkFn: func() error {
+				return wantErr
+			},
+		},
+		{
+			name:   "gofer without directfs allowed with nil check",
+			fsType: "gofer",
+			data:   "cache=remote",
+		},
+		{
+			name:       "directfs allowed when check returns nil",
+			fsType:     "9p",
+			data:       "directfs",
+			checkFn:    func() error { return nil },
+			wantCalled: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			called := false
+			var check func() error
+			if tc.checkFn != nil {
+				check = func() error {
+					called = true
+					return tc.checkFn()
+				}
+			}
+			fs := &Fs{Kernel: k, CheckDirectFSMount: check}
+			err := fs.Mount(&MountOpts{
+				ContainerID: "nonexistent",
+				Target:      "/mnt",
+				FSType:      tc.fsType,
+				Data:        tc.data,
+			}, nil)
+			if called != tc.wantCalled {
+				t.Errorf("CheckDirectFSMount called = %t, want %t", called, tc.wantCalled)
+			}
+			if errors.Is(err, wantErr) || err == nil || !strings.Contains(err.Error(), "failed to find process associated with container") {
+				t.Errorf("Mount() = %v, want container-not-found error past guard", err)
+			}
+		})
 	}
 }

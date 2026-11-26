@@ -38,6 +38,11 @@ import (
 // Fs includes fs-related functions.
 type Fs struct {
 	Kernel *kernel.Kernel
+
+	// CheckDirectFSMount, if non-nil, is called before mounting a gofer
+	// filesystem with the "directfs" option. If nil, directfs mounts are
+	// rejected.
+	CheckDirectFSMount func() error
 }
 
 // Returns a referenced mount namespace for the given container ID,
@@ -223,6 +228,15 @@ type MountOpts struct {
 	urpc.FilePayload
 }
 
+func isDirectFSMount(fsType, data string) bool {
+	base, _, _ := strings.Cut(fsType, ".")
+	if base != "9p" && base != "gofer" {
+		return false
+	}
+	_, ok := vfs.GenericParseMountOptions(data)["directfs"]
+	return ok
+}
+
 // Mount is a RPC stub which mounts a filesystem into a container's mount namespace.
 func (f *Fs) Mount(o *MountOpts, _ *struct{}) error {
 	target := path.Clean(o.Target)
@@ -242,6 +256,19 @@ func (f *Fs) Mount(o *MountOpts, _ *struct{}) error {
 		}
 	}()
 
+	fsType := o.FSType
+	if fsType == "gofer" {
+		fsType = "9p"
+	}
+	if isDirectFSMount(fsType, o.Data) {
+		if f.CheckDirectFSMount == nil {
+			return fmt.Errorf("directfs mounts are not permitted")
+		}
+		if err := f.CheckDirectFSMount(); err != nil {
+			return err
+		}
+	}
+
 	var cu cleanup.Cleanup
 	defer cu.Clean()
 
@@ -255,11 +282,6 @@ func (f *Fs) Mount(o *MountOpts, _ *struct{}) error {
 	creds := auth.NewRootCredentials(f.Kernel.RootUserNamespace())
 	root := mntns.Root(ctx)
 	defer root.DecRef(ctx)
-
-	fsType := o.FSType
-	if fsType == "gofer" {
-		fsType = "9p"
-	}
 
 	data := o.Data
 	goferFD := -1

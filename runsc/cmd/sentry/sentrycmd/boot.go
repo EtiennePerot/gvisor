@@ -774,7 +774,7 @@ func (b *Boot) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcomma
 	// Fatalf exits the process and doesn't run defers.
 	// 'l' must be destroyed explicitly after this point!
 
-	l.PreSeccompCallback = func() {
+	l.PreSeccompCallback = func(procSelfFD int) {
 		if b.procMountSyncFD != -1 {
 			// Call validateOpenFDs() before umounting /proc.
 			validateOpenFDs(bootArgs.PassFDs, procSelfFD)
