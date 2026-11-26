@@ -14,14 +14,6 @@
 
 package systrap
 
-import (
-	"gvisor.dev/gvisor/pkg/sentry/arch"
-)
-
-func stackPointer(r *arch.Registers) uintptr {
-	return uintptr(r.Rsp)
-}
-
 // initStubArchGlobals initializes arch-specific stub globals. On amd64, the
 // stub layout is fixed at build time.
 func initStubArchGlobals(stubSysmsg []byte) {}

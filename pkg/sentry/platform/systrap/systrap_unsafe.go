@@ -19,7 +19,6 @@ import (
 
 	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/abi/linux"
-	"gvisor.dev/gvisor/pkg/hostarch"
 	"gvisor.dev/gvisor/pkg/hostsyscall"
 	"gvisor.dev/gvisor/pkg/sentry/arch"
 )
@@ -84,10 +83,6 @@ func (t *thread) getSignalInfo(si *linux.SignalInfo) error {
 //
 // Precondition: the OS thread must be locked and own t.
 func (t *thread) clone() (*thread, error) {
-	r, ok := hostarch.Addr(stackPointer(&t.initRegs)).RoundUp()
-	if !ok {
-		return nil, unix.EINVAL
-	}
 	// Create a sysmsg thread.
 	//
 	// CLONE_THREAD isn't set, because a stub process has SIGSTOP
@@ -103,16 +98,7 @@ func (t *thread) clone() (*thread, error) {
 	rval, err := t.syscallIgnoreInterrupt(
 		&t.initRegs,
 		unix.SYS_CLONE,
-		arch.SyscallArgument{Value: flags},
-		// The stack pointer is just made up, but we have it be
-		// something sensible so the kernel doesn't think we're
-		// up to no good. Which we are.
-		arch.SyscallArgument{Value: uintptr(r)},
-		arch.SyscallArgument{},
-		arch.SyscallArgument{},
-		// We use these registers initially, but really they
-		// could be anything. We're going to stop immediately.
-		arch.SyscallArgument{Value: uintptr(unsafe.Pointer(&t.initRegs))})
+		arch.SyscallArgument{Value: flags})
 	if err != nil {
 		return nil, err
 	}

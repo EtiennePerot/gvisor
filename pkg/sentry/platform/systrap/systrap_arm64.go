@@ -52,10 +52,6 @@ func cputicksFreq() uint64 {
 	return typicalCNTFRQ
 }
 
-func stackPointer(r *arch.Registers) uintptr {
-	return uintptr(r.Sp)
-}
-
 // initStubArchGlobals initializes arch-specific stub globals: the per-thread
 // memory layout, which depends on the host page size.
 func initStubArchGlobals(stubSysmsg []byte) {

@@ -49,8 +49,11 @@ func createSyscallRegs(initRegs *arch.Registers, sysno uintptr, args ...arch.Sys
 
 	// Set our syscall number.
 	// r8 for the syscall number.
-	// r0-r6 is used to store the parameters.
+	// r0-r5 store the system call arguments.
 	regs.Regs[8] = uint64(sysno)
+	// Zero out the unused arguments rather than inheriting
+	// from initRegs.
+	clear(regs.Regs[:6])
 	if len(args) >= 1 {
 		regs.Regs[0] = args[0].Uint64()
 	}
