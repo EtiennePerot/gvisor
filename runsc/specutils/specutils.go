@@ -1033,12 +1033,26 @@ type ErrSymlinkMount struct {
 // normal case with a destination consisting of a known root (/proc/root) and
 // symlink-free path (from resolveSymlink).
 func SafeMount(src, dst, fstype string, flags uintptr, data, procPath string) error {
+	fd, safePath, err := OpenMountTarget(dst, procPath)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(fd)
+	mountErr := unix.Mount(src, safePath, fstype, flags, data)
+	if mountErr != nil {
+		return fmt.Errorf("mount(%q, %q, %q, %#x, %q) failed: %w", src, safePath, fstype, flags, data, mountErr)
+	}
+	return nil
+}
+
+// OpenMountTarget pins dst and verifies its path through procfs. The caller
+// owns the returned O_PATH FD and can mount through its procfs path.
+func OpenMountTarget(dst, procPath string) (int, string, error) {
 	// Open the destination.
 	fd, err := unix.Open(dst, unix.O_PATH|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return fmt.Errorf("failed to safely mount: Open(%s, _, _): %w", dst, err)
+		return -1, "", fmt.Errorf("failed to safely mount: Open(%s, _, _): %w", dst, err)
 	}
-	defer unix.Close(fd)
 
 	// Use /proc/self/fd/ to verify that we opened the intended destination. This
 	// guards against dst being a symlink, in which case we could accidentally
@@ -1049,17 +1063,15 @@ func SafeMount(src, dst, fstype string, flags uintptr, data, procPath string) er
 	safePath := filepath.Join(procPath, "self/fd", strconv.Itoa(fd))
 	target, err := os.Readlink(safePath)
 	if err != nil {
-		return fmt.Errorf("failed to safely mount: Readlink(%s): %w", safePath, err)
+		unix.Close(fd)
+		return -1, "", fmt.Errorf("failed to safely mount: Readlink(%s): %w", safePath, err)
 	}
 	if dst != target {
-		return &ErrSymlinkMount{fmt.Errorf("failed to safely mount: expected to open %s, but found %s", dst, target)}
+		unix.Close(fd)
+		return -1, "", &ErrSymlinkMount{fmt.Errorf("failed to safely mount: expected to open %s, but found %s", dst, target)}
 	}
 
-	mountErr := unix.Mount(src, safePath, fstype, flags, data)
-	if mountErr != nil {
-		return fmt.Errorf("mount(%q, %q, %q, %#x, %q) failed: %w", src, safePath, fstype, flags, data, mountErr)
-	}
-	return nil
+	return fd, safePath, nil
 }
 
 // RetryEintr retries the function until an error different than EINTR is

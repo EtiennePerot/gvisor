@@ -31,8 +31,7 @@ type mapping struct {
 	val uint32
 }
 
-// optionsMap maps mount propagation-related OCI filesystem options to mount(2)
-// syscall flags.
+// optionsMap maps OCI mount options to their mount(2) flags.
 var optionsMap = map[string]mapping{
 	"acl":           {set: true, val: unix.MS_POSIXACL},
 	"async":         {set: false, val: unix.MS_SYNCHRONOUS},
@@ -111,10 +110,10 @@ func optionsToFlags(opts []string, source map[string]mapping) uint32 {
 	return rv
 }
 
-// IsReadonlyMount returns true if the mount options has read only option.
+// IsReadonlyMount reports whether the mount is read-only.
 func IsReadonlyMount(opts []string) bool {
 	for _, o := range opts {
-		if o == "ro" {
+		if o == "ro" || o == "rro" {
 			return true
 		}
 	}
@@ -184,7 +183,9 @@ func validatePropagation(opt string) error {
 // KnownMountOptions returns a sorted list of all supported mount options.
 // Used by `runsc features`.
 func KnownMountOptions() []string {
-	res := make([]string, 0, len(optionsMap)+len(propOptionsMap))
+	res := make([]string, 0, len(optionsMap)+len(propOptionsMap)+1)
+	// rro requires mount_setattr(2) and has no corresponding mount(2) flag.
+	res = append(res, "rro")
 	for k := range optionsMap {
 		res = append(res, k)
 	}

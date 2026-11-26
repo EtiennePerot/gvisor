@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -106,10 +107,11 @@ func WriteMounts(mountsFD int, mounts []specutils.ResolvedMount) error {
 // To satisfy all of these requirements, this is the approach we take:
 //  1. We create a new tmpfs mount at /proc/fs and bind-mount host /proc at
 //     /proc/fs/proc.
-//  2. Without createContainer hooks, we bind-mount spec.Root.Path onto
-//     /proc/fs/root and prepare the bind-mounts there.
-//  3. With createContainer hooks, we instead prepare spec.Root.Path, execute
-//     the hooks, and then bind-mount the prepared root onto /proc/fs/root.
+//  2. Bind-mount the rootfs at /proc/fs/root, or at spec.Root.Path if GPU
+//     setup or createContainer hooks need it there. Configure GPUs if requested.
+//  3. With createContainer hooks, install the OCI mounts at spec.Root.Path,
+//     run the hooks, then copy the tree to /proc/fs/root. Otherwise, copy any
+//     GPU-prepared root to /proc/fs/root before installing the OCI mounts there.
 //  4. We remount the tmpfs at /proc/fs as read-only, then pivot_root(2) into
 //     it. Now host procfs is accessible via /proc/ and container rootfs is
 //     accessible via /root.
@@ -122,18 +124,20 @@ func WriteMounts(mountsFD int, mounts []specutils.ResolvedMount) error {
 // mountConfs must be indexed such that mountConfs[0] is the root filesystem
 // configuration and subsequent entries correspond to spec mounts with
 // mount configs.
-func SetupRootFS(spec *specs.Spec, conf *config.Config, mountConfs []specutils.GoferMountConf, devIoFD int, mountOpener MountOpener, containerID string, bundleDir string) error {
+func SetupRootFS(spec *specs.Spec, conf *config.Config, mountConfs []specutils.GoferMountConf, devIoFD int, mountOpener MountOpener, configureGPU func() error, containerID string, bundleDir string) error {
 	rootfsConf := mountConfs[0]
 	hasCreateContainerHooks := spec.Hooks != nil && len(spec.Hooks.CreateContainer) > 0
-	if rootfsConf.ShouldUseLisafs() && hasCreateContainerHooks {
+	runCreateHooks := rootfsConf.ShouldUseLisafs() && hasCreateContainerHooks
+	needsSpecRoot := rootfsConf.ShouldUseLisafs() && (hasCreateContainerHooks || configureGPU != nil)
+	if needsSpecRoot {
 		root, err := filepath.EvalSymlinks(spec.Root.Path)
 		if err != nil {
-			return fmt.Errorf("resolving rootfs for createContainer hooks: %w", err)
+			return fmt.Errorf("resolving rootfs for hooks: %w", err)
 		}
 		// Hook preparation requires a self-bind mount, which cannot safely
 		// overmount the process root. Check aliases before changing any mounts.
 		if root == "/" {
-			return fmt.Errorf("createContainer hooks are not supported with rootfs %q resolving to /", spec.Root.Path)
+			return fmt.Errorf("hooks are not supported with rootfs %q resolving to /", spec.Root.Path)
 		}
 	}
 
@@ -145,7 +149,6 @@ func SetupRootFS(spec *specs.Spec, conf *config.Config, mountConfs []specutils.G
 	}
 
 	goferRootFs := spec.Root.Path
-	containerRootFs := spec.Root.Path
 
 	if !conf.TestOnlyAllowRunAsCurrentUserWithoutChroot {
 		// runsc can't be re-executed without /proc, so we create a tmpfs mount,
@@ -189,76 +192,79 @@ func SetupRootFS(spec *specs.Spec, conf *config.Config, mountConfs []specutils.G
 		procPath = "/proc/fs/proc"
 	}
 
+	// Prefer the named staging path. If spec.Root.Path is "/", a self-bind
+	// would cover the process root. Absolute lookups would still start at
+	// the original root mount beneath it.
+	root := goferRootFs
+	if needsSpecRoot {
+		root = spec.Root.Path
+	}
 	if rootfsConf.ShouldUseLisafs() {
-		if !hasCreateContainerHooks {
-			// Prepare the root at its named staging path. When spec.Root.Path
-			// is "/", self-binding it would overmount the process's root;
-			// subsequent absolute lookups would still start beneath that mount.
-			containerRootFs = goferRootFs
+		// The host-controlled rootfs path may contain symlinks.
+		if err := unix.Mount(spec.Root.Path, root, "", unix.MS_BIND|unix.MS_REC, ""); err != nil {
+			return fmt.Errorf("binding rootfs %q at %q: %w", spec.Root.Path, root, err)
 		}
-		// Hooks require the prepared root at spec.Root.Path and may pivot_root
-		// into it, so their path must still be self-bind-mounted. The root path
-		// is host-controlled and may contain symlinks (see runc prepareRoot).
-		if err := unix.Mount(spec.Root.Path, containerRootFs, "", unix.MS_BIND|unix.MS_REC, ""); err != nil {
-			return fmt.Errorf("binding rootfs %q at %q: %w", spec.Root.Path, containerRootFs, err)
+		if err := setGoferTreeAttrs(unix.AT_FDCWD, root, conf.CharacterDevicePolicy, false); err != nil {
+			return fmt.Errorf("setting rootfs mount attributes: %w", err)
 		}
-
-		// Ensure the containerRootFs is set to the RootfsPropagation that the user
-		// requested. Mounts added under SetupMounts inherit the propagation flags of
-		// the root.
-		flags := uint32(unix.MS_SLAVE | unix.MS_REC)
-		if spec.Linux != nil && spec.Linux.RootfsPropagation != "" {
-			flags = specutils.PropOptionsToFlags([]string{spec.Linux.RootfsPropagation})
+		if configureGPU != nil {
+			if err := configureGPU(); err != nil {
+				return fmt.Errorf("configuring GPU mounts: %w", err)
+			}
 		}
-		if err := unix.Mount("", containerRootFs, "", uintptr(flags), ""); err != nil {
-			return fmt.Errorf("mounting root (%q) with flags: %#x, err: %v", containerRootFs, flags, err)
-		}
-	} else {
-		// When not using gofer mount for rootfs, spec.Root.Path may not be set or
-		// may not be a writable directory. So set up the container rootfs directly
-		// in /proc/fs/root, which is a writable directory.
-		//
-		// The self-bind-mount and propagation change above are skipped here: they
-		// are only needed for lisafs rootfs, and /proc/fs/root is not a mount point
-		// on the MS_UNBINDABLE /proc/fs tmpfs, so both would fail with EINVAL.
-		containerRootFs = goferRootFs
 	}
 
-	// Replace the current spec, with the clean spec with symlinks resolved.
-	if err := SetupMounts(conf, spec.Mounts, containerRootFs, procPath, mountConfs, mountOpener); err != nil {
-		util.Fatalf("error setting up FS: %v", err)
+	setupOCIMounts := func(root string) error {
+		if rootfsConf.ShouldUseLisafs() {
+			flags := uint32(unix.MS_SLAVE | unix.MS_REC)
+			if spec.Linux != nil && spec.Linux.RootfsPropagation != "" {
+				flags = specutils.PropOptionsToFlags([]string{spec.Linux.RootfsPropagation})
+			}
+			if err := unix.Mount("", root, "", uintptr(flags), ""); err != nil {
+				return fmt.Errorf("setting rootfs propagation on %q: %w", root, err)
+			}
+		}
+		if err := SetupMounts(conf, spec.Mounts, root, procPath, mountConfs, mountOpener); err != nil {
+			return fmt.Errorf("setting up mounts: %w", err)
+		}
+		if devIoFD >= 0 {
+			return SetupDev(spec, conf, root, procPath)
+		}
+		return nil
 	}
-
-	// Set up /dev directory if needed.
-	if devIoFD >= 0 {
-		if err := SetupDev(spec, conf, containerRootFs, procPath); err != nil {
-			util.Fatalf("error setting up /dev: %v", err)
+	if runCreateHooks {
+		if err := setupOCIMounts(root); err != nil {
+			return err
+		}
+		state := specs.State{
+			Version: specs.Version,
+			ID:      containerID,
+			Status:  specs.StateCreating,
+			// The sandbox pid is not easily available at this point. We'll set
+			// it to -1 for now. A future improvement could plumb this value
+			// through to the gofer if it becomes necessary.
+			Pid:         -1,
+			Bundle:      bundleDir,
+			Annotations: spec.Annotations,
+		}
+		if err := specutils.ExecuteHooks(spec.Hooks.CreateContainer, state); err != nil {
+			return fmt.Errorf("executing createContainer hooks: %w", err)
+		}
+	}
+	if needsSpecRoot {
+		if err := specutils.SafeMount(root, goferRootFs, "", unix.MS_BIND|unix.MS_REC, "", procPath); err != nil {
+			return fmt.Errorf("binding prepared rootfs to gofer root: %w", err)
+		}
+	}
+	if !runCreateHooks {
+		// A recursive bind omits unbindable children. Install OCI mounts on
+		// the final root whenever hooks do not need to see those mounts.
+		if err := setupOCIMounts(goferRootFs); err != nil {
+			return err
 		}
 	}
 
 	if rootfsConf.ShouldUseLisafs() {
-		if hasCreateContainerHooks {
-			state := specs.State{
-				Version: specs.Version,
-				ID:      containerID,
-				Status:  specs.StateCreating,
-				// The sandbox pid is not easily available at this point. We'll set
-				// it to -1 for now. A future improvement could plumb this value
-				// through to the gofer if it becomes necessary.
-				Pid:         -1,
-				Bundle:      bundleDir,
-				Annotations: spec.Annotations,
-			}
-			if err := specutils.ExecuteHooks(spec.Hooks.CreateContainer, state); err != nil {
-				util.Fatalf("error executing CreateContainer hooks: %v", err)
-			}
-
-			// Copy the root prepared for hooks into the gofer's filesystem.
-			if err := specutils.SafeMount(containerRootFs, goferRootFs, "", unix.MS_BIND|unix.MS_REC, "", procPath); err != nil {
-				return fmt.Errorf("binding prepared rootfs to gofer root: %v", err)
-			}
-		}
-
 		// Check if root needs to be remounted as readonly.
 		if spec.Root.Readonly || rootfsConf.ShouldUseOverlayfs() {
 			// If root is a mount point but not read-only, we can change mount options
@@ -322,6 +328,24 @@ func msFlagsToMountAttr(flags uint32) (attrSet uint64, attrClr uint64) {
 	return attrSet, attrClr
 }
 
+// setGoferTreeAttrs applies host restrictions to the inherited mount tree
+// before later OCI mounts and device proxy mounts are attached beneath it.
+func setGoferTreeAttrs(dirFD int, target string, policy config.CharacterDevicePolicy, recursiveReadOnly bool) error {
+	attr := unix.MountAttr{Attr_set: unix.MOUNT_ATTR_NOSUID}
+	if !policy.AllowsPassthrough() {
+		attr.Attr_set |= unix.MOUNT_ATTR_NODEV
+	}
+	if recursiveReadOnly {
+		attr.Attr_set |= unix.MOUNT_ATTR_RDONLY
+	}
+	err := unix.MountSetattr(dirFD, target, unix.AT_EMPTY_PATH|unix.AT_RECURSIVE, &attr)
+	if err == unix.ENOSYS && !recursiveReadOnly {
+		// Keep the existing mount policy on kernels without mount_setattr.
+		return nil
+	}
+	return err
+}
+
 func safeSetupAndMoveMount(srcFileFD int, src, dst, procPath string) error {
 	fi, err := os.Stat(src)
 	if err != nil {
@@ -341,23 +365,11 @@ func safeSetupAndMoveMount(srcFileFD int, src, dst, procPath string) error {
 		}
 	}
 
-	fd, err := unix.Open(dst, unix.O_PATH|unix.O_CLOEXEC, 0)
+	fd, _, err := specutils.OpenMountTarget(dst, procPath)
 	if err != nil {
-		return fmt.Errorf("failed to safely move mount: Open(%s, _, _): %w", dst, err)
+		return err
 	}
 	defer unix.Close(fd)
-
-	if procPath == "" {
-		procPath = "/proc"
-	}
-	fdPath := fmt.Sprintf("%s/self/fd/%d", procPath, fd)
-	target, err := os.Readlink(fdPath)
-	if err != nil {
-		return fmt.Errorf("failed to safely move mount: Readlink(%s): %w", fdPath, err)
-	}
-	if dst != target {
-		return fmt.Errorf("failed to safely move mount: expected to open %s, but found %s", dst, target)
-	}
 
 	if err := unix.MoveMount(srcFileFD, "", fd, "", unix.MOVE_MOUNT_F_EMPTY_PATH|unix.MOVE_MOUNT_T_EMPTY_PATH); err != nil {
 		return fmt.Errorf("MoveMount(%d, %q) failed: %w", srcFileFD, dst, err)
@@ -396,16 +408,17 @@ func SetupMounts(conf *config.Config, mounts []specs.Mount, root, procPath strin
 			flags |= unix.MS_RDONLY
 		}
 
-		log.Infof("Mounting src: %q, dst: %q, flags: %#x, idMapped: %t", m.Source, dst, flags, specutils.IsIDMappedMount(m))
+		isIDMapped := specutils.IsIDMappedMount(m)
+		log.Infof("Mounting src: %q, dst: %q, flags: %#x, idMapped: %t", m.Source, dst, flags, isIDMapped)
 		src := m.Source
 		var srcFile *os.File
-		if specutils.IsIDMappedMount(m) || unix.Access(src, unix.R_OK) != nil {
+		if isIDMapped || unix.Access(src, unix.R_OK) != nil {
 			switch {
 			case mountOpener != nil:
 				// The current process cannot open the source, or it
 				// is id-mapped, so need to open it through `mountOpener`.
 				srcFile, err = mountOpener(&m, flags)
-			case specutils.IsIDMappedMount(m):
+			case isIDMapped:
 				return fmt.Errorf("cannot set up id-mapped mount source %q: no mount opener provided", src)
 			default:
 				// Open the source directly.
@@ -417,7 +430,7 @@ func SetupMounts(conf *config.Config, mounts []specs.Mount, root, procPath strin
 			src = fmt.Sprintf("%s/self/fd/%d", procPath, srcFile.Fd())
 		}
 
-		if specutils.IsIDMappedMount(m) {
+		if isIDMapped {
 			err = safeSetupAndMoveMount(int(srcFile.Fd()), src, dst, procPath)
 		} else {
 			err = specutils.SafeSetupAndMount(src, dst, m.Type, flags, procPath)
@@ -429,22 +442,27 @@ func SetupMounts(conf *config.Config, mounts []specs.Mount, root, procPath strin
 			return fmt.Errorf("mounting %+v: %v", m, err)
 		}
 
-		dstFD, err := unix.Open(dst, unix.O_PATH|unix.O_CLOEXEC, 0)
+		dstFD, path, err := specutils.OpenMountTarget(dst, procPath)
 		if err != nil {
-			return fmt.Errorf("Open(%s, _, _): %w", dst, err)
+			return err
 		}
 		defer unix.Close(dstFD)
-		// Apply mount options after creating all mount points.
-		// Otherwise they can be remounted into read-only.
-		defer func(dstFD int, flags uint32, dst string, isIDMapped bool) {
-			path := fmt.Sprintf("/proc/self/fd/%d", dstFD)
+		recursiveReadOnly := slices.Contains(m.Options, "rro")
+		if !isIDMapped && (recursiveReadOnly || flags&unix.MS_REC != 0) {
+			if err := setGoferTreeAttrs(dstFD, "", conf.CharacterDevicePolicy, recursiveReadOnly); err != nil {
+				return fmt.Errorf("setting mount attributes on %q: %w", dst, err)
+			}
+		}
+		applyFlags := func(flags uint32) error {
 			// The gofer process doesn't execute anything natively.
 			flags |= unix.MS_NOSUID
+			if !conf.CharacterDevicePolicy.AllowsPassthrough() {
+				flags |= unix.MS_NODEV
+			}
 
 			statfs := unix.Statfs_t{}
-			if err := unix.Statfs(path, &statfs); err != nil {
-				retErr = fmt.Errorf("stat dst: %q", dst)
-				return
+			if err := unix.Fstatfs(dstFD, &statfs); err != nil {
+				return fmt.Errorf("stat dst %q: %w", dst, err)
 			}
 			lockedFlags := uint32(0)
 			for _, f := range []struct {
@@ -469,7 +487,7 @@ func SetupMounts(conf *config.Config, mounts []specs.Mount, root, procPath strin
 			if isIDMapped {
 				attrSet, attrClr := msFlagsToMountAttr(flags | lockedFlags)
 				setattrFlags := uint(unix.AT_EMPTY_PATH)
-				if flags&unix.MS_REC != 0 {
+				if flags&unix.MS_REC != 0 || recursiveReadOnly {
 					setattrFlags |= unix.AT_RECURSIVE
 				}
 				attr := &unix.MountAttr{
@@ -477,24 +495,35 @@ func SetupMounts(conf *config.Config, mounts []specs.Mount, root, procPath strin
 					Attr_clr: attrClr,
 				}
 				if err := unix.MountSetattr(dstFD, "", setattrFlags, attr); err != nil {
-					retErr = fmt.Errorf("mount_setattr dst: %q, flags: %#x, err: %v", dst, flags, err)
-					return
+					return fmt.Errorf("mount_setattr dst: %q, flags: %#x: %w", dst, flags, err)
 				}
 			} else {
 				// The previous SafeSetupAndMount creates a new bind-mount, but
 				// it doesn't change mount flags. A separate MS_BIND|MS_REMOUNT
 				// has to be done to apply the mount options.
 				if err := unix.Mount("", path, "", uintptr(flags|lockedFlags|unix.MS_REMOUNT), ""); err != nil {
-					retErr = fmt.Errorf("mount dst: %q, flags: %#x, err: %v", dst, flags, err)
-					return
+					return fmt.Errorf("mount dst: %q, flags: %#x: %w", dst, flags, err)
 				}
 			}
-		}(dstFD, flags, dst, specutils.IsIDMappedMount(m))
+			return nil
+		}
+		if recursiveReadOnly {
+			// Apply rro to the imported tree before attaching later OCI mounts.
+			if err := applyFlags(flags | unix.MS_RDONLY); err != nil {
+				return err
+			}
+		} else {
+			// Defer plain ro so later mounts can create their destinations.
+			defer func() {
+				if err := applyFlags(flags); err != nil {
+					retErr = err
+				}
+			}()
+		}
 
 		// Set propagation options that cannot be set together with other options.
-		flags = specutils.PropOptionsToFlags(m.Options)
-		if flags != 0 {
-			if err := specutils.SafeMount("", dst, "", uintptr(flags), "", procPath); err != nil {
+		if flags := specutils.PropOptionsToFlags(m.Options); flags != 0 {
+			if err := unix.Mount("", path, "", uintptr(flags), ""); err != nil {
 				return fmt.Errorf("mount dst: %q, flags: %#x, err: %v", dst, flags, err)
 			}
 		}

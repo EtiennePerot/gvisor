@@ -19,6 +19,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"os/exec"
@@ -1781,7 +1782,8 @@ func (c *Container) createGoferProcess(conf *config.Config, specFile *os.File, m
 	if err := c.initGoferConfs(conf.GetOverlay2(), mountHints, rootfsHint); err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("error initializing gofer confs: %w", err)
 	}
-	if !c.GoferMountConfs[0].ShouldUseLisafs() && specutils.GPUFunctionalityRequestedViaHook(c.Spec, conf) {
+	configureGPU := specutils.GPUFunctionalityRequestedViaHook(c.Spec, conf)
+	if !c.GoferMountConfs[0].ShouldUseLisafs() && configureGPU {
 		// nvidia-container-runtime-hook attempts to populate the container
 		// rootfs with NVIDIA libraries and devices. With EROFS, spec.Root.Path
 		// points to an empty directory and populating that has no effect.
@@ -1894,6 +1896,18 @@ func (c *Container) createGoferProcess(conf *config.Config, specFile *os.File, m
 		return nil, nil, nil, nil, err
 	}
 	donations.DonateAndClose("mounts-fd", mountsGofer)
+	var sandEnds, goferFilestores []*os.File
+	var devSandEnd *os.File
+	cu := cleanup.Make(func() {
+		mountsSand.Close()
+		if devSandEnd != nil {
+			devSandEnd.Close()
+		}
+		for _, f := range slices.Concat(sandEnds, goferFilestores) {
+			f.Close()
+		}
+	})
+	defer cu.Clean()
 
 	willNeedHostRPC, err := goferWillNeedHostRPC(c.Spec)
 	if err != nil {
@@ -1932,7 +1946,7 @@ func (c *Container) createGoferProcess(conf *config.Config, specFile *os.File, m
 		}
 	}
 
-	sandEnds := make([]*os.File, 0, ioFileCount)
+	sandEnds = make([]*os.File, 0, ioFileCount)
 
 	// Handle rootfs (index 0)
 	switch {
@@ -1971,7 +1985,6 @@ func (c *Container) createGoferProcess(conf *config.Config, specFile *os.File, m
 		}
 		cfgIdx++
 	}
-	var devSandEnd *os.File
 	if shouldCreateDeviceGofer(c.Spec, conf) {
 		fds, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
 		if err != nil {
@@ -2004,6 +2017,7 @@ func (c *Container) createGoferProcess(conf *config.Config, specFile *os.File, m
 	}
 
 	rootlessEUID := unix.Geteuid() != 0
+	var usernsSync *os.File
 	setUserMappings := false
 	// Setup any uid/gid mappings, and create or join the configured user
 	// namespace so the gofer's view of the filesystem aligns with the
@@ -2034,11 +2048,11 @@ func (c *Container) createGoferProcess(conf *config.Config, specFile *os.File, m
 		} else {
 			setUserMappings = true
 		}
-		syncFile, err := sandbox.ConfigureCmdForRootless(cmd, &donations)
+		usernsSync, err = sandbox.ConfigureCmdForRootless(cmd, &donations)
 		if err != nil {
 			return nil, nil, nil, nil, err
 		}
-		defer syncFile.Close()
+		defer usernsSync.Close()
 		uid, gid := sandbox.SandboxUserGroupIDs(c.Spec)
 		if uid != 0 {
 			cmd.Args = append(cmd.Args, fmt.Sprintf("--uid=%d", uid))
@@ -2055,7 +2069,11 @@ func (c *Container) createGoferProcess(conf *config.Config, specFile *os.File, m
 	}
 	chrootSyncSandEnd := os.NewFile(uintptr(fds[0]), "chroot sync runsc FD")
 	chrootSyncGoferEnd := os.NewFile(uintptr(fds[1]), "chroot sync gofer FD")
-	donations.DonateAndClose("sync-chroot-fd", chrootSyncGoferEnd)
+	syncFlag := "sync-chroot-fd"
+	if configureGPU {
+		syncFlag = "sync-gpu-fd"
+	}
+	donations.DonateAndClose(syncFlag, chrootSyncGoferEnd)
 	defer chrootSyncSandEnd.Close()
 
 	donations.Transfer(cmd, nextFD)
@@ -2096,19 +2114,35 @@ func (c *Container) createGoferProcess(conf *config.Config, specFile *os.File, m
 		}
 	}
 
-	// Set up nvproxy with the Gofer's mount namespaces while chrootSyncSandEnd is
-	// is still open.
-	if err := nvproxySetup(c.Spec, conf, c.GoferPid.Load()); err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("setting up nvproxy for gofer: %w", err)
+	if configureGPU {
+		// The gofer needs its user namespace mappings to prepare the rootfs.
+		if usernsSync != nil {
+			usernsSync.Close()
+		}
+		// Close our copy of the peer so a gofer setup error unblocks the read.
+		chrootSyncGoferEnd.Close()
+		var ready [1]byte
+		if _, err := io.ReadFull(chrootSyncSandEnd, ready[:]); err != nil {
+			return nil, nil, nil, nil, fmt.Errorf("waiting for gofer rootfs: %w", err)
+		}
+		if err := nvproxySetup(c.Spec, conf, c.GoferPid.Load()); err != nil {
+			return nil, nil, nil, nil, fmt.Errorf("setting up nvproxy for gofer: %w", err)
+		}
 	}
 
 	// Create gofer filestore files with the Gofer's mount namespaces while
 	// chrootSyncSandEnd is still open.
-	goferFilestores, err := c.createGoferFilestores(conf.GetOverlay2(), mountHints)
+	goferFilestores, err = c.createGoferFilestores(conf.GetOverlay2(), mountHints)
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("creating gofer filestore files: %w", err)
 	}
 
+	if configureGPU {
+		if _, err := chrootSyncSandEnd.Write([]byte{1}); err != nil {
+			return nil, nil, nil, nil, fmt.Errorf("releasing gofer after GPU setup: %w", err)
+		}
+	}
+	cu.Release()
 	return sandEnds, goferFilestores, devSandEnd, mountsSand, nil
 }
 
@@ -2800,7 +2834,7 @@ func nvproxyLoadKernelModules() {
 //
 // This should be called after the Gofer has started but before it has
 // pivot-root'd, as the bind mounts are created in the Gofer's mount namespace.
-// This function has no effect if nvproxy functionality is not requested.
+// The Gofer must have prepared the rootfs at spec.Root.Path.
 //
 // This function essentially replicates
 // nvidia-container-toolkit:cmd/nvidia-container-runtime-hook, i.e. the
@@ -2813,10 +2847,6 @@ func nvproxyLoadKernelModules() {
 // Note that nvidia-container-cli will set up files in /proc which are useless,
 // since they will be hidden by sentry procfs.
 func nvproxySetup(spec *specs.Spec, conf *config.Config, goferPid int) error {
-	if !specutils.GPUFunctionalityRequestedViaHook(spec, conf) {
-		return nil
-	}
-
 	if spec.Root == nil {
 		return fmt.Errorf("spec missing root filesystem")
 	}

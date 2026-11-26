@@ -2814,6 +2814,74 @@ func TestReadonlyMount(t *testing.T) {
 	}
 }
 
+func TestRecursiveReadonlyMount(t *testing.T) {
+	version, err := hostos.KernelVersion()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !version.AtLeast(5, 12) {
+		t.Skip("rro requires mount_setattr")
+	}
+	src := t.TempDir()
+	nested := filepath.Join(src, "inherited")
+	for _, name := range []string{nested, filepath.Join(src, "overmount")} {
+		if err := os.Mkdir(name, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := unix.Mount("tmpfs", nested, "tmpfs", 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Unmount(nested, unix.MNT_DETACH)
+
+	plain, tree := t.TempDir(), t.TempDir()
+	spec, conf := sleepSpecConf(t)
+	conf.Overlay2.Set("none")
+	spec.Mounts = append(spec.Mounts,
+		specs.Mount{Source: src, Destination: plain, Type: "bind", Options: []string{"rbind", "ro"}},
+		specs.Mount{Source: src, Destination: tree, Type: "bind", Options: []string{"rbind", "rro"}},
+		specs.Mount{Source: t.TempDir(), Destination: filepath.Join(tree, "overmount"), Type: "bind", Options: []string{"rw"}},
+	)
+	setupTestRootDir(t, conf)
+	cs, cleanup, err := startContainers(conf, []*specs.Spec{spec}, []string{testutil.RandomContainerID()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	// Inspect the Gofer's host mounts independently of Sentry VFS checks.
+	root := fmt.Sprintf("/proc/%d/root", cs[0].GoferPid.Load())
+	for path, wantReadonly := range map[string]bool{
+		nested:                                  false,
+		filepath.Join(root, nested):             false,
+		filepath.Join(root, plain):              true,
+		filepath.Join(root, plain, "inherited"): false,
+		filepath.Join(root, tree):               true,
+		filepath.Join(root, tree, "inherited"):  true,
+		filepath.Join(root, tree, "overmount"):  false,
+	} {
+		var st unix.Statfs_t
+		if err := unix.Statfs(path, &st); err != nil {
+			t.Fatalf("statfs(%q): %v", path, err)
+		}
+		if path != nested && st.Flags&(unix.ST_NODEV|unix.ST_NOSUID) != unix.ST_NODEV|unix.ST_NOSUID {
+			t.Errorf("statfs(%q) flags = %#x, want nodev and nosuid", path, st.Flags)
+		}
+		if ro := st.Flags&unix.ST_RDONLY != 0; ro != wantReadonly {
+			t.Errorf("statfs(%q) read-only = %t, want %t", path, ro, wantReadonly)
+		}
+	}
+	out, err := executeCombinedOutput(conf, cs[0], nil, "/bin/sh", "-c",
+		`grep -F " $1 " /proc/mounts | grep -Eq ' ro(,| )' && touch "$1/overmount/file"`, "sh", tree)
+	if err != nil {
+		t.Errorf("checking container mounts: %v, output: %s", err, out)
+	}
+	out, status, err := executeCombinedOutputWithStatus(conf, cs[0], nil, "/bin/touch", filepath.Join(tree, "inherited", "file"))
+	if err != nil || status == 0 || !strings.Contains(string(out), "Read-only file system") {
+		t.Errorf("touch in inherited rro mount: status %d, err %v, output %q, want EROFS", status, err, out)
+	}
+}
+
 func TestIDMappedMount(t *testing.T) {
 	for name, conf := range configs(t, false /* noOverlay */) {
 		t.Run(name, func(t *testing.T) {
@@ -3074,6 +3142,16 @@ func TestIDMappedMountFlags(t *testing.T) {
 				t.Fatalf("os.MkdirAll() failed: %v", err)
 			}
 
+			// ID-mapped rbinds also apply host mount flags to inherited mounts.
+			inherited := filepath.Join(dir1, "inherited")
+			if err := os.Mkdir(inherited, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := unix.Mount("tmpfs", inherited, "tmpfs", 0, ""); err != nil {
+				t.Fatal(err)
+			}
+			defer unix.Unmount(inherited, unix.MNT_DETACH)
+
 			// Create a file in dir1 owned by 0:0 and a script/binary
 			testFilePath1 := filepath.Join(dir1, "test-file")
 			f, err := os.OpenFile(testFilePath1, os.O_RDONLY|os.O_CREATE, 0644)
@@ -3101,8 +3179,7 @@ func TestIDMappedMountFlags(t *testing.T) {
 			f.Close()
 
 			spec, _ := sleepSpecConf(t)
-			// Test with two mounts, since nodiratime and relatime are mutually exclusive.
-			spec.Mounts = append(spec.Mounts, specs.Mount{
+			plain := specs.Mount{
 				Destination: dir1,
 				Source:      dir1,
 				Type:        "bind",
@@ -3117,8 +3194,8 @@ func TestIDMappedMountFlags(t *testing.T) {
 					HostID:      0,
 					Size:        1,
 				}},
-			})
-			spec.Mounts = append(spec.Mounts, specs.Mount{
+			}
+			spec.Mounts = append(spec.Mounts, plain, specs.Mount{
 				Destination: dir2,
 				Source:      dir2,
 				Type:        "bind",
@@ -3134,6 +3211,20 @@ func TestIDMappedMountFlags(t *testing.T) {
 					Size:        1,
 				}},
 			})
+			rro := plain
+			rro.Destination = t.TempDir()
+			rro.Options = []string{"rbind", "idmap", "rro", "noexec"}
+			child := filepath.Join(inherited, "child")
+			if err := os.Mkdir(filepath.Join(inherited, "overmount"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			overmount := filepath.Join(rro.Destination, "inherited", "overmount")
+			spec.Mounts = append(spec.Mounts, rro,
+				// Plain ro permits a new mountpoint in the inherited submount.
+				specs.Mount{Destination: child, Source: dir2, Type: "bind", Options: []string{"bind", "rw"}},
+				// An explicit mount on an rro tree keeps its own flags.
+				specs.Mount{Destination: overmount, Source: dir2, Type: "bind", Options: []string{"bind", "rw", "relatime"}},
+			)
 			spec.Root.Readonly = false
 
 			_, bundleDir, cleanup, err := testutil.SetupContainer(spec, conf)
@@ -3202,11 +3293,30 @@ func TestIDMappedMountFlags(t *testing.T) {
 			}
 
 			verifyMountinfo(dir1, []string{"ro", "noexec", "noatime", "nodiratime"})
+			goferRoot := fmt.Sprintf("/proc/%d/root", c.GoferPid.Load())
+			var st unix.Statfs_t
+			if err := unix.Statfs(filepath.Join(goferRoot, inherited), &st); err != nil {
+				t.Fatal(err)
+			}
+			const want = unix.ST_RDONLY | unix.ST_NOEXEC | unix.ST_NOSUID | unix.ST_NODEV
+			if st.Flags&want != want {
+				t.Errorf("inherited mount flags %#x, want ro, noexec, nosuid and nodev", st.Flags)
+			}
 			mnt2Want := []string{"rw", "relatime"}
 			if strings.Contains(name, "-overlay") {
 				mnt2Want = []string{"ro", "relatime"}
 			}
 			verifyMountinfo(dir2, mnt2Want)
+			verifyMountinfo(child, []string{"ro", "noexec"})
+			verifyMountinfo(rro.Destination, []string{"ro"})
+			verifyMountinfo(filepath.Join(rro.Destination, "inherited"), []string{"ro", "noexec", "nosuid", "nodev"})
+			verifyMountinfo(overmount, mnt2Want)
+			if err := unix.Statfs(filepath.Join(goferRoot, overmount), &st); err != nil {
+				t.Fatal(err)
+			}
+			if st.Flags&unix.ST_NOEXEC != 0 {
+				t.Errorf("explicit overmount inherited noexec from its rro parent")
+			}
 		})
 	}
 }

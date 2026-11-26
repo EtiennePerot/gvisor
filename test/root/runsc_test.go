@@ -149,13 +149,16 @@ func TestCreateContainerHooksRootFS(t *testing.T) {
 			spec := testutil.NewSpecWithArgs("/bin/true")
 			spec.Root = &specs.Root{Path: tc.root}
 			spec.Mounts = nil
-			marker := filepath.Join(t.TempDir(), "hook-ran")
+			volume := t.TempDir()
+			marker := filepath.Join(volume, "hook-ran")
+			hookMarker := marker
 			if !tc.wantError {
-				marker = filepath.Join(tc.root, "hook-ran")
+				spec.Mounts = []specs.Mount{{Type: "bind", Source: volume, Destination: "/mnt", Options: []string{"bind"}}}
+				hookMarker = filepath.Join(tc.root, "mnt", "hook-ran")
 			}
 			spec.Hooks = &specs.Hooks{CreateContainer: []specs.Hook{{
 				Path: "/bin/sh",
-				Args: []string{"/bin/sh", "-c", `echo hook > "$1"`, "hook", marker},
+				Args: []string{"/bin/sh", "-c", `echo hook > "$1"`, "hook", hookMarker},
 			}}}
 			_, bundleDir, cleanup, err := testutil.SetupContainer(spec, conf)
 			if err != nil {
@@ -188,7 +191,7 @@ func TestCreateContainerHooksRootFS(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if want := "createContainer hooks are not supported with rootfs"; !strings.Contains(string(out), want) {
+				if want := "hooks are not supported with rootfs"; !strings.Contains(string(out), want) {
 					t.Fatalf("gofer log does not contain %q:\n%s", want, out)
 				}
 				if _, err := os.Stat(marker); !os.IsNotExist(err) {
