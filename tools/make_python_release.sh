@@ -151,10 +151,11 @@ ensure_twine_prerequisites() {
   echo "=== [Bootstrap] twine not found on PATH. Installing publishing prerequisites... ===" >&2
   if ! command -v pip3 >/dev/null 2>&1; then
     echo "pip3 not found. Attempting to install python3-pip..." >&2
+    local -x DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l
     if command -v sudo >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
-      sudo apt-get update && sudo apt-get install -y python3-pip
+      sudo -E apt-get update && sudo -E apt-get -o DPkg::Lock::Timeout=120 install -y python3-pip
     elif command -v apt-get >/dev/null 2>&1; then
-      apt-get update && apt-get install -y python3-pip
+      apt-get update && apt-get -o DPkg::Lock::Timeout=120 install -y python3-pip
     fi
   fi
 
