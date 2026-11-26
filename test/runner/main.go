@@ -427,6 +427,7 @@ func runRunsc(tc *gtest.TestCase, spec *specs.Spec) error {
 		"-allow-packet-socket-write=true",
 		fmt.Sprintf("-panic-signal=%d", unix.SIGTERM),
 		fmt.Sprintf("-iouring=%t", *ioUring),
+		"-landlock=enabled",
 		"-watchdog-action=panic",
 		"-platform", *platform,
 		"-file-access", *fileAccess,

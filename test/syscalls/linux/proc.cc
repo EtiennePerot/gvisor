@@ -1684,6 +1684,39 @@ TEST(ProcPidFdInfo, DifferentUserPtrace) {
   });
 }
 
+// Reading /proc/self/fdinfo/N must not keep the file open after N is closed.
+TEST(ProcSelfFdInfo, ReadDoesNotDelayClose) {
+  int fds[2];
+  ASSERT_THAT(pipe2(fds, O_NONBLOCK), SyscallSucceeds());
+  const FileDescriptor rfd(fds[0]);
+  FileDescriptor wfd(fds[1]);
+
+  ASSERT_NO_ERRNO_AND_VALUE(
+      GetContents(absl::StrCat("/proc/self/fdinfo/", wfd.get())));
+  ASSERT_THAT(close(wfd.release()), SyscallSucceeds());
+
+  // The write end is closed, so the reader sees EOF rather than EAGAIN.
+  char c;
+  EXPECT_THAT(read(rfd.get(), &c, 1), SyscallSucceedsWithValue(0));
+}
+
+// Following /proc/self/fd/N must not keep the file open after N is closed.
+TEST(ProcSelfFd, FollowDoesNotDelayClose) {
+  int fds[2];
+  ASSERT_THAT(pipe2(fds, O_NONBLOCK), SyscallSucceeds());
+  const FileDescriptor rfd(fds[0]);
+  FileDescriptor wfd(fds[1]);
+
+  struct stat st;
+  ASSERT_THAT(stat(absl::StrCat("/proc/self/fd/", wfd.get()).c_str(), &st),
+              SyscallSucceeds());
+  ASSERT_THAT(close(wfd.release()), SyscallSucceeds());
+
+  // The write end is closed, so the reader sees EOF rather than EAGAIN.
+  char c;
+  EXPECT_THAT(read(rfd.get(), &c, 1), SyscallSucceedsWithValue(0));
+}
+
 TEST(ProcSelfExe, Absolute) {
   auto exe = ASSERT_NO_ERRNO_AND_VALUE(ReadLink("/proc/self/exe"));
   EXPECT_EQ(exe[0], '/');

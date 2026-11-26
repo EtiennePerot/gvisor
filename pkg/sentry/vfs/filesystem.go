@@ -22,6 +22,7 @@ import (
 	"gvisor.dev/gvisor/pkg/fspath"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
 	"gvisor.dev/gvisor/pkg/sentry/socket/unix/transport"
+	"gvisor.dev/gvisor/pkg/sync"
 )
 
 // A Filesystem is a tree of nodes represented by Dentries, which forms part of
@@ -42,6 +43,18 @@ type Filesystem struct {
 
 	// fsType is the FilesystemType of this Filesystem.
 	fsType FilesystemType
+
+	// landlockMu serializes creating, releasing and detaching the
+	// LandlockObjects of files on this filesystem.
+	landlockMu sync.Mutex `state:"nosave"`
+
+	// landlockObjects contains every live LandlockObject of a file on this
+	// filesystem. landlockObjects is protected by landlockMu.
+	landlockObjects map[*LandlockObject]struct{} `state:"nosave"`
+
+	// landlockDetached is true once detachLandlockObjects has run.
+	// landlockDetached is protected by landlockMu.
+	landlockDetached bool `state:"nosave"`
 
 	// impl is the FilesystemImpl associated with this Filesystem. impl is
 	// immutable. This should be the last field in Dentry.
@@ -80,6 +93,7 @@ func (fs *Filesystem) DecRef(ctx context.Context) {
 		fs.vfs.filesystemsMu.Lock()
 		delete(fs.vfs.filesystems, fs)
 		fs.vfs.filesystemsMu.Unlock()
+		fs.detachLandlockObjects(ctx)
 		fs.impl.Release(ctx)
 	})
 }
@@ -548,6 +562,19 @@ type FilesystemImpl interface {
 	//
 	// Preconditions: vd.Mount().Filesystem().Impl() == this FilesystemImpl.
 	IsDescendant(vfsroot, vd VirtualDentry) bool
+
+	// WalkAncestors calls visit on d and then on each of d's ancestors in this
+	// filesystem, up to the filesystem root. It stops early if visit returns
+	// false. While WalkAncestors runs, renames in this filesystem cannot
+	// change the ancestry of d. Files with no parent yield d alone.
+	//
+	// visit runs while WalkAncestors holds its locks, so visit must not
+	// acquire filesystem locks.
+	//
+	// Most implementations can use genericfstree.WalkAncestors.
+	//
+	// Preconditions: d is a dentry of this filesystem.
+	WalkAncestors(d *Dentry, visit func(*Dentry) bool)
 
 	// MountOptions returns mount options for the current filesystem. This
 	// should only return options specific to the filesystem (i.e. don't return

@@ -860,6 +860,7 @@ func New(args Args) (*Loader, error) {
 		NvidiaDriverVersion: args.NvidiaDriverVersion,
 		AllowSUID:           args.Conf.AllowSUID,
 		IOUringEnabled:      args.Conf.IOUring,
+		LandlockEnabled:     args.Conf.Landlock == config.LandlockEnabled,
 	}
 
 	// Create memory file.
@@ -1033,7 +1034,7 @@ func New(args Args) (*Loader, error) {
 		return nil, fmt.Errorf("failed to create hostfs filesystem: %w", err)
 	}
 	defer hostFilesystem.DecRef(l.k.SupervisorContext())
-	l.k.SetHostMount(l.k.VFS().NewDisconnectedMount(hostFilesystem, nil, &vfs.MountOptions{}))
+	l.k.SetHostMount(l.k.VFS().NewDisconnectedMount(hostFilesystem, nil, &vfs.MountOptions{Internal: true}))
 	args.StartupTimer.Reached("host FS mount created")
 
 	if args.PodInitConfigFD >= 0 {

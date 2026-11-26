@@ -237,8 +237,14 @@ func (fs *filesystem) lookupLocked(ctx context.Context, parent *dentry, name str
 			Root:  childVD,
 			Start: childVD,
 		}
+		// The link count of the topmost lower file decides
+		// child.landlockLinked. Not all layers report it.
+		statMask := mask
+		if topLookupLayer == lookupLayerNone && !isUpper && fs.opts.UpperRoot.Ok() {
+			statMask |= linux.STATX_NLINK
+		}
 		stat, err := vfsObj.StatAt(ctx, fs.creds, childPop, &vfs.StatOptions{
-			Mask: mask,
+			Mask: statMask,
 		})
 		if err != nil {
 			lookupErr = err
@@ -302,6 +308,7 @@ func (fs *filesystem) lookupLocked(ctx context.Context, parent *dentry, name str
 			child.devMajor = atomicbitops.FromUint32(stat.DevMajor)
 			child.devMinor = atomicbitops.FromUint32(stat.DevMinor)
 			child.ino = atomicbitops.FromUint64(stat.Ino)
+			child.landlockLinked = statMask&linux.STATX_NLINK != 0 && !isDir && stat.Mask&linux.STATX_NLINK != 0 && stat.Nlink > 1
 		}
 
 		// For non-directory files, only the topmost layer that contains a file
@@ -2210,6 +2217,11 @@ func (fs *filesystem) PrependPath(ctx context.Context, vfsroot, vd vfs.VirtualDe
 // IsDescendant implements vfs.FilesystemImpl.IsDescendant.
 func (fs *filesystem) IsDescendant(vfsroot, vd vfs.VirtualDentry) bool {
 	return genericIsDescendant(fs, vfsroot.Dentry(), vd.Dentry().Impl().(*dentry))
+}
+
+// WalkAncestors implements vfs.FilesystemImpl.WalkAncestors.
+func (fs *filesystem) WalkAncestors(d *vfs.Dentry, visit func(*vfs.Dentry) bool) {
+	genericWalkAncestors(fs, d.Impl().(*dentry), visit)
 }
 
 // MountOptions implements vfs.FilesystemImpl.MountOptions.

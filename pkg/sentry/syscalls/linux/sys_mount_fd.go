@@ -277,6 +277,9 @@ func MoveMount(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintp
 	if !creds.HasCapabilityIn(linux.CAP_SYS_ADMIN, t.MountNamespace().Owner) {
 		return 0, nil, linuxerr.EPERM
 	}
+	if err := t.LandlockDomain().CheckMountChange(); err != nil {
+		return 0, nil, err
+	}
 
 	fromPath, err := copyInPath(t, fromAddr)
 	if err != nil {

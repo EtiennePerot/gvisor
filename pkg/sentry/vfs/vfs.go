@@ -18,11 +18,11 @@
 //
 //	EpollInstance.interestMu
 //		FileDescription.epollMu
-//		  Locks acquired by FilesystemImpl/DentryImpl/FileDescriptionImpl methods (except FilesystemImpl.PrependPath, FilesystemImpl.IsDescendant, DentryImpl.InotifyWithParent)
+//		  Locks acquired by FilesystemImpl/DentryImpl/FileDescriptionImpl methods (except FilesystemImpl.PrependPath, FilesystemImpl.IsDescendant, FilesystemImpl.WalkAncestors, DentryImpl.InotifyWithParent)
 //		    VirtualFilesystem.mountMu
 //		      Dentry.mu
 //		        Locks acquired by FilesystemImpls between Prepare{Delete,Rename}Dentry and Commit{Delete,Rename*}Dentry
-//		          Locks acquired by FilesystemImpl.PrependPath, FilesystemImpl.IsDescendant, DentryImpl.InotifyWithParent (typically genericfstree.Filesystem.ancestryMu)
+//		          Locks acquired by FilesystemImpl.PrependPath, FilesystemImpl.IsDescendant, FilesystemImpl.WalkAncestors, DentryImpl.InotifyWithParent (typically genericfstree.Filesystem.ancestryMu)
 //		      VirtualFilesystem.filesystemsMu
 //		    fdnotifier.notifier.mu
 //		      EpollInstance.readyMu
@@ -174,6 +174,11 @@ type VirtualFilesystem struct {
 	// The low 32 bits store the number of currently in-progress renames
 	// VFS-wide.
 	renameState atomicbitops.Uint64
+
+	// landlockLive is the number of Landlock rulesets and domains that have
+	// not been released. Checkpoints fail while it is not zero, since their
+	// state cannot be saved.
+	landlockLive atomicbitops.Int64 `state:"nosave"`
 }
 
 const renameInProgressMask = 1<<32 - 1
@@ -220,7 +225,7 @@ func (vfs *VirtualFilesystem) Init(ctx context.Context) error {
 	}
 	anonfs.vfsfs.Init(vfs, &anonFilesystemType{}, &anonfs)
 	defer anonfs.vfsfs.DecRef(ctx)
-	anonMount := vfs.NewDisconnectedMount(&anonfs.vfsfs, nil, &MountOptions{})
+	anonMount := vfs.NewDisconnectedMount(&anonfs.vfsfs, nil, &MountOptions{Internal: true})
 	vfs.anonMount = anonMount
 
 	return nil
@@ -394,6 +399,10 @@ func (vfs *VirtualFilesystem) LinkAt(ctx context.Context, creds *auth.Credential
 		if err := vfs.maybeBlockOnMountPromise(ctx, rp); err != nil {
 			return err
 		}
+		if err := rp.checkLandlockGate(LandlockOpLink, landlockMakeAccessFS); err != nil {
+			oldVD.DecRef(ctx)
+			return err
+		}
 		err := rp.mount.fs.impl.LinkAt(ctx, rp, oldVD)
 		if err == nil {
 			oldVD.DecRef(ctx)
@@ -440,6 +449,9 @@ func (vfs *VirtualFilesystem) MkdirAt(ctx context.Context, creds *auth.Credentia
 		if err := vfs.maybeBlockOnMountPromise(ctx, rp); err != nil {
 			return err
 		}
+		if err := rp.checkLandlockGate(LandlockOpMkdir, linux.LANDLOCK_ACCESS_FS_MAKE_DIR); err != nil {
+			return err
+		}
 		err := rp.mount.fs.impl.MkdirAt(ctx, rp, *opts)
 		if err == nil {
 			return nil
@@ -480,6 +492,9 @@ func (vfs *VirtualFilesystem) MknodAt(ctx context.Context, creds *auth.Credentia
 	defer rp.Release(ctx)
 	for {
 		if err := vfs.maybeBlockOnMountPromise(ctx, rp); err != nil {
+			return err
+		}
+		if err := rp.checkLandlockGate(LandlockOpMknod, landlockMknodAccessFS(opts.Mode)); err != nil {
 			return err
 		}
 		err := rp.mount.fs.impl.MknodAt(ctx, rp, *opts)
@@ -549,6 +564,9 @@ func (vfs *VirtualFilesystem) OpenAt(ctx context.Context, creds *auth.Credential
 	}
 	for {
 		if err := vfs.maybeBlockOnMountPromise(ctx, rp); err != nil {
+			return nil, err
+		}
+		if err := rp.checkLandlockGate(LandlockOpOpen, landlockOpenAccessFS); err != nil {
 			return nil, err
 		}
 		fd, err := rp.mount.fs.impl.OpenAt(ctx, rp, *opts)
@@ -668,6 +686,10 @@ func (vfs *VirtualFilesystem) RenameAt(ctx context.Context, creds *auth.Credenti
 		if err := vfs.maybeBlockOnMountPromise(ctx, rp); err != nil {
 			return err
 		}
+		if err := rp.checkLandlockGate(LandlockOpRename, landlockMakeAccessFS|landlockRemoveAccessFS); err != nil {
+			oldParentVD.DecRef(ctx)
+			return err
+		}
 		err := rp.mount.fs.impl.RenameAt(ctx, rp, oldParentVD, oldName, renameOpts)
 		if err == nil {
 			oldParentVD.DecRef(ctx)
@@ -709,6 +731,9 @@ func (vfs *VirtualFilesystem) RmdirAt(ctx context.Context, creds *auth.Credentia
 	defer rp.Release(ctx)
 	for {
 		if err := vfs.maybeBlockOnMountPromise(ctx, rp); err != nil {
+			return err
+		}
+		if err := rp.checkLandlockGate(LandlockOpRmdir, linux.LANDLOCK_ACCESS_FS_REMOVE_DIR); err != nil {
 			return err
 		}
 		err := rp.mount.fs.impl.RmdirAt(ctx, rp)
@@ -827,6 +852,9 @@ func (vfs *VirtualFilesystem) SymlinkAt(ctx context.Context, creds *auth.Credent
 		if err := vfs.maybeBlockOnMountPromise(ctx, rp); err != nil {
 			return err
 		}
+		if err := rp.checkLandlockGate(LandlockOpSymlink, linux.LANDLOCK_ACCESS_FS_MAKE_SYM); err != nil {
+			return err
+		}
 		err := rp.mount.fs.impl.SymlinkAt(ctx, rp, target)
 		if err == nil {
 			return nil
@@ -866,6 +894,9 @@ func (vfs *VirtualFilesystem) UnlinkAt(ctx context.Context, creds *auth.Credenti
 	defer rp.Release(ctx)
 	for {
 		if err := vfs.maybeBlockOnMountPromise(ctx, rp); err != nil {
+			return err
+		}
+		if err := rp.checkLandlockGate(LandlockOpUnlink, linux.LANDLOCK_ACCESS_FS_REMOVE_FILE); err != nil {
 			return err
 		}
 		err := rp.mount.fs.impl.UnlinkAt(ctx, rp)
@@ -1230,6 +1261,42 @@ func (vfs *VirtualFilesystem) unlockMounts(ctx context.Context) {
 			rc.DecRef(ctx)
 		}
 	}
+}
+
+// DeferredDecRefs holds references that the holder drops after it releases
+// its filesystem locks. Dropping the last reference on a Mount or Dentry may
+// acquire filesystem locks, so code that may hold such locks hands references
+// to a DeferredDecRefs instead of dropping them.
+//
+// The zero value of DeferredDecRefs is empty.
+type DeferredDecRefs struct {
+	refs []refs.RefCounter
+}
+
+// add hands one reference on rc to d.
+func (d *DeferredDecRefs) add(rc refs.RefCounter) {
+	d.refs = append(d.refs, rc)
+}
+
+// decRef hands one reference on rc to d. If d is nil, decRef drops the
+// reference at once.
+func (d *DeferredDecRefs) decRef(ctx context.Context, rc refs.RefCounter) {
+	if d == nil {
+		rc.DecRef(ctx)
+		return
+	}
+	d.add(rc)
+}
+
+// Release drops all references held by d.
+//
+// Preconditions: The caller holds no filesystem locks.
+func (d *DeferredDecRefs) Release(ctx context.Context) {
+	for i, rc := range d.refs {
+		rc.DecRef(ctx)
+		d.refs[i] = nil
+	}
+	d.refs = d.refs[:0]
 }
 
 // A VirtualDentry represents a node in a VFS tree, by combining a Dentry

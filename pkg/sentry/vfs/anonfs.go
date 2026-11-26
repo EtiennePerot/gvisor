@@ -321,6 +321,11 @@ func (fs *anonFilesystem) IsDescendant(vfsroot, vd VirtualDentry) bool {
 	return vfsroot == vd
 }
 
+// WalkAncestors implements FilesystemImpl.WalkAncestors.
+func (fs *anonFilesystem) WalkAncestors(d *Dentry, visit func(*Dentry) bool) {
+	visit(d)
+}
+
 // PrependPath implements FilesystemImpl.PrependPath.
 func (fs *anonFilesystem) PrependPath(ctx context.Context, vfsroot, vd VirtualDentry, b *fspath.Builder) error {
 	b.PrependComponent(fmt.Sprintf("anon_inode:%s", vd.dentry.impl.(*anonDentry).name))
@@ -356,6 +361,11 @@ func (d *anonDentry) InotifyWithParent(ctx context.Context, events, cookie uint3
 // Watches implements DentryImpl.Watches.
 func (d *anonDentry) Watches() *Watches {
 	return &d.watches
+}
+
+// LandlockSlot implements DentryImpl.LandlockSlot.
+func (d *anonDentry) LandlockSlot() LandlockSlot {
+	return nil
 }
 
 // OnZeroWatches implements Dentry.OnZeroWatches.

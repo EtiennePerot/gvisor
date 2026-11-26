@@ -146,6 +146,9 @@ func (t *Task) canTraceWithMM(target *Task, attach bool, targetMM *mm.MemoryMana
 	if !t.canTraceStandardWithMM(target, attach, targetMM, targetUserDumpable) {
 		return false
 	}
+	if !t.landlockMayTrace(target) {
+		return false
+	}
 
 	if attach && t.k.YAMAPtraceScope.Load() == linux.YAMA_SCOPE_RELATIONAL {
 		t.tg.pidns.owner.mu.RLock()
@@ -195,6 +198,9 @@ func (t *Task) canTraceLocked(target *Task, attach bool) bool {
 	}
 
 	if !t.canTraceStandard(target, attach) {
+		return false
+	}
+	if !t.landlockMayTrace(target) {
 		return false
 	}
 
@@ -576,6 +582,27 @@ func (t *Task) ptraceUnstop(mode ptraceSyscallMode, singlestep bool, sig linux.S
 	return nil
 }
 
+// landlockMayTrace returns true if t's Landlock domain allows t to access
+// target in the ptrace sense, that is, if t has no Landlock domain. Callers
+// that allow access within the thread group do so before they call
+// landlockMayTrace.
+func (t *Task) landlockMayTrace(target *Task) bool {
+	return t.LandlockDomain() == nil
+}
+
+// CheckLandlockTaskAccess returns EACCES if the Landlock domain of ctx's task
+// does not allow it to access target in the ptrace sense, and nil otherwise.
+// Access within the task's thread group, and access with no calling task, are
+// always allowed. procfs checks it for entries that it does not otherwise
+// guard with the ptrace access check, such as /proc/[pid]/ns/*.
+func CheckLandlockTaskAccess(ctx context.Context, target *Task) error {
+	t := TaskFromContext(ctx)
+	if t == nil || t.tg == target.tg || t.landlockMayTrace(target) {
+		return nil
+	}
+	return linuxerr.EACCES
+}
+
 // canTracemeLocked returns true if t's parent may trace t via PTRACE_TRACEME.
 // Unlike attachment, Linux's kernel/ptrace.c:ptrace_traceme() performs no
 // __ptrace_may_access() check (so the target's dumpability is irrelevant);
@@ -612,6 +639,9 @@ func (t *Task) ptraceTraceme() error {
 		// special form of the exited parent case below. In either case,
 		// returning nil here is correct.
 		return nil
+	}
+	if !t.parent.landlockMayTrace(t) {
+		return linuxerr.EPERM
 	}
 	if !t.canTracemeLocked() {
 		return linuxerr.EPERM

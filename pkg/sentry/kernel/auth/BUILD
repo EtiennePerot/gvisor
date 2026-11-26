@@ -76,6 +76,7 @@ go_library(
         "id_map_set.go",
         "key.go",
         "keyset_mutex.go",
+        "landlock.go",
         "user_namespace.go",
         "user_namespace_mutex.go",
     ],

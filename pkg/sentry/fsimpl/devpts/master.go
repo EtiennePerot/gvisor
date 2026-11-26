@@ -275,6 +275,11 @@ func (mfd *masterFileDescription) Ioctl(ctx context.Context, io usermem.IO, sysn
 			return 0, err
 		}
 		defer replicaD.DecRef(t)
+		// Landlock does not check the open of the replica, so a task
+		// restricted by Landlock may not open it this way.
+		if t.LandlockDomain() != nil {
+			return 0, linuxerr.EACCES
+		}
 		replica, err := mfd.t.OpenTTY(t, masterMnt, replicaD.Dentry(), vfs.OpenOptions{
 			Flags: flags & ^uint32(linux.O_CLOEXEC),
 		})

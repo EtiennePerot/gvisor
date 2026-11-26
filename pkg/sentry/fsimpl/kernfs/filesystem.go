@@ -1355,6 +1355,11 @@ func (fs *Filesystem) IsDescendant(vfsroot, vd vfs.VirtualDentry) bool {
 	return genericIsDescendant(fs, vfsroot.Dentry(), vd.Dentry().Impl().(*Dentry))
 }
 
+// WalkAncestors implements vfs.FilesystemImpl.WalkAncestors.
+func (fs *Filesystem) WalkAncestors(d *vfs.Dentry, visit func(*vfs.Dentry) bool) {
+	genericWalkAncestors(fs, d.Impl().(*Dentry), visit)
+}
+
 func (fs *Filesystem) deferDecRefVD(ctx context.Context, vd vfs.VirtualDentry) {
 	if d, ok := vd.Dentry().Impl().(*Dentry); ok && d.fs == fs {
 		// The following is equivalent to vd.DecRef(ctx). This is needed

@@ -1615,6 +1615,7 @@ func (l *Loader) mountCgroupMounts(conf *config.Config, creds *auth.Credentials)
 				InternalMount: true,
 				InternalData:  internalData,
 			},
+			Internal: true,
 		}
 		fs, root, err := l.k.VFS().NewFilesystem(ctx, creds, "cgroup", cgroupfs.Name, mopts)
 		if err != nil {

@@ -1129,6 +1129,9 @@ type ioUsage interface {
 type ioData struct {
 	kernfs.DynamicBytesFile
 
+	// task is the task whose /proc/[pid] directory contains the file.
+	task *kernel.Task
+
 	ioUsage
 }
 
@@ -1136,6 +1139,9 @@ var _ dynamicInode = (*ioData)(nil)
 
 // Generate implements vfs.DynamicBytesSource.Generate.
 func (i *ioData) Generate(ctx context.Context, buf *bytes.Buffer) error {
+	if err := kernel.CheckLandlockTaskAccess(ctx, i.task); err != nil {
+		return err
+	}
 	io := usage.IO{}
 	io.Accumulate(i.IOUsage())
 
@@ -1580,6 +1586,9 @@ func (s *namespaceSymlink) getInode(t *kernel.Task) *nsfs.Inode {
 
 // Readlink implements kernfs.Inode.Readlink.
 func (s *namespaceSymlink) Readlink(ctx context.Context, mnt *vfs.Mount) (string, error) {
+	if err := kernel.CheckLandlockTaskAccess(ctx, s.task); err != nil {
+		return "", err
+	}
 	if err := checkTaskState(s.task); err != nil {
 		return "", err
 	}
@@ -1597,6 +1606,9 @@ func (s *namespaceSymlink) Readlink(ctx context.Context, mnt *vfs.Mount) (string
 
 // Getlink implements kernfs.Inode.Getlink.
 func (s *namespaceSymlink) Getlink(ctx context.Context, mnt *vfs.Mount) (vfs.VirtualDentry, string, error) {
+	if err := kernel.CheckLandlockTaskAccess(ctx, s.task); err != nil {
+		return vfs.VirtualDentry{}, "", err
+	}
 	if err := checkTaskState(s.task); err != nil {
 		return vfs.VirtualDentry{}, "", err
 	}

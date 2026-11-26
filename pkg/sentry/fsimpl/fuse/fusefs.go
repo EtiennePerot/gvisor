@@ -98,6 +98,9 @@ type filesystem struct {
 
 	// clock is a real-time clock used to set timestamps in file operations.
 	clock ktime.Clock
+
+	// landlock maps (nodeID, generation) pairs to LandlockObjects.
+	landlock vfs.LandlockKeyMap
 }
 
 // Name implements vfs.FilesystemType.Name.

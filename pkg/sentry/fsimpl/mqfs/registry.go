@@ -17,6 +17,7 @@ package mqfs
 import (
 	"gvisor.dev/gvisor/pkg/abi/linux"
 	"gvisor.dev/gvisor/pkg/context"
+	"gvisor.dev/gvisor/pkg/errors/linuxerr"
 	"gvisor.dev/gvisor/pkg/sentry/fsimpl/kernfs"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/mq"
@@ -74,7 +75,7 @@ func NewRegistryImpl(ctx context.Context, vfsObj *vfs.VirtualFilesystem, creds *
 	var dentry kernfs.Dentry
 	dentry.InitRoot(&fs.Filesystem, fs.newRootInode(ctx, creds))
 
-	mount := vfsObj.NewDisconnectedMount(vfsfs, dentry.VFSDentry(), &vfs.MountOptions{})
+	mount := vfsObj.NewDisconnectedMount(vfsfs, dentry.VFSDentry(), &vfs.MountOptions{LandlockUnnameable: true})
 
 	return &RegistryImpl{
 		root:  &dentry,
@@ -140,6 +141,11 @@ func (r *RegistryImpl) Destroy(ctx context.Context) {
 
 // newFD returns a new file description created using the given queue and inode.
 func (r *RegistryImpl) newFD(ctx context.Context, q *mq.Queue, inode *queueInode, access mq.AccessType, block bool, flags uint32) (*vfs.FileDescription, error) {
+	// Landlock does not check access to queues opened by name, so a task
+	// restricted by Landlock may not open them.
+	if vfs.LandlockDomainOf(auth.CredentialsFromContext(ctx)) != nil {
+		return nil, linuxerr.EACCES
+	}
 	view, err := mq.NewView(q, access, block)
 	if err != nil {
 		return nil, err

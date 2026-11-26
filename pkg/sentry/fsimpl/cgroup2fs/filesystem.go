@@ -168,6 +168,7 @@ func NewInternalMount(k *kernel.Kernel) *vfs.Mount {
 	fs.mounted.Store(1)
 	return k.VFS().NewDisconnectedMount(fs.VFSFilesystem(), fs.root.VFSDentry(), &vfs.MountOptions{
 		GetFilesystemOptions: vfs.GetFilesystemOptions{InternalMount: true},
+		Internal:             true,
 	})
 }
 

@@ -163,6 +163,17 @@ func (fs *Filesystem) SafeDecRefFD(ctx context.Context, fd *vfs.FileDescription)
 	fd.DecRef(ctx)
 }
 
+// DeferDecRefFD defers dropping a reference on fd until fs processes its
+// deferred references, which kernfs does after it releases Filesystem.mu.
+// Inode methods that kernfs calls with Filesystem.mu locked, such as Getlink,
+// must use DeferDecRefFD instead of SafeDecRefFD: even if fd's dentry belongs
+// to another filesystem, releasing fd may drop references on dentries of this
+// filesystem (for example, a Landlock ruleset holds references on the files
+// that its rules name).
+func (fs *Filesystem) DeferDecRefFD(fd *vfs.FileDescription) {
+	fs.deferDecRef(fd)
+}
+
 // SafeDecRef safely DecRef the virtual dentry making sure DecRef is deferred
 // in case Filesystem.mu is held. See comment on Filesystem.mu.
 func (fs *Filesystem) SafeDecRef(ctx context.Context, vd vfs.VirtualDentry) {
@@ -623,6 +634,11 @@ func (d *Dentry) Watches() *vfs.Watches {
 	return d.inode.Watches()
 }
 
+// LandlockSlot implements vfs.DentryImpl.LandlockSlot.
+func (d *Dentry) LandlockSlot() vfs.LandlockSlot {
+	return d.inode.LandlockSlot()
+}
+
 // OnZeroWatches implements vfs.Dentry.OnZeroWatches.
 func (d *Dentry) OnZeroWatches(context.Context) {}
 
@@ -806,6 +822,10 @@ type Inode interface {
 
 	// Watches returns the set of inotify watches associated with this inode.
 	Watches() *vfs.Watches
+
+	// LandlockSlot returns the slot that locates the Landlock object of this
+	// inode, or nil if Landlock rules cannot name it.
+	LandlockSlot() vfs.LandlockSlot
 
 	// Anonymous indicates that the Inode is anonymous. It will never have
 	// a name or parent.

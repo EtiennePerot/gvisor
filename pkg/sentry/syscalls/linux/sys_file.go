@@ -507,6 +507,9 @@ func PivotRoot(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintp
 	if !t.HasCapabilityIn(linux.CAP_SYS_ADMIN, t.MountNamespace().Owner) {
 		return 0, nil, linuxerr.EPERM
 	}
+	if err := t.LandlockDomain().CheckMountChange(); err != nil {
+		return 0, nil, err
+	}
 
 	newRootPath, err := copyInPath(t, addr1)
 	if err != nil {

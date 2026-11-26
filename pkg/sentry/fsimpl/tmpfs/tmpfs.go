@@ -638,6 +638,11 @@ func (d *dentry) Watches() *vfs.Watches {
 	return &d.inode.watches
 }
 
+// LandlockSlot implements vfs.DentryImpl.LandlockSlot.
+func (d *dentry) LandlockSlot() vfs.LandlockSlot {
+	return &d.inode.landlock
+}
+
 // OnZeroWatches implements vfs.Dentry.OnZeroWatches.
 func (d *dentry) OnZeroWatches(context.Context) {}
 
@@ -688,6 +693,9 @@ type inode struct {
 
 	// Inotify watches for this inode.
 	watches vfs.Watches
+
+	// landlock holds the Landlock object of this inode.
+	landlock vfs.LandlockFileSlot
 
 	impl any // immutable
 }

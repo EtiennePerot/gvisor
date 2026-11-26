@@ -869,12 +869,18 @@ func (*InodeNoStatFS) StatFS(context.Context, *vfs.Filesystem) (linux.Statfs, er
 //
 // +stateify savable
 type InodeWatches struct {
-	watches vfs.Watches
+	watches  vfs.Watches
+	landlock vfs.LandlockFileSlot
 }
 
 // Watches implements Inode.Watches.
 func (i *InodeWatches) Watches() *vfs.Watches {
 	return &i.watches
+}
+
+// LandlockSlot implements Inode.LandlockSlot.
+func (i *InodeWatches) LandlockSlot() vfs.LandlockSlot {
+	return &i.landlock
 }
 
 // InodeAnonymous partially implements Inode.

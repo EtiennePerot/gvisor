@@ -358,6 +358,11 @@ func (fd *Fd) DoCmdReconfigure(ctx context.Context, vfsObj *vfs.VirtualFilesyste
 	if !creds.HasSelfCapability(linux.CAP_SYS_ADMIN) {
 		return linuxerr.EPERM
 	}
+	// The caller's Landlock domain decides, not the domain of the context's
+	// creator.
+	if err := vfs.LandlockDomainOf(auth.CredentialsFromContext(ctx)).CheckMountChange(); err != nil {
+		return err
+	}
 
 	// TODO(gvisor.dev/issues/13450): properly support reconfiguration on underlying filesystems.
 

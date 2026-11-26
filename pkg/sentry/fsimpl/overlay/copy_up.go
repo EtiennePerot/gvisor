@@ -453,7 +453,14 @@ func (d *dentry) copyUpMaybeSyntheticMountpointLocked(ctx context.Context, forSy
 		d.lowerMappings.RemoveAll()
 	}
 
-	d.copiedUp.Store(1)
+	// Marking d copied up makes LandlockSlot return the upper file's slot.
+	// The file keeps its Landlock object: the upper file's slot holds it
+	// before d is marked copied up, atomically with object creation.
+	lowerSlot := d.cachedLandlockSlot(&d.landlockLower, d.lowerVDs[0], d.landlockLinked)
+	upperSlot := d.cachedLandlockSlot(&d.landlockUpper, d.upperVD, false /* byName */)
+	d.fs.vfsfs.ShareLandlockObject(lowerSlot, upperSlot, func() {
+		d.copiedUp.Store(1)
+	})
 	return nil
 }
 

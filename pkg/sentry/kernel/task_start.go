@@ -171,6 +171,9 @@ func (ts *TaskSet) NewTask(ctx context.Context, cfg *TaskConfig) (*Task, error) 
 		cleanup()
 		return nil, err
 	}
+	// The new task holds a reference on its Landlock domain. The domain
+	// remains alive until here because the caller's credentials refer to it.
+	t.LandlockDomain().IncRef()
 	return t, nil
 }
 

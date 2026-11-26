@@ -1096,6 +1096,9 @@ type inode struct {
 	// a more in-depth discussion on this matter).
 	watches vfs.Watches
 
+	// landlock holds the Landlock object of this inode.
+	landlock vfs.LandlockFileSlot
+
 	// refs is the reference count of the inode. A dentry holds a reference on the inode
 	// it points to. rsfs is protected by fs.inodeMu.
 	refs inodeRefs
@@ -1878,6 +1881,19 @@ func (d *dentry) InotifyWithParent(ctx context.Context, events, cookie uint32, e
 // Watches implements vfs.DentryImpl.Watches.
 func (d *dentry) Watches() *vfs.Watches {
 	return &d.inode.watches
+}
+
+// LandlockSlot implements vfs.DentryImpl.LandlockSlot.
+//
+// The Landlock object belongs to the inode. Non-directory inodes are shared
+// by inoKey, so a non-directory keeps its object across dentry eviction and
+// revalidation, and hard links share it. Each directory dentry gets its own
+// inode (see getOrCreateInode), so each directory has an identity of its own.
+// In shared interop mode, if the host replaces a directory and revalidation
+// replaces its dentry, the new dentry has a new inode with no object, and
+// rules on the old directory no longer match.
+func (d *dentry) LandlockSlot() vfs.LandlockSlot {
+	return &d.inode.landlock
 }
 
 // contextID is this package's type for context.Context.Value keys.

@@ -19,6 +19,7 @@ import (
 	"gvisor.dev/gvisor/pkg/errors/linuxerr"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
 	"gvisor.dev/gvisor/pkg/sentry/mm"
+	"gvisor.dev/gvisor/pkg/sentry/vfs"
 )
 
 // Credentials returns t's credentials.
@@ -609,4 +610,28 @@ func (t *Task) ClearAmbientCapabilities() {
 	creds := t.Credentials().Fork()
 	creds.AmbientCaps = 0
 	t.creds.Store(creds)
+}
+
+// LandlockDomain returns t's Landlock domain, or nil if t has none.
+func (t *Task) LandlockDomain() *vfs.LandlockDomain {
+	return vfs.LandlockDomainOf(t.Credentials())
+}
+
+// SetLandlockDomain replaces t's Landlock domain with dom, transferring one
+// reference on dom to t and dropping t's reference on any previous domain.
+//
+// Preconditions:
+//   - The caller must be running on the task goroutine.
+//   - dom != nil.
+//
+// +checklocksexclude:t.mu
+func (t *Task) SetLandlockDomain(dom *vfs.LandlockDomain) {
+	t.mu.Lock()
+	oldCreds := t.Credentials()
+	oldDom := vfs.LandlockDomainOf(oldCreds)
+	newCreds := oldCreds.Fork()
+	newCreds.LandlockDomain = dom
+	t.creds.Store(newCreds)
+	t.mu.Unlock()
+	oldDom.DecRef(t)
 }

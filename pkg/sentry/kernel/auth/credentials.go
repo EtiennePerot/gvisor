@@ -64,6 +64,10 @@ type Credentials struct {
 
 	// The user namespace associated with the owner of the credentials.
 	UserNamespace *UserNamespace
+
+	// LandlockDomain is the Landlock security domain enforced on the owner of
+	// the credentials, or nil if the owner has no Landlock domain.
+	LandlockDomain LandlockDomain
 }
 
 // NewAnonymousCredentials returns a set of credentials with no capabilities in

@@ -171,6 +171,11 @@ func (d *mountTestDentry) Watches() *Watches {
 // OnZeroWatches implements DentryImpl.OnZeroWatches.
 func (d *mountTestDentry) OnZeroWatches(context.Context) {}
 
+// LandlockSlot implements DentryImpl.LandlockSlot.
+func (d *mountTestDentry) LandlockSlot() LandlockSlot {
+	return nil
+}
+
 // mountTestSystem is a VirtualFilesystem with a single mount namespace whose
 // root mount is a mountTestFilesystem.
 type mountTestSystem struct {

@@ -238,7 +238,8 @@ func (s *fdSymlink) Getlink(ctx context.Context, mnt *vfs.Mount) (vfs.VirtualDen
 	if file == nil {
 		return vfs.VirtualDentry{}, "", linuxerr.ENOENT
 	}
-	defer s.fs.SafeDecRefFD(ctx, file)
+	// kernfs calls Getlink with Filesystem.mu locked.
+	defer s.fs.DeferDecRefFD(file)
 	vd := file.VirtualDentry()
 	vd.IncRef()
 	return vd, "", nil

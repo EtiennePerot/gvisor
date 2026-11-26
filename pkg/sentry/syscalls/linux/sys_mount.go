@@ -37,6 +37,9 @@ func Mount(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr, 
 	if !creds.HasCapabilityIn(linux.CAP_SYS_ADMIN, t.MountNamespace().Owner) {
 		return 0, nil, linuxerr.EPERM
 	}
+	if err := t.LandlockDomain().CheckMountChange(); err != nil {
+		return 0, nil, err
+	}
 
 	// Ignore magic value that was required before Linux 2.4.
 	if flags&linux.MS_MGC_MSK == linux.MS_MGC_VAL {
@@ -154,6 +157,9 @@ func Umount2(t *kernel.Task, sysno uintptr, args arch.SyscallArguments) (uintptr
 	creds := t.Credentials()
 	if !creds.HasCapabilityIn(linux.CAP_SYS_ADMIN, t.MountNamespace().Owner) {
 		return 0, nil, linuxerr.EPERM
+	}
+	if err := t.LandlockDomain().CheckMountChange(); err != nil {
+		return 0, nil, err
 	}
 
 	const unsupported = linux.MNT_FORCE | linux.MNT_EXPIRE

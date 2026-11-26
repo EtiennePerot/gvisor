@@ -395,6 +395,10 @@ type Config struct {
 	// asynchronous I/O operations.
 	IOUring bool `flag:"iouring"`
 
+	// Landlock controls whether the Landlock syscalls are available. See
+	// LandlockMode.
+	Landlock LandlockMode `flag:"landlock"`
+
 	// DirectFS sets up the sandbox to directly access/mutate the filesystem from
 	// the sentry. Sentry runs with escalated privileges. Gofer process still
 	// exists, but is mostly idle. Not supported in rootless mode.
@@ -1980,6 +1984,57 @@ func (p SignalUnkillablePolicy) String() string {
 		return "linux"
 	default:
 		panic(fmt.Sprintf("invalid signal unkillable policy %d", p))
+	}
+}
+
+// LandlockMode tells whether the Landlock syscalls are available in the
+// sandbox.
+type LandlockMode int
+
+// LandlockMode values.
+const (
+	// LandlockDisabled makes the Landlock syscalls fail with ENOSYS.
+	LandlockDisabled LandlockMode = iota
+
+	// LandlockEnabled makes the Landlock syscalls available. A task that has
+	// restricted itself fails the filesystem operations that the sentry does
+	// not check against its Landlock domain.
+	LandlockEnabled
+)
+
+// Set implements flag.Value. Set(String()) should be idempotent.
+func (m *LandlockMode) Set(v string) error {
+	switch v {
+	case "disabled":
+		*m = LandlockDisabled
+	case "enabled":
+		*m = LandlockEnabled
+	default:
+		return fmt.Errorf("invalid landlock mode %q (must be one of: disabled, enabled)", v)
+	}
+	return nil
+}
+
+// Ptr returns a pointer to m.
+// Useful in flag declaration line.
+func (m LandlockMode) Ptr() *LandlockMode {
+	return &m
+}
+
+// Get implements flag.Getter.
+func (m *LandlockMode) Get() any {
+	return *m
+}
+
+// String implements flag.Value.
+func (m LandlockMode) String() string {
+	switch m {
+	case LandlockDisabled:
+		return "disabled"
+	case LandlockEnabled:
+		return "enabled"
+	default:
+		panic(fmt.Sprintf("invalid landlock mode %d", m))
 	}
 }
 

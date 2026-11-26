@@ -376,6 +376,9 @@ type inode struct {
 
 	// Inotify watches for this inode.
 	watches vfs.Watches
+
+	// landlock holds the Landlock object of this inode.
+	landlock vfs.LandlockFileSlot
 }
 
 // getInode returns the inode identified by nid. A reference on inode is also
@@ -777,6 +780,11 @@ func (d *dentry) InotifyWithParent(ctx context.Context, events, cookie uint32, e
 // Watches implements vfs.DentryImpl.Watches.
 func (d *dentry) Watches() *vfs.Watches {
 	return &d.inode.watches
+}
+
+// LandlockSlot implements vfs.DentryImpl.LandlockSlot.
+func (d *dentry) LandlockSlot() vfs.LandlockSlot {
+	return &d.inode.landlock
 }
 
 // OnZeroWatches implements vfs.DentryImpl.OnZeroWatches.

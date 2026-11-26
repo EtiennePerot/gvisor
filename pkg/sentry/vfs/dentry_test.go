@@ -106,6 +106,10 @@ func (d *dentryTestDentry) Watches() *Watches {
 
 func (d *dentryTestDentry) OnZeroWatches(context.Context) {}
 
+func (d *dentryTestDentry) LandlockSlot() LandlockSlot {
+	return nil
+}
+
 type dentryTestSystem struct {
 	ctx      context.Context
 	creds    *auth.Credentials

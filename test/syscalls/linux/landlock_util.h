@@ -60,6 +60,7 @@ struct landlock_net_port_attr {
 };
 
 constexpr uint32_t LANDLOCK_CREATE_RULESET_VERSION = (1U << 0);
+constexpr uint32_t LANDLOCK_CREATE_RULESET_ERRATA = (1U << 1);
 
 // Filesystem access rights.
 constexpr uint64_t LANDLOCK_ACCESS_FS_EXECUTE = (1ULL << 0);      // v1
@@ -128,6 +129,7 @@ enum ChildResult {
   kDenied = 100,
   kSetup = 101,
   kOther = 102,
+  kUnsupported = 105,
 };
 
 inline int LandlockAbiVersion() {
@@ -190,6 +192,10 @@ inline void ApplyFsPolicy(uint64_t handled_access,
   EnforceOrDie(fd);
 }
 
+inline void ApplyFsPolicyDenyingAll(uint64_t handled_access) {
+  EnforceOrDie(CreateRuleset(handled_access));
+}
+
 inline ChildResult ClassifyFs(int rc) {
   if (rc >= 0) {
     return kAllowed;
@@ -222,6 +228,10 @@ inline ChildResult TryReadOpen(const std::string& path) {
   }
   return errno == EACCES ? kDenied : kOther;
 }
+
+#ifndef SYS_move_mount
+#define SYS_move_mount 429
+#endif
 
 inline sockaddr_in LoopbackAddr(uint16_t port) {
   sockaddr_in addr = {};

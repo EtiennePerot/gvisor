@@ -356,9 +356,9 @@ func (i *taskOwnedInode) getOwner(mode linux.FileMode) (auth.KUID, auth.KGID) {
 
 func newIO(t *kernel.Task, isThreadGroup bool) *ioData {
 	if isThreadGroup {
-		return &ioData{ioUsage: t.ThreadGroup()}
+		return &ioData{task: t, ioUsage: t.ThreadGroup()}
 	}
-	return &ioData{ioUsage: t}
+	return &ioData{task: t, ioUsage: t}
 }
 
 // newFakeCgroupData creates an inode that shows fake cgroup

@@ -482,6 +482,10 @@ type Kernel struct {
 	// IOUringEnabled determines if io_uring is enabled.
 	IOUringEnabled bool
 
+	// LandlockEnabled determines if the Landlock syscalls are available. If
+	// false, they fail with ENOSYS. LandlockEnabled is immutable.
+	LandlockEnabled bool
+
 	// MaxKeySetSize is the maximum number of keys in a key set.
 	MaxKeySetSize atomicbitops.Int32
 
@@ -678,7 +682,7 @@ func (k *Kernel) Init(args InitKernelArgs) error {
 		return fmt.Errorf("failed to create pipefs filesystem: %v", err)
 	}
 	defer pipeFilesystem.DecRef(ctx)
-	pipeMount := k.vfs.NewDisconnectedMount(pipeFilesystem, nil, &vfs.MountOptions{})
+	pipeMount := k.vfs.NewDisconnectedMount(pipeFilesystem, nil, &vfs.MountOptions{Internal: true})
 	k.pipeMount = pipeMount
 
 	nsfsFilesystem, err := nsfs.NewFilesystem(&k.vfs)
@@ -686,7 +690,7 @@ func (k *Kernel) Init(args InitKernelArgs) error {
 		return fmt.Errorf("failed to create nsfs filesystem: %v", err)
 	}
 	defer nsfsFilesystem.DecRef(ctx)
-	k.nsfsMount = k.vfs.NewDisconnectedMount(nsfsFilesystem, nil, &vfs.MountOptions{})
+	k.nsfsMount = k.vfs.NewDisconnectedMount(nsfsFilesystem, nil, &vfs.MountOptions{Internal: true})
 	k.rootUserNamespace.SetInode(nsfs.NewInode(ctx, k.nsfsMount, k.rootUserNamespace))
 	k.rootNetworkNamespace.SetInode(nsfs.NewInode(ctx, k.nsfsMount, k.rootNetworkNamespace))
 	k.rootIPCNamespace.SetInode(nsfs.NewInode(ctx, k.nsfsMount, k.rootIPCNamespace))
@@ -709,14 +713,14 @@ func (k *Kernel) Init(args InitKernelArgs) error {
 	}
 	defer tmpfsFilesystem.DecRef(ctx)
 	defer tmpfsRoot.DecRef(ctx)
-	k.shmMount = k.vfs.NewDisconnectedMount(tmpfsFilesystem, tmpfsRoot, &vfs.MountOptions{})
+	k.shmMount = k.vfs.NewDisconnectedMount(tmpfsFilesystem, tmpfsRoot, &vfs.MountOptions{Internal: true})
 
 	socketFilesystem, err := sockfs.NewFilesystem(&k.vfs)
 	if err != nil {
 		return fmt.Errorf("failed to create sockfs filesystem: %v", err)
 	}
 	defer socketFilesystem.DecRef(ctx)
-	k.socketMount = k.vfs.NewDisconnectedMount(socketFilesystem, nil, &vfs.MountOptions{})
+	k.socketMount = k.vfs.NewDisconnectedMount(socketFilesystem, nil, &vfs.MountOptions{Internal: true})
 
 	sysVShmDevMinor, err := k.vfs.GetAnonBlockDevMinor()
 	if err != nil {

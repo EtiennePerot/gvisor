@@ -144,6 +144,15 @@ type DentryImpl interface {
 	// a filesystem operation that holds filesystem locks, so OnZeroWatches
 	// must not acquire those locks.
 	OnZeroWatches(ctx context.Context)
+
+	// LandlockSlot returns the slot that locates the Landlock object of the
+	// file corresponding to the Dentry, or nil if Landlock rules cannot name
+	// the file. Dentries that represent the same file to Landlock rules return
+	// slots that locate the same object.
+	//
+	// The caller does not need to hold a reference on the dentry.
+	// LandlockSlot must not acquire locks.
+	LandlockSlot() LandlockSlot
 }
 
 // IncRef increments d's reference count.

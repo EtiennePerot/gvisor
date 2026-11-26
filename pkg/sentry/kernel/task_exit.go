@@ -360,6 +360,7 @@ func (*runExitMain) execute(t *Task) taskRunState {
 	netns := t.netns
 	t.netns = nil
 	userns := t.Credentials().UserNamespace
+	landlockDom := t.LandlockDomain()
 	childPIDNS := t.childPIDNamespace
 	t.childPIDNamespace = nil
 	t.mu.Unlock()
@@ -369,6 +370,7 @@ func (*runExitMain) execute(t *Task) taskRunState {
 	cgroupns.DecRef(t)
 	netns.DecRef(t)
 	userns.DecRef(t)
+	landlockDom.DecRef(t)
 	if childPIDNS != nil {
 		childPIDNS.DecRef(t)
 	}

@@ -390,7 +390,14 @@ syscall_test(
 
 syscall_test(
     add_overlay = True,
+    save = False,
     test = "//test/syscalls/linux:landlock_v1_test",
+)
+
+syscall_test(
+    add_overlay = True,
+    save = False,
+    test = "//test/syscalls/linux:landlock_v1_selftests_test",
 )
 
 syscall_test(
