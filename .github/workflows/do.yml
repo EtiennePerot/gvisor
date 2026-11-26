@@ -1,0 +1,46 @@
+# Builds runsc and runs `runsc do`, rootless and as root.
+name: Do tests
+
+"on":
+  pull_request:
+  push:
+    branches:
+      - master
+      - "release/**"
+
+# A new push to a pull request cancels the older run. Each push to master or a
+# release branch gets its own group, so its run is never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  do-tests:
+    name: do-tests (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    # Ubuntu 23.10+ uses AppArmor to restrict unprivileged user namespaces,
+    # which breaks rootless runsc.
+    - name: Allow unprivileged user namespaces
+      run: |
+        if [[ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" == "1" ]]; then
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+        fi
+
+    - run: make do-tests

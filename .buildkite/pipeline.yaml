@@ -526,13 +526,6 @@ steps:
       arch: "amd64"
       queue: "default"
   - <<: *common
-    <<: *source_test
-    label: ":coffee: Do tests"
-    command: make do-tests
-    agents:
-      arch: "amd64"
-      queue: "default"
-  - <<: *common
     <<: *docker
     <<: *source_test
     label: ":person_in_lotus_position: KVM tests"
