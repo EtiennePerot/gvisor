@@ -41,8 +41,7 @@ func TestOptionsConfigKey(t *testing.T) {
 		"UDSOpenEnabled":   func(opt *Options) { opt.UDSOpenEnabled = !opt.UDSOpenEnabled },
 		"UDSCreateEnabled": func(opt *Options) { opt.UDSCreateEnabled = !opt.UDSCreateEnabled },
 		"ProfileEnabled":   func(opt *Options) { opt.ProfileEnabled = !opt.ProfileEnabled },
-		"DirectFS":         func(opt *Options) { opt.DirectFS = !opt.DirectFS },
-		"LisafsNeeded":     func(opt *Options) { opt.LisafsNeeded = !opt.LisafsNeeded },
+		"HostFS":           func(opt *Options) { opt.HostFS = (opt.HostFS + 1) % (HostFSReadWrite + 1) },
 		"CgoEnabled":       func(opt *Options) { opt.CgoEnabled = !opt.CgoEnabled },
 		"ExtraRules": func(opt *Options) {
 			if len(opt.ExtraRules) == 0 {
@@ -226,29 +225,26 @@ func TestRPCSyscalls(t *testing.T) {
 	negOne := ^uint64(0)
 
 	var cases []Options
-	for _, directFS := range []bool{false, true} {
-		for _, lisafsNeeded := range []bool{false, true} {
-			for _, udsOpen := range []bool{false, true} {
-				for _, udsCreate := range []bool{false, true} {
-					cases = append(cases, Options{
-						DirectFS:         directFS,
-						LisafsNeeded:     lisafsNeeded,
-						ProcSelfFD:       procSelfFD,
-						UDSOpenEnabled:   udsOpen,
-						UDSCreateEnabled: udsCreate,
-					})
-				}
+	for _, hostFS := range []HostFSAccess{HostFSNone, HostFSReadWrite} {
+		for _, udsOpen := range []bool{false, true} {
+			for _, udsCreate := range []bool{false, true} {
+				cases = append(cases, Options{
+					HostFS:           hostFS,
+					ProcSelfFD:       procSelfFD,
+					UDSOpenEnabled:   udsOpen,
+					UDSCreateEnabled: udsCreate,
+				})
 			}
 		}
 	}
 	cases = append(cases,
-		Options{DirectFS: true, ProcSelfFD: procSelfFD, ProfileEnabled: true},
-		Options{DirectFS: true, ProcSelfFD: procSelfFD, CgoEnabled: true},
+		Options{HostFS: HostFSNone, ProcSelfFD: procSelfFD, ProfileEnabled: true},
+		Options{HostFS: HostFSNone, ProcSelfFD: procSelfFD, CgoEnabled: true},
 	)
 
 	for _, opt := range cases {
 		t.Run(opt.ConfigKey(), func(t *testing.T) {
-			fileRPCs := !opt.DirectFS || opt.LisafsNeeded
+			fileRPCs := opt.HostFS != HostFSNone
 			bindRPC := opt.UDSCreateEnabled
 			compiled := compileFilter(t, opt)
 			for _, sc := range []struct {
@@ -308,13 +304,9 @@ func TestRPCSyscalls(t *testing.T) {
 func TestMknodat(t *testing.T) {
 	atFDCWD32 := int32(linux.AT_FDCWD)
 	atFDCWD64 := int64(linux.AT_FDCWD)
-	for _, opt := range []Options{
-		{DirectFS: false},
-		{DirectFS: true},
-		{DirectFS: true, LisafsNeeded: true},
-	} {
-		compiled := compileFilter(t, opt)
-		lisafsEnabled := !opt.DirectFS || opt.LisafsNeeded
+	for _, hostFS := range []HostFSAccess{HostFSNone, HostFSReadWrite} {
+		compiled := compileFilter(t, Options{HostFS: hostFS})
+		lisafsEnabled := hostFS == HostFSReadWrite
 		for _, tc := range []struct {
 			name    string
 			args    [6]uint64
@@ -338,8 +330,44 @@ func TestMknodat(t *testing.T) {
 			{"negative FD", [6]uint64{^uint64(0), 0x1000, unix.S_IFREG | 0o644, 0}, false},
 		} {
 			if allowed := filterAllows(t, compiled, unix.SYS_MKNODAT, tc.args); allowed != tc.allowed {
-				t.Errorf("%s %s: allowed=%t, want %t", opt.ConfigKey(), tc.name, allowed, tc.allowed)
+				t.Errorf("HostFS=%v %s: allowed=%t, want %t", hostFS, tc.name, allowed, tc.allowed)
 			}
+		}
+	}
+}
+
+func TestHostFSAccess(t *testing.T) {
+	for _, tc := range []struct {
+		level HostFSAccess
+		want  string
+	}{
+		{HostFSNone, "none"},
+		{HostFSReadWrite, "readwrite"},
+		{HostFSAccess(-1), "HostFSAccess(-1)"},
+		{HostFSReadWrite + 1, "HostFSAccess(2)"},
+	} {
+		if got := tc.level.String(); got != tc.want {
+			t.Errorf("HostFSAccess(%d).String() = %q, want %q", tc.level, got, tc.want)
+		}
+	}
+
+	for _, invalid := range []HostFSAccess{-1, HostFSReadWrite + 1} {
+		opt := Options{HostFS: invalid}
+		for _, tc := range []struct {
+			name string
+			fn   func()
+		}{
+			{"Vars", func() { _ = opt.Vars() }},
+			{"Rules", func() { _, _ = opt.Rules() }},
+		} {
+			func() {
+				defer func() {
+					if r := recover(); r == nil {
+						t.Errorf("Options{HostFS: %d}.%s() did not panic", invalid, tc.name)
+					}
+				}()
+				tc.fn()
+			}()
 		}
 	}
 }

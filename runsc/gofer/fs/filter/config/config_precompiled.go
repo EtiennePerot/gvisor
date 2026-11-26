@@ -60,22 +60,13 @@ func optionsToPrecompile() []Options {
 			return []Options{noProfile}
 		},
 
-		// DirectFS: both on and off.
+		// Expand the levels of access to the host filesystem.
 		func(opt Options) []Options {
-			directfs := opt
-			directfs.DirectFS = true
-			noDirectfs := opt
-			noDirectfs.DirectFS = false
-			return []Options{directfs, noDirectfs}
-		},
-		// LisaFS: Both on and off.
-		// Which one is used depends on the set of mounts of the sandbox.
-		func(opt Options) []Options {
-			lisafs := opt
-			lisafs.LisafsNeeded = true
-			noLisafs := opt
-			noLisafs.LisafsNeeded = false
-			return []Options{lisafs, noLisafs}
+			readWrite := opt
+			readWrite.HostFS = HostFSReadWrite
+			none := opt
+			none.HostFS = HostFSNone
+			return []Options{readWrite, none}
 		},
 
 		// Expand the sets of vendor syscalls that may be available.

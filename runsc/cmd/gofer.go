@@ -397,12 +397,16 @@ func (g *Gofer) Execute(_ context.Context, f *flag.FlagSet, args ...any) subcomm
 	if procSelfFD < 0 {
 		util.Fatalf("procSelfFD is not open")
 	}
+	hostFS := filter.HostFSNone
+	if !conf.DirectFS || lisafsNeeded {
+		// The Sentry does not use directfs for every mount.
+		hostFS = filter.HostFSReadWrite
+	}
 	opts := filter.Options{
 		UDSOpenEnabled:   conf.GetHostUDS().AllowOpen(),
 		UDSCreateEnabled: conf.GetHostUDS().AllowCreate(),
 		ProfileEnabled:   profileOpts.Enabled(),
-		DirectFS:         conf.DirectFS,
-		LisafsNeeded:     lisafsNeeded,
+		HostFS:           hostFS,
 		ProcSelfFD:       uint32(procSelfFD),
 		CgoEnabled:       config.CgoEnabled,
 		VendorSyscalls:   filter.HostVendorSyscalls(),
