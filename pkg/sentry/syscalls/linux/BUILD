@@ -1,5 +1,4 @@
-load("//pkg/sentry/syscalls/linux/genlinuxsyscalls:defs.bzl", "go_library_srcs")
-load("//tools:defs.bzl", "go_library", "go_test")
+load("//tools:defs.bzl", "go_library", "go_library_srcs", "go_test")
 
 package(
     default_applicable_licenses = ["//:license"],
