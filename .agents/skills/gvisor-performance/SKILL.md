@@ -148,3 +148,11 @@ and GC load in gVisor while a specific workload runs in the sandbox is.
 If your change reduces the number of allocations inside a certain codepath to
 zero, then you should add the `+checkescape` annotation to ensure this does not
 regress.
+
+### Help users avoid performance issues
+
+If your change introduces code that features a fallback or a condition where
+best-in-class performance cannot be achieved (e.g. it depends on a kernel
+feature that is detected as not being available on the current host), the
+slower codepath should log a warning-level log line with the prefix `PERF:`.
+This helps users self-diagnose perf issues with an easy-to-grep log pattern.

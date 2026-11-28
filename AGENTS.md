@@ -304,6 +304,10 @@ Do not run adversarial review:
 -   On changes that the human said are not meant to go upstream, such as
     exploratory prototypes, debug instrumentation, or local benchmark scripts.
 -   When the human explicitly tells you to skip it.
+-   Before you have a solid understanding of the intent and scope of the change
+    at hand. Confirm with the human if this is unclear before proceeding.
+-   On individual changes of a larger whole that is being split up, when that
+    larger whole has already been fully adversarially-reviewed.
 
 Scale the number of sub-agents to the size and risk of the change (a one-line
 fix needs fewer reviewers than a new Sentry feature).
@@ -353,6 +357,9 @@ The applicable set of sub-agents depends on the type of change. Consider these:
     strictly fixing actively-invalid documentation, not to adding a litany of
     caveats to existing still-generally-correct documentation. If in doubt, ask
     the human if it is worth it.
+-   Run a **change-simplification agent** looking for ways in which the change
+    can be made simpler and/or smaller. Must be present for any change larger
+    than a dozen non-test, non-comment, non-whitespace SLoC.
 -   Run a **free-range agent** which is given the task to find what other
     sub-agents to spawn beyond the ones from the set above that are worth
     considering for the change at hand. Must be present for any change.
@@ -376,7 +383,11 @@ former arguments to determine whether they still hold. Do not reject a finding
 unless the sub-agent agrees with your reasoning for doing so. If you still
 disagree after three exchanges, list the finding as disputed in your report and
 let the human decide. If your eventual conclusion is that the finding should be
-acted upon, then implement it.
+acted upon, then implement it. If a rejected finding keeps coming up over and
+over by multiple sub-agents, you may add it to the brief shared with sub-agents,
+or in some cases it may be appropriate to leave a source code comment explaining
+this, so long as such a comment doesn't violate the repository's
+no-temporal-comments guidance.
 
 Review sub-agents may run tests or perform read-only operations without asking
 you for permission; do not tell them otherwise. If they need to modify code in
